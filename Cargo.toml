@@ -1,0 +1,65 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["work"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[workspace.dependencies]
+anyhow = "=1.0.104"
+bytemuck = { version = "=1.25.2", features = ["extern_crate_alloc"] }
+clap = { version = "4.6", features = ["derive"] }
+deunicode = "=1.6.2"
+flate2 = "=1.1.10"
+hex = "=0.4.3"
+memmap2 = "0.9"
+osmpbf = "=0.3.8"
+parquet = { version = "=60.0.0", default-features = false, features = ["arrow", "zstd", "snap"] }
+arrow-array = "=60.0.0"
+arrow-schema = "=60.0.0"
+rand = "=0.9.5"
+rayon = "=1.12.0"
+routingkit-cch = { version = "=0.1.4", features = ["openmp"] }
+safetensors = "=0.8.0"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+sha2 = "=0.11.1"
+strsim = "=0.11.1"
+toml = "0.9"
+
+blobmap-format = { path = "crates/format" }
+blobmap-fixtures = { path = "crates/fixtures" }
+blobmap-profile = { path = "crates/profile" }
+blobmap-osm = { path = "crates/osm" }
+blobmap-graph = { path = "crates/graph" }
+blobmap-order = { path = "crates/order" }
+blobmap-cch = { path = "crates/cch" }
+blobmap-overture = { path = "crates/overture" }
+blobmap-snap = { path = "crates/snap" }
+blobmap-build = { path = "crates/build" }
+blobmap-runtime = { path = "crates/runtime" }
+blobmap-conformance = { path = "crates/conformance" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+needless_range_loop = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
+
+# RoutingKit's nested dissection with OpenMP tasks, merged in the sequential order: the
+# order is bit-identical to the single-threaded crate's.
+[patch.crates-io]
+routingkit-cch = { path = "vendor/routingkit-cch" }
+
+[profile.release]
+debug = "line-tables-only"
+
+[profile.dev]
+opt-level = 1
