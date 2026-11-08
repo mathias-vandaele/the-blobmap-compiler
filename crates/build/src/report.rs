@@ -35,7 +35,8 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
             }
             let kept = ids.addresses.iter().copied().chain(ids.places.iter().map(|&p| c.addresses.len() + p));
             for i in kept {
-                if let Some(x) = snaps[m].trapped_at[i] {
+                let x = snaps[m].at[i].trapped;
+                if x != blobmap_format::NONE {
                     *ids_in.entry(x).or_default().entry(mode).or_default() += 1;
                 }
             }

@@ -7,7 +7,8 @@ use blobmap_format::{INF, NONE, Tensor, Unit};
 use blobmap_graph::active::METRICS;
 use blobmap_overture::{Catalog, Id, Taxonomy};
 use blobmap_snap::modes::{active_expert, car_expert};
-use blobmap_snap::{Found, Grid, Membership, Sets, parts};
+use blobmap_snap::{Grid, Membership, Sets, Snapped, parts};
+use rayon::prelude::*;
 
 use crate::family::{Active, Car};
 use crate::hier::Built;
@@ -19,8 +20,7 @@ pub const MODES: [(&str, &str); 3] = [("car", "car"), ("bike", "active"), ("walk
 /// One mode's snapping of every point: the outcome, and the trapped expert holding the
 /// nearest eligible piece, if any (for the data report, SPEC §3).
 pub struct ModeSnap {
-    pub found: Vec<Found>,
-    pub trapped_at: Vec<Option<u32>>,
+    pub at: Vec<Snapped>,
 }
 
 pub struct Families<'a> {
@@ -45,22 +45,25 @@ pub fn snap(f: &Families, points: &[(f64, f64)]) -> Vec<ModeSnap> {
             "car" => (&cgrid, car.p, Membership::car(car.p, car.g, &car.e), f.car_radius_m),
             m => (&agrid, act.p, Membership::active(act.p, act.g, &act.e, METRICS.iter().position(|x| *x == m).unwrap()), f.active_radius_m),
         };
-        let found = grid.find_all(p, points, radius, &sets as &dyn Sets);
-        let trapped_at = found
-            .iter()
-            .map(|fd| {
-                let k = fd.eligible?.piece as usize;
-                if sets.servable(k as u32) {
-                    return None;
-                }
-                if mode == "car" {
-                    car.g.seg_of_piece[k].iter().filter(|&&s| s != NONE).map(|&s| car.e.of[s as usize]).filter(|&x| car.e.trapped[x as usize]).min()
-                } else {
-                    [act.p.u[k], act.p.v[k]].iter().map(|&v| act.e.of[v as usize]).filter(|&x| act.e.trapped[x as usize]).min()
-                }
+        let trapped = |k: usize| -> Option<u32> {
+            if sets.servable(k as u32) {
+                return None;
+            }
+            if mode == "car" {
+                car.g.seg_of_piece[k].iter().filter(|&&s| s != NONE).map(|&s| car.e.of[s as usize]).filter(|&x| car.e.trapped[x as usize]).min()
+            } else {
+                [act.p.u[k], act.p.v[k]].iter().map(|&v| act.e.of[v as usize]).filter(|&x| act.e.trapped[x as usize]).min()
+            }
+        };
+        let at = points
+            .par_iter()
+            .map(|&(lat, lon)| {
+                let fd = grid.find(p, lat, lon, radius, &sets as &dyn Sets);
+                let t = fd.eligible.and_then(|h| trapped(h.piece as usize)).unwrap_or(NONE);
+                Snapped::new(&fd, t)
             })
             .collect();
-        out.push(ModeSnap { found, trapped_at });
+        out.push(ModeSnap { at });
     }
     out
 }
@@ -79,7 +82,7 @@ pub struct Ids {
 /// within that mode's radius (SPEC §3); aliases follow their kept place.
 pub fn select(c: &Catalog, snaps: &[ModeSnap], polygon: bool) -> Ids {
     let na = c.addresses.len();
-    let inside = |i: usize| polygon || snaps.iter().any(|s| s.found[i].any.is_some());
+    let inside = |i: usize| polygon || snaps.iter().any(|s| s.at[i].any);
     let addresses: Vec<usize> = (0..na).filter(|&i| inside(i)).collect();
     let places: Vec<usize> = (0..c.places.len()).filter(|&p| inside(na + p)).collect();
     let mut new_place = vec![NONE; c.places.len()];
@@ -120,7 +123,7 @@ pub fn unit(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash:
                 *counts.entry("FilteredPlace".into()).or_default() += 1;
                 continue;
             }
-            let hit = match snaps[m].found[pt].outcome() {
+            let (piece, frac) = match snaps[m].at[pt].outcome() {
                 Ok(h) => h,
                 Err((code, dist)) => {
                     rid.push(i as u32);
@@ -131,7 +134,7 @@ pub fn unit(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash:
                 }
             };
             *counts.entry("served".into()).or_default() += 1;
-            let k = hit.piece as usize;
+            let k = piece as usize;
             if *mode == "car" {
                 let (car, b) = (f.car, f.car_built);
                 let x = car_expert(car.g, &car.e, k).expect("servable");
@@ -142,7 +145,7 @@ pub fn unit(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash:
                         continue;
                     }
                     node[2 * i + d] = b.layout_of[s as usize];
-                    let g = if d == 0 { hit.frac } else { 1.0 - hit.frac };
+                    let g = if d == 0 { frac } else { 1.0 - frac };
                     let (before, after) = parts(car.g.w[s as usize], g);
                     off[4 * i + 2 * d] = before;
                     off[4 * i + 2 * d + 1] = after;
@@ -154,9 +157,9 @@ pub fn unit(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash:
                 expert[i] = x;
                 let [along, against] = act.g.road_of_piece[k];
                 let (uu, vv, fu, ruv, rvu) = if along != NONE {
-                    (act.p.u[k], act.p.v[k], hit.frac, along, against)
+                    (act.p.u[k], act.p.v[k], frac, along, against)
                 } else {
-                    (act.p.v[k], act.p.u[k], 1.0 - hit.frac, against, along)
+                    (act.p.v[k], act.p.u[k], 1.0 - frac, against, along)
                 };
                 node[2 * i] = b.layout_of[uu as usize];
                 node[2 * i + 1] = b.layout_of[vv as usize];

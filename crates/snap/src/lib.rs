@@ -51,6 +51,34 @@ impl Found {
     }
 }
 
+/// What a build keeps of a `Found`: whether any piece of the family's graph is within the
+/// radius, the outcome, and a trapped expert for the data report (`u32::MAX` for none).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Snapped {
+    pub any: bool,
+    /// The reason code when not served, else 0.
+    pub code: u8,
+    pub piece: u32,
+    pub trapped: u32,
+    pub reason_m: f32,
+    pub frac: f64,
+}
+
+impl Snapped {
+    pub fn new(f: &Found, trapped: u32) -> Snapped {
+        let base = Snapped { any: f.any.is_some(), code: 0, piece: u32::MAX, trapped, reason_m: 0.0, frac: 0.0 };
+        match f.outcome() {
+            Ok(h) => Snapped { piece: h.piece, frac: h.frac, ..base },
+            Err((code, m)) => Snapped { code, reason_m: m, ..base },
+        }
+    }
+
+    /// The piece and fraction to serve on, or the reason and its distance.
+    pub fn outcome(&self) -> Result<(u32, f64), (u8, f32)> {
+        if self.code == 0 { Ok((self.piece, self.frac)) } else { Err((self.code, self.reason_m)) }
+    }
+}
+
 /// What a mode may stand on: membership of the three sets, by piece.
 pub trait Sets: Sync {
     fn in_graph(&self, piece: u32) -> bool;
