@@ -106,7 +106,7 @@ impl Catalog {
                 *licenses.entry(l.clone()).or_default() += 1;
             }
         }
-        addresses.sort_by(|a, b| a.id.cmp(&b.id));
+        addresses.sort_by_key(|a| a.id);
         let key = |k: &Option<String>, stats: &mut CatalogStats| -> u16 {
             match k {
                 None => NONE16,
@@ -149,7 +149,7 @@ impl Catalog {
                 None => out.push(p),
             }
         }
-        out.sort_by(|a, b| a.0.id.cmp(&b.0.id));
+        out.sort_by_key(|a| a.0.id);
         let places: Vec<Place> = out.into_iter().map(|p| p.0).collect();
         let index = |id: &Id| places.binary_search_by(|p| p.id.cmp(id)).ok().map(|i| i as u32);
         let mut aliases: Vec<(Id, u32)> = alias_raw.iter().map(|(a, k)| (*a, index(k).expect("kept place"))).collect();
