@@ -54,7 +54,7 @@ Place rules (defaults, kept in versioned config; the config hash goes into the m
 | Duplicates | merged when same basic category, within 30 m, compatible names; the highest confidence is kept, ties to the smallest ID |
 | Categories | Overture's taxonomy of the pinned release: basic category and taxonomy hierarchy, with Overture's redirect rules |
 
-Each build writes a data report, outside the model directory (§8).
+Each build writes a data report, outside the model directory (§8): `<model dir>.data-report.json`, next to the model directory.
 - **Place counts** per country and basic category, compared with the previous build's data report and flagging any change above 20 %. The previous report is passed as `--previous-report <file>` (§10); without it there is no comparison.
 - **Trapped components** (§5), which usually point at OSM errors: every one, sorted by size, with its node count, the number of IDs whose nearest eligible piece lies in it, and one OSM way id, so the large ones can be fixed in OSM. Provider score distributions drift between releases, so the rules are reviewed against this report every month.
 
@@ -102,7 +102,7 @@ The only inputs the model accepts are Overture address IDs and Overture place ID
 
 - **Addresses:** a street number, street and postcode; no name, no category.
 - **Places:** something people go to, with a name and categories. A place counts for its primary category and all its alternates. Addresses and places are separate Overture datasets and are not linked by ID.
-- **Category queries:** names first go through Overture's redirect rules. A name that matches no category after that is an error, not an empty answer. There are two namespaces:
+- **Category queries:** names first go through Overture's redirect rules. A name that matches no category after that is an error, not an empty answer. A place's own category keys go through the same redirect rules at build time. There are two namespaces:
   - **Taxonomy:** a query names a taxonomy node. It matches every place whose primary category, or any alternate, is that node or one of its descendants.
   - **Basic categories:** a query names a basic category. It matches the places whose basic category is that one.
 - **Aliases:** the ID of a duplicate merged into another place (§3) is an alias of the kept place.
@@ -113,7 +113,7 @@ The only inputs the model accepts are Overture address IDs and Overture place ID
   - **ACTIVE:** bike and walk snap separately on the family's shared graph. One ID may stand on different pieces, even in different experts, for the two modes. Each entry holds the two ends of its piece, with offsets for that mode's metric.
   - A direction the mode may not use has offset ∞. An example is a bike against a one-way it can neither ride nor push along.
   - Offsets are whole seconds (§7).
-- **Snapping happens once, at compile time.** An ID snaps to the nearest eligible road piece within 2 km for car and 500 m for bike and walk. An ID whose closest point falls exactly on a node stands at that node. Pieces in trapped components (§5) are skipped: the ID snaps to the next nearest eligible piece within the radius, or gets the reason code TrappedComponent if there is none. Only the result is stored; no geometry or coordinate index ships in the model.
+- **Snapping happens once, at compile time.** An ID snaps to the nearest eligible road piece within 2 km for car and 500 m for bike and walk. An ID whose closest point falls exactly on a node stands at that node. Pieces in trapped components (§5) are skipped: the ID snaps to the next nearest eligible piece within the radius, or gets the reason code TrappedComponent if there is none. An ACTIVE piece whose two ends lie in different experts lies on no route, and is skipped the same way. Only the result is stored; no geometry or coordinate index ships in the model.
 - **Eligibility:** only road pieces in the mode's graph are eligible. For bike or walk, those are the pieces of the shared graph with at least one direction that mode may use. For car: no motorways, trunk roads, or their links and ramps. For every mode: no bridges, tunnels or covered pieces, so an address never lands on an overpass or in a tunnel. Service roads stay eligible. The exact rules live in the profile config.
 - **Not served:** an ID that fails to snap for a mode keeps a reason code for that mode:
   - `NoRoad`: no piece of the family's graph within the mode's radius;
@@ -137,6 +137,10 @@ Every time in the model and in every answer is an integer number of seconds in `
   - **Turn costs (CAR):** each is rounded once, to the nearest second.
   - **Offsets of an ID (§6):** the offset before the ID is the road's whole-second time times the fraction of the piece's length before the ID, rounded once. The offset after the ID is the rest, so the two always sum to the road's time.
   - Shortcuts are exact integer sums. No other rounding happens anywhere.
+- **Long pieces.** A piece whose master time, in some direction and for some metric, exceeds 65,534 s is cut at compile time into the fewest equal-length parts whose master times are all at most 65,534 s, with new nodes along its geometry.
+  - A delay (§4) stays with the part that arrives at it.
+  - The parts keep the piece's way and stay in its rounding groups; they are numbered in order along the way, like any other pieces.
+  - Rounding adds less than one second to a road, so every finite road weight is below 65,535 s. An ID on a long piece therefore keeps finite offsets, and its times stay exact below the cap.
 - **Master times.** The road part also stores each road's time as `f32`, for re-customization and later training. Runtimes answer from the `u16` metrics only.
 - **Indices** are `u32`.
 - **Tie-break.** When several answers share the same time, the smallest Overture ID wins: the nearest place, the meeting point, any reported argmin. IDs compare as UUIDs in their canonical lower-case text form. Routes themselves are not exposed, so their ties do not matter.
@@ -170,7 +174,8 @@ The spec defines each operation by its exact result, never by an algorithm. A ru
 | multi-source column | for each ID, the time to the nearest of the sources, each source with an optional start time |
 | `reachable_from_all` / `_any(sources, T, mode)` | IDs within T of every source / of at least one |
 | `multi_criteria(expr)` | the IDs satisfying a boolean expression over (target, mode, direction, max) terms; or the top k by a weighted score (below) |
-| chained trip | car to a place of a transfer category (car parks), plus a fixed penalty, then walk: the minimum over transfer places |
+| `chained(a, b, transfer_category, penalty)` | min over transfer places p of car(a, p) + penalty + walk(p, b), and that p |
+| chained column `(id, transfer_category, penalty, dir)` | for each ID, the chained time from `id` (`from`) or to `id` (`to`) |
 
 - **Direction:** `from` is the time from the sources to each ID; `to` is the time from each ID to the sources (the reversed graph). One-way streets make them differ.
 - **Same ID:** 0 s.
@@ -179,6 +184,16 @@ The spec defines each operation by its exact result, never by an algorithm. A ru
 - **Mixed modes:** terms of one expression may use different modes; they combine per ID.
 - **Ties:** the smallest Overture ID wins (§7).
 - **Reasons:** an ID that is not served for the mode an operation needs answers its reason (§6).
+
+**Chained trips.** A chained trip is always car, then walk: car to a transfer place (car parks, say), a fixed penalty, then walk.
+- **Transfer places:** the kept places that match the transfer category (§6) and are served for both car and walk.
+- **Point to point:** `chained(a, b, transfer_category, penalty)` = min over transfer places p of car(a, p) + penalty + walk(p, b).
+  - `a` must be served for car and `b` for walk; otherwise the answer is that ID's reason.
+  - The answer is the time and p, ties to the smallest ID (§7). When no p gives a time below the cap, it is `BEYOND`, with no place.
+  - The formula holds as written, also when a = b: the trip always passes a transfer place.
+- **Column:** `dir` `from` gives, for every ID y, the chained time from `id` to y; `to` gives, for every y, the chained time from y to `id`. The trip is car then walk in both.
+  - `id` must be served for its leg's mode: car for `from`, walk for `to`. An ID not served for the other leg's mode gets `BEYOND`, as in a column.
+- **Arithmetic:** `penalty` is whole seconds below 65,535, and the sum saturates (§7).
 
 **`multi_criteria`.** The expression is a JSON tree:
 - **A term:** `{"term": {"target": T, "mode": m, "dir": "from" | "to", "max": secs}}`, where T is one of:
@@ -208,11 +223,13 @@ One command builds a model from a `.pbf` and an Overture release, deterministica
 
 ```
 blobc build   --pbf <file.osm.pbf> --overture <release dir> --config <config dir> --out <model dir> [--extent <poly>] [--previous-report <file>]
-blobc verify  <model dir> [--tier tiny|small|region|country]
+blobc verify  <model dir> --tier tiny|small|region|country --data <dir> [--golden <dir>] [--mutants]
 blobc inspect <model dir>
 ```
 
-- **Memory:** peak RSS of at most 62 GB for any input. Cells (§5) and memory-mapped intermediates make this hold for a continent. Every build reports each stage's wall time and peak RSS, in a build report written outside the model directory (these numbers are not deterministic).
+- **Memory:** peak RSS of at most 62 GB for any input. Cells (§5) and memory-mapped intermediates make this hold for a continent. Every build reports each stage's wall time and peak RSS, in a build report written outside the model directory, as `<model dir>.build-report.json` (these numbers are not deterministic).
+- **Reports:** `--previous-report` reads the data report of an earlier build, `<model dir>.data-report.json` (§3).
+- **Verify:** `--data` is the directory holding the tier's inputs. Each tier lists its input files, by path under that directory and SHA-256, in a tier file in the repository; `verify` checks every one before use and picks the inputs whose `.pbf` and extent match the model's manifest. `--golden` is the root of the golden files, `<root>/<tier>/<inputs>/` (§11).
 - **Determinism:** the same inputs, config and compiler version give byte-identical output, with any thread count. CI checks it.
 - **Time:** no target; up to a week for the world is acceptable.
 - **Cadence:** a full rebuild every month. No incremental build machinery is required.
@@ -240,7 +257,7 @@ Checks:
 - Snapping re-check: re-snapping reproduces the stored entries exactly.
 - Experts: components found as expected on synthetic graphs (islands, one-way traps, a footbridge linking two parts for walkers only); cross-expert pairs unreachable.
 - Cells: an expert built as cells gives the same answers as the same expert built in one piece.
-- The cap: synthetic graphs with routes longer than 18 h give `BEYOND`, and routes just under it stay exact.
+- The cap: synthetic graphs with routes longer than 18 h give `BEYOND`, and routes just under it stay exact; a piece longer than the cap is cut (§7), and an ID on it gets its exact time.
 - Car `to` queries (from each ID to the sources):
   - same-piece pairs on one-way and two-way pieces, in both orders, including equal offsets and the way around the block;
   - routes just under the cap and just over it, in the `to` direction.
@@ -255,7 +272,7 @@ A model built from OSM is a derived database under the ODbL; API answers compute
 
 - **OSM roads:** ODbL. Distributing model files (for example to browsers) means offering them under the ODbL with attribution. Serving answers only needs attribution.
 - **Overture addresses and places:** the licences of each theme and of each address source in the pinned release.
-- **In every model:** a `LICENSES` file in the model directory, generated from the inputs at build time, and the attribution strings in the manifest.
+- **In every model:** a `LICENSES` file in the model directory, generated from the inputs at build time, and the attribution strings in the manifest. Its counts are of the rows present in the model.
 
 ## 13. Milestones
 

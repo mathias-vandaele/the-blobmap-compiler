@@ -22,7 +22,8 @@ Contents: §1 conventions · §2 files · §3 manifest · §4 storage units and 
 - **Times** are `U16` seconds with `INF = 65535` (SPEC §7). `a ⊕ b` is
   `min(a + b, 65535)`, computed in at least 17 bits; it is the only addition used below.
 - **Master times** are `F32` seconds. A road a metric may not use has `+∞` (`0x7F800000`).
-  No master time is NaN or negative.
+  No master time is NaN or negative, and every finite one is at most 65534, because long
+  pieces are cut (SPEC §7).
 - **`rnd(x)`**, for a non-negative `f64` x: the nearest integer, ties away from zero (SPEC §7).
 - **Layout id:** a `U32` node number within one expert (§4). **Row:** a position in a pack's
   per-node tensors. **Local link index:** a `U32` position in one pack's per-link tensors.
@@ -180,6 +181,12 @@ So a shard never mixes units (SPEC §8). Chunks are at most the target, so no sh
 - **Expert index:** per family, the experts (SPEC §2, §5) are numbered from 0, by node
   count descending. Ties go to the expert holding the smallest road key `(way, way_seq,
   way_dir)` (§5.3, §5.4). Expert 0 is the largest.
+  - **CAR:** the keys of its segments. A copy has its original's key; an original comes
+    before its copies, and copies of one segment are ordered by their prefixes, compared
+    as sequences of segment keys.
+  - **ACTIVE:** the keys of the roads at its nodes, inside the expert or in the cross
+    table, extended to `(way, way_seq, way_dir, end)` with `end` 0 at the road's tail and
+    1 at its head.
 - **Layout ids:** each expert numbers its own nodes 0 .. n−1 (§5.2). Every reference to a
   node is a layout id within the expert at hand.
 - **Block:** a contiguous range of one expert's layout ids, with its own levels.
@@ -309,7 +316,7 @@ CAR layout nodes are directed road segments (SPEC §4); its roads are the segmen
 | `car.w` | U16 | [n] | integer weight of the segment, §6.1 |
 | `way` | I64 | [n] | OSM way id |
 | `way_dir` | U8 | [n] | 0 along the way's node order, 1 against it |
-| `way_seq` | U32 | [n] | position of the piece on the way, 0-based in node order |
+| `way_seq` | U32 | [n] | position of the piece on the way, 0-based in node order; each part of a cut piece (SPEC §7, long pieces) counts as a piece |
 | `kind` | U8 | [n] | 0 road; 1 ferry: reserved, never written in 2.0 (SPEC §4); 2 via-way copy (below) |
 | `copy_of` | U32 | [n] | for a copy: layout id of its original, if that is in the same expert; else `NONE`. `NONE` for every original |
 | `copy_first` | U32 | [n + 1] | CSR by row into `copies` |
@@ -372,8 +379,9 @@ Roads are stored by the row of their tail (R roads):
 | `<m>.time_s` | F32 | [R] | master time for metric m, with the node costs charged to the road (SPEC §4, §7); `+∞` where m may not use it |
 | `<m>.w` | U16 | [R] | integer weight, §6.1; `INF` where m may not use it |
 
-- Inside a row, roads are ordered by (`road_head`, `way`, `way_seq`). Parallel roads are kept:
-  each is a separate piece that IDs can stand on.
+- Inside a row, roads are ordered by (`road_head`, `way`, `way_seq`, `way_dir`); `way_dir`
+  separates the two directions of a closed piece. Parallel roads are kept: each is a
+  separate piece that IDs can stand on.
 - **Roads between experts:** these roads have ends in different ACTIVE experts and never lie
   on a route. They are kept only because a way's rounding (§6.1) spans all its pieces. They
   live in `road/active/cross/` as `way`, `way_dir`, `way_seq`, `kind`, `<m>.time_s`, `<m>.w`,
@@ -412,6 +420,11 @@ For each group, the exact integer computation:
 3. Sort the roads by tᵢ − fᵢ descending, ties in travel order. The first `extra` roads get
    fᵢ + 1, the others fᵢ.
 4. `w = min(that, 65535)`. A road with `time_s = +∞` has `w = INF`.
+
+**Invariant:** in a model as built, every road with a finite `time_s` has `w < 65535`.
+Every finite `time_s` is at most 65534 (§1), and step 3 adds at most one to ⌊tᵢ⌋, and
+only when tᵢ has a fractional part, so w ≤ ⌈tᵢ⌉. New master times given to a runtime
+carry no such promise; step 4 still applies to them.
 
 Turn costs (`car.turn_cost`) are stored integers (SPEC §7). Re-customization takes them as
 given.
@@ -498,7 +511,8 @@ IDs are in it depends on the extent (SPEC §3).
 
 Each mode has its own entries (SPEC §6). In bytes, "the mode's graph" (SPEC §6) is:
 - for car, the pieces whose segments are CAR layout nodes;
-- for an ACTIVE mode m, the pieces with at least one road of finite `<m>.w`.
+- for an ACTIVE mode m, the pieces with at least one road of finite `<m>.w` (equivalently,
+  of finite `<m>.time_s`, by the invariant of §6.1).
 
 **CAR, `vocab/car/`:**
 
@@ -514,7 +528,7 @@ Each mode has its own entries (SPEC §6). In bytes, "the mode's graph" (SPEC §6
 | --- | --- | --- | --- |
 | `<m>.expert` | U32 | [N] | ACTIVE expert of the ID for mode m, `NONE` if not served for m |
 | `<m>.node` | U32 | [N, 2] | layout ids [U, V] of the piece's ends; U = V for a loop |
-| `<m>.road` | U32 | [N] | local index, in the pack holding U, of the road U → V of the piece; it identifies the piece for the same-piece rule. U and V are ordered so that this road exists |
+| `<m>.road` | U32 | [N] | local index, in the pack holding U, of the road U → V of the piece; it identifies the piece for the same-piece rule. U and V are ordered so that this road exists; when both directions exist, U is the end where the way's node order starts |
 | `<m>.off` | U16 | [N, 4] | for the mode's metric: [U → ID, ID → U, V → ID, ID → V] |
 
 **Offsets** (SPEC §7). For each directed road r of the piece, with w = `<metric>.w` of the
@@ -536,7 +550,8 @@ the ID's snap point, so f from A (or U) for r = A → B (or U → V), and 1 − 
 - A served ID's nodes belong to its expert for the mode, and that expert has `trapped = 0`.
 - At least one direction of a served ID's piece is finite for the mode.
 - **CAR:** if the piece's two segments are in different experts, the ID takes the one with
-  the smaller expert index, and the other slot is `NONE`.
+  the smaller expert index among those that are not trapped, and the other slot is
+  `NONE`.
 
 ### 7.3 Reason codes
 
@@ -602,6 +617,9 @@ release 2026-10-21.0 this holds: 298 basic categories, all of them among the 2,3
    `primary[p]` or an `alt` of p reaches X by following `parent` zero or more times.
 3. **A basic-category query for B** matches a kept place p with `primary[p] ≠ NONE16` when
    `basic[p] = B`.
+
+**A place's own keys** (primary, basic, alternates) are resolved through `redirect` the same
+way before they are looked up in `name` (SPEC §6).
 
 No coordinates and no place names are stored (SPEC §7, §8).
 
@@ -719,7 +737,8 @@ mutated models must fail it.
 
 ## 11. Golden queries
 
-Per tier, a directory with `golden.json` (the header) and `queries.jsonl` (one query per
+Per tier and inputs (SPEC §10, verify), a directory `<root>/<tier>/<inputs>/` with
+`golden.json` (the header) and `queries.jsonl` (one query per
 line).
 
 **`golden.json`:** `{format: "blobmap-golden", format_version: "2.0.0", tier, inputs_hash,
@@ -734,8 +753,8 @@ queries_sha256}`.
 - **A time** is an integer below 65535, or the string `"BEYOND"`.
 - **A reason** is `{"reason": "UnknownId" | "DifferentComponent" | "NoEligibleRoad" |
   "NoRoad" | "TrappedComponent" | "FilteredPlace", "id": <the ID it concerns>}`.
-- **A category** in `nearest` and `chained` is `{"category": <key>}` (a taxonomy node) or
-  `{"basic": <key>}` (SPEC §6).
+- **A category** in `nearest`, and `transfer_category` in `chained` and `chained_column`, is
+  `{"category": <key>}` (a taxonomy node) or `{"basic": <key>}` (SPEC §6).
 - **`expr`** is the JSON tree of SPEC §9, as is. `kind` defaults to `"addresses"`.
 - **`top`:** the weighted answer, best first, at most k entries. `score` is a decimal
   string, because a `u64` may exceed the integers JSON represents exactly.
@@ -750,13 +769,15 @@ queries_sha256}`.
 | `reachable_from_all`, `reachable_from_any` | `{sources, t, mode}` | `{count, ids_sha256}` |
 | `multi_criteria`, boolean form | `{expr, kind?}` | `{count, ids_sha256}` |
 | `multi_criteria`, weighted form | `{expr, kind?, k}` | `{top: [{id, score}]}` |
-| `chained` | `{id, transfer_category, penalty, mode_out: "car", mode_in: "walk", dir}` | `{time, place}` |
+| `chained` | `{a, b, transfer_category, penalty}` | `{time, place}`, or `{time: "BEYOND", place: null}` |
+| `chained_column` | `{id, transfer_category, penalty, dir}` | `{times_sha256, beyond}` |
 
 - **`ids_sha256`:** the SHA-256 over the 16-byte IDs of the answer, ascending.
 - **`times_sha256`:** over every ID of the model in internal-index order: the U16 time
   (INF for `BEYOND`, unreachable or unserved).
 - **`beyond`:** the number of INF entries in that column.
-- **`dir`:** `"from"` or `"to"`. `start` is in seconds, default 0.
+- **`dir`:** `"from"` or `"to"`. `start` and `penalty` are in seconds; `start` defaults to 0.
+- **`chained`, `chained_column`:** car, then walk (SPEC §9); they have no `mode`.
 - Small tiers may add `"ids"` (the full list) next to a hash.
 
 ## 12. Versioning
