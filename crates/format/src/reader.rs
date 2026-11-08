@@ -56,7 +56,7 @@ fn str_field<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
 fn parse_shard(bytes: &[u8], file: &str) -> Result<Vec<(String, Dtype, Vec<u64>, Range<usize>)>> {
     ensure!(bytes.len() >= 8, "{file}: too short");
     let hl = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
-    ensure!(hl % 8 == 0 && 8 + hl <= bytes.len(), "{file}: bad header length");
+    ensure!(hl.is_multiple_of(8) && 8 + hl <= bytes.len(), "{file}: bad header length");
     let header: Value = serde_json::from_slice(&bytes[8..8 + hl]).with_context(|| format!("{file}: header"))?;
     let obj = header.as_object().with_context(|| format!("{file}: header is not an object"))?;
     let meta = obj.get("__metadata__").with_context(|| format!("{file}: no __metadata__"))?;
@@ -264,14 +264,15 @@ mod tests {
         let vw = w.write_unit(&v).unwrap();
         assert!(uw.shards.iter().all(|s| !vw.shards.contains(s)), "units never share a shard");
         w.finish().unwrap();
-        std::fs::write(dir.join(crate::MANIFEST_FILE), "{\"format\":\"blobmap-model\",\"format_version\":\"2.0.0\",\"unknown\":1}").unwrap();
+        std::fs::write(dir.join(crate::MANIFEST_FILE), "{\"format\":\"blobmap-model\",\"format_version\":\"2.0.0\",\"unknown\":1}")
+            .unwrap();
         let m = Model::open(&dir).unwrap();
         assert_eq!(&*m.get::<u32>("a/big").unwrap(), &big[..]);
         assert_eq!(&*m.get::<u8>("a/small").unwrap(), &[7, 8, 9]);
         let (wide, n) = m.get_rows::<u16>("a/wide", &[2]).unwrap();
         assert_eq!((n, &*wide), (2, &[1u16, 2, 3, 4][..]));
         assert_eq!(m.get::<u64>("b/x").unwrap()[1], 2);
-        assert!(matches!(m.get::<u32>("a/small"), Err(_)));
+        assert!(m.get::<u32>("a/small").is_err());
         assert_eq!(m.tensor_hash("a/big").unwrap(), uw.hashes["a/big"]);
         m.verify_shard_hashes().unwrap();
         // Every shard is a valid safetensors file, with each tensor aligned.

@@ -29,7 +29,7 @@ impl Tensor {
 
     /// A tensor of rows of `width` elements (`[n, width]`).
     pub fn rows<T: Element>(width: u64, data: &[T]) -> Tensor {
-        assert!(width > 0 && data.len() as u64 % width == 0, "data is not a whole number of rows of {width}");
+        assert!(width > 0 && (data.len() as u64).is_multiple_of(width), "data is not a whole number of rows of {width}");
         Tensor::new(&[data.len() as u64 / width, width], data)
     }
 

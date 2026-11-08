@@ -336,8 +336,8 @@ fn viaway() -> Scenario {
     b.restriction("no_u_turn", h[0][1], Via::Ways(vec![v[1][1]]), h[0][2]);
     // B: only straight on, north along column 2.
     b.restriction("only_straight_on", v[2][0], Via::Ways(vec![v[2][1]]), v[2][2]);
-    // C: no left turn after two via ways north along column 3, then west.
-    b.restriction("no_left_turn", v[3][0], Via::Ways(vec![v[3][1], v[3][2]]), h[2][3]);
+    // C: north along column 3, west along row 2, then no right turn (north) at (2, 2).
+    b.restriction("no_right_turn", v[3][0], Via::Ways(vec![v[3][1], h[2][2]]), v[2][2]);
     // D: only right turn: east along row 0, via (1,0)-(2,0) and (2,0)-(2,1), then east.
     b.restriction("only_right_turn", h[0][0], Via::Ways(vec![v[2][0], h[1][0]]), h[2][1]);
     taxonomy(&mut b);
@@ -350,7 +350,7 @@ fn viaway() -> Scenario {
             }
             if j < 3 {
                 let id = b.address(x + 10.0, y + 40.0);
-                if (i, j) == (1, 1) || (i, j) == (2, 1) || (i == 3 && j >= 1) || (i, j) == (2, 0) {
+                if (i, j) == (1, 1) || (i, j) == (2, 1) || (i, j) == (3, 1) || (i, j) == (2, 0) {
                     on_via.push(id);
                 }
             }

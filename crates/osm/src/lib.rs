@@ -3,6 +3,7 @@
 //! (delays included, SPEC §4), snapping eligibility (SPEC §6), and the car turn
 //! restrictions, via nodes and via ways.
 
+pub mod geo;
 pub mod network;
 pub mod restrictions;
 
