@@ -6,12 +6,11 @@ means; this document says only how it is laid out in bytes. Section references s
 SPEC wins and this document is wrong.
 
 - **Format name:** `blobmap-model`. **Version:** `2.0.0` (§12).
-- **Status:** draft for milestone 1 (SPEC §13). A mark **[Qn]** points to a decision
-  recorded in §13. Only Q12 is still open.
+- **Status:** draft for milestone 1 (SPEC §13), awaiting approval.
 
 Contents: §1 conventions · §2 files · §3 manifest · §4 storage units and names · §5 road part ·
 §6 re-customization · §7 vocabulary part · §8 meaning of the bytes · §9 hashes ·
-§10 validation · §11 golden queries · §12 versioning · §13 open questions.
+§10 validation · §11 golden queries · §12 versioning.
 
 ## 1. Conventions
 
@@ -44,11 +43,10 @@ A model is one directory (SPEC §8):
 manifest.json                       §3
 model.safetensors.index.json        §2.3
 model-00001-of-0000N.safetensors    the shards, numbered from 1, five digits each
-LICENSES                            UTF-8 text generated from the inputs (SPEC §12) [Q10]
+LICENSES                            UTF-8 text generated from the inputs (SPEC §8, §12)
 ```
 
-Nothing else is part of a model. The build report (SPEC §3, §10) holds wall times and peak
-RSS, which are not deterministic, so it is never written inside the model directory [Q10].
+Nothing else is in the directory (SPEC §8).
 
 ### 2.1 Shards
 
@@ -138,7 +136,7 @@ So a shard never mixes units (SPEC §8). Chunks are at most the target, so no sh
     `timestamp` is the header's `osmosis_replication_timestamp` (ISO 8601 UTC), or null.
   - `overture`: `{release, files: [{name, sha256}]}`.
   - `taxonomy`: `{version, files: [{name, sha256}]}`.
-  - `extent`: `{name, sha256}` of the polygon file passed as `--extent`, or null [Q5].
+  - `extent`: `{name, sha256}` of the polygon file passed as `--extent`, or null (SPEC §3).
   - A manifest holds no machine paths.
 - **`config`:** `{profiles: {car: {name, sha256}, active: {name, sha256}}, place_rules: {name,
   sha256}}`. Each `sha256` covers the config file's bytes.
@@ -292,7 +290,7 @@ CAR layout nodes are directed road segments (SPEC §4); its roads are the segmen
 
 | tensor | dtype | shape | meaning |
 | --- | --- | --- | --- |
-| `car.time_s` | F32 | [n] | master time of the segment (SPEC §7), including the delays the profile charges to it [Q2] |
+| `car.time_s` | F32 | [n] | master time of the segment (SPEC §7), including its delays (SPEC §4, §7) |
 | `car.w` | U16 | [n] | integer weight of the segment, §6.1 |
 | `way` | I64 | [n] | OSM way id |
 | `way_dir` | U8 | [n] | 0 along the way's node order, 1 against it |
@@ -305,7 +303,7 @@ Turns, by the row of the segment they leave (T turns):
 | --- | --- | --- | --- |
 | `turn_first` | U32 | [n + 1] | CSR by row |
 | `turn_head` | U32 | [T] | layout id of the segment the turn enters |
-| `car.turn_cost` | U16 | [T] | turn cost in whole seconds [Q2]. Never `INF` in 2.0, because a turn forbidden to car is absent (SPEC §4); `INF` is kept for a later metric of the family |
+| `car.turn_cost` | U16 | [T] | turn cost in whole seconds (SPEC §7). Never `INF` in 2.0, because a turn forbidden to car is absent (SPEC §4); `INF` is kept for a later metric of the family |
 | `turn_link` | U32 | [T] | local index of link {tail, head}, in the pack holding max(tail, head); `NONE` if tail = head |
 
 - Turns between different experts are not stored; no route within an expert uses them.
@@ -332,7 +330,7 @@ Roads are stored by the row of their tail (R roads):
 | `road_head` | U32 | [R] | layout id of the head |
 | `road_link` | U32 | [R] | local index of link {tail, head}, in the pack holding max(tail, head); `NONE` if tail = head |
 | `way`, `way_dir`, `way_seq`, `kind` | as §5.3 | [R] | as §5.3 |
-| `<m>.time_s` | F32 | [R] | master time for metric m, with the node costs charged to the road (SPEC §4) [Q2]; `+∞` where m may not use it |
+| `<m>.time_s` | F32 | [R] | master time for metric m, with the node costs charged to the road (SPEC §4, §7); `+∞` where m may not use it |
 | `<m>.w` | U16 | [R] | integer weight, §6.1; `INF` where m may not use it |
 
 - Inside a row, roads are ordered by (`road_head`, `way`, `way_seq`). Parallel roads are kept:
@@ -356,22 +354,23 @@ procedure reproduces the stored bytes.
 
 ### 6.1 Integer road weights
 
-A **rounding group** is all roads of one family with the same (`way`, `way_dir`) and a finite
-`<m>.time_s` for metric m, over every expert and the cross table [Q3]. Its key is stored on
-every road: `way`, `way_dir` and `way_seq` give the way, the direction and the position, and
-the metric is the tensor's prefix. Every member of every group is stored. A runtime that
-re-rounds new times therefore needs no data outside the model. A road whose new time is
-`+∞` leaves its group, and one whose time becomes finite joins it. For each group:
-1. Order its roads in travel order: `way_seq` ascending if `way_dir = 0`, descending if 1.
-2. Let tᵢ = the `f64` of each `time_s` (exact widening). Sum S = Σ tᵢ in `f64`, in travel
-   order. T = rnd(S).
-3. Let fᵢ = ⌊tᵢ⌋ and extra = T − Σ fᵢ (0 ≤ extra ≤ group size).
-4. Sort the roads by tᵢ − fᵢ descending, ties in travel order. The first `extra` roads get
-   fᵢ + 1, the others fᵢ (the largest-remainder method of SPEC §7) [Q3].
-5. `w = min(that, 65535)`. A road with `time_s = +∞` has `w = INF`.
+SPEC §7 defines the rounding groups and the rule. In bytes:
+- **Members:** a group of metric m is all roads of one family with the same (`way`,
+  `way_dir`) and a finite `<m>.time_s`, over every expert and the cross table (§5.4). Every
+  member of every group is stored, so re-rounding needs no data outside the model.
+  - A road whose new time is `+∞` leaves its group; one whose time becomes finite joins it.
+- **Travel order:** `way_seq` ascending if `way_dir = 0`, descending if 1.
 
-Turn costs (`car.turn_cost`) are stored integers, each rounded once by rnd at build time
-[Q2]. Re-customization takes them as given.
+For each group, the exact integer computation:
+1. Let tᵢ = the `f64` of each `time_s` (exact widening). Sum S = Σ tᵢ in `f64`, in travel
+   order. T = rnd(S).
+2. Let fᵢ = ⌊tᵢ⌋ and extra = T − Σ fᵢ (0 ≤ extra ≤ group size).
+3. Sort the roads by tᵢ − fᵢ descending, ties in travel order. The first `extra` roads get
+   fᵢ + 1, the others fᵢ.
+4. `w = min(that, 65535)`. A road with `time_s = +∞` has `w = INF`.
+
+Turn costs (`car.turn_cost`) are stored integers (SPEC §7). Re-customization takes them as
+given.
 
 ### 6.2 Link initialisation
 
@@ -412,7 +411,8 @@ Why the result does not depend on order:
 Saturating at 65535 throughout gives the same bytes as working in wider integers and
 clamping at the end. The result is the metric tensors of §5.2.
 
-**Optional triangle tensors** [Q1], per pack. The compiler does not write them by default:
+**Optional triangle tensors** (SPEC §8), per pack. The compiler does not write them by
+default:
 
 | tensor | dtype | shape | meaning |
 | --- | --- | --- | --- |
@@ -426,7 +426,7 @@ from `up_head`; both give the same bytes.
 ## 7. Vocabulary part
 
 The vocabulary covers every ID of the model, across families and experts. Which Overture
-IDs are in it depends on the extent (SPEC §3, [Q5]).
+IDs are in it depends on the extent (SPEC §3).
 
 ### 7.1 IDs
 
@@ -434,30 +434,25 @@ IDs are in it depends on the extent (SPEC §3, [Q5]).
 | --- | --- | --- | --- |
 | `vocab/ids/address` | U8 | [N_a, 16] | Overture address IDs, strictly ascending |
 | `vocab/ids/place` | U8 | [N_p, 16] | Overture place IDs, kept and filtered (§7.4), strictly ascending |
-| `vocab/ids/alias` | U8 | [N_x, 16] | IDs of places merged as duplicates (SPEC §3), strictly ascending [Q7] |
+| `vocab/ids/alias` | U8 | [N_x, 16] | aliases: IDs of places merged as duplicates (SPEC §3, §6), strictly ascending |
 | `vocab/ids/alias_to` | U32 | [N_x] | internal index of the kept place each one was merged into |
 | `vocab/road_hash` | U8 | [32] | the road part hash this vocabulary was built on (§9) |
 
 - **ID bytes:** an Overture ID is a UUID in its canonical text form: 36 characters,
   lower-case hex with dashes. It is stored as its 16 bytes, in text order. Byte order then
-  equals text order, which is the order of the smallest-ID rule (SPEC §7).
-  - **The build fails** if any Overture ID it reads is not a valid canonical UUID.
+  equals text order, which is the order of the smallest-ID rule (SPEC §7). Every ID is a
+  UUID (SPEC §3).
 - **Internal index i:** addresses are 0 .. N_a, places N_a .. N_a + N_p. N = N_a + N_p.
   - No ID appears twice across the three tables.
   - An alias has no internal index of its own; `alias_to` always names a kept place.
 - **Lookup:**
   1. Binary-search `address`, then `place`; a hit gives i.
-  2. Otherwise binary-search `alias`; a hit resolves to `alias_to`, and the query proceeds
-     with the kept place in its place.
-  3. Otherwise the ID is absent from the model: `UnknownId`.
-
-  Answers name kept IDs only, never an alias.
+  2. Otherwise binary-search `alias`; a hit resolves to `alias_to` (SPEC §6, aliases).
+  3. Otherwise the ID is absent from the model: `UnknownId` (SPEC §6).
 
 ### 7.2 Entries per mode
 
-Each mode has its own entries [Q4]: bike and walk snap separately, onto the same family's
-graph, possibly onto different pieces and experts. In bytes, "the mode's graph" (SPEC §6)
-means:
+Each mode has its own entries (SPEC §6). In bytes, "the mode's graph" (SPEC §6) is:
 - for car, the pieces whose segments are CAR layout nodes;
 - for an ACTIVE mode m, the pieces with at least one road of finite `<m>.w`.
 
@@ -478,21 +473,19 @@ means:
 | `<m>.road` | U32 | [N] | local index, in the pack holding U, of the road U → V of the piece; it identifies the piece for the same-piece rule. U and V are ordered so that this road exists |
 | `<m>.off` | U16 | [N, 4] | for the mode's metric: [U → ID, ID → U, V → ID, ID → V] |
 
-**Offsets** [Q2]. Let f ∈ [0, 1] be the fraction of the piece's length from A (CAR) or U
-(ACTIVE) to the ID's snap point. For a directed road r of the piece with integer weight
-w = `<metric>.w` of the mode's metric:
-- **the part before the ID** = rnd(w × g), where g is f in r's direction (f if r runs A → B,
-  else 1 − f);
-- **the part after the ID** = w − (the part before).
+**Offsets** (SPEC §7). For each directed road r of the piece, with w = `<metric>.w` of the
+mode's metric, the tensors hold the two parts of r around the ID:
+- **the part before:** `car.off[k, 0]` for r = `seg[k]`, or U → ID / V → ID;
+- **the part after:** `car.off[k, 1]`, or ID → V / ID → U.
 
-So every pair of offsets on one direction sums exactly to that road's w. An ID standing at
-a node (SPEC §6) has f = 0 or 1, and its offsets at that node are 0.
+The part before is rnd(w × g). g is the fraction of the piece's length from r's tail to
+the ID's snap point, so f from A (or U) for r = A → B (or U → V), and 1 − f the other way.
 
-**`INF` offsets.** Where w = `INF`, both offsets of that direction are `INF`:
-- a forbidden direction;
-- a `NONE` slot;
-- in particular, a bike against a one-way it may not ride or push along has `INF` for
-  that direction (U → ID and ID → V, or V → ID and ID → U).
+**Invariants:**
+- part before + part after = w exactly.
+- An ID standing at a node (SPEC §6) has g = 0 or 1, so its offsets at that node are 0.
+- Where w = `INF` (a direction the mode may not use, SPEC §6, or a `NONE` slot), both parts
+  are `INF`. For ACTIVE, that is U → ID and ID → V, or V → ID and ID → U.
 
 **Other invariants:**
 - An unserved ID has `expert = NONE`, `NONE` nodes and `INF` offsets for that mode.
@@ -511,12 +504,14 @@ Per mode, sorted by internal index (K entries):
 | `vocab/<family>/<mode>.reason_code` | U8 | [K] | the code, below |
 | `vocab/<family>/<mode>.reason_m` | F32 | [K] | a distance in metres, below |
 
-| code | name | condition (radius = the mode's snap radius) | `reason_m` |
-| --- | --- | --- | --- |
-| 1 | `NoEligibleRoad` | pieces of the family's graph lie within the radius, but none is eligible for the mode | distance to the nearest of those pieces |
-| 2 | `NoRoad` | no piece of the family's graph within the radius | `+∞` |
-| 3 | `TrappedComponent` | eligible pieces lie within the radius, but all in trapped components (SPEC §5, §6) | distance to the nearest of them |
-| 4 | `FilteredPlace` | a place dropped by the place rules (SPEC §3) [Q7]; stored in `vocab/places/status`, never in these lists | — |
+Codes, with their meaning in SPEC §6:
+
+| code | name | `reason_m` |
+| --- | --- | --- |
+| 1 | `NoEligibleRoad` | distance to the nearest piece of the family's graph |
+| 2 | `NoRoad` | `+∞` |
+| 3 | `TrappedComponent` | distance to the nearest eligible piece (all are in trapped components) |
+| 4 | `FilteredPlace` | never in these lists; stored in `vocab/places/status` (§7.4) |
 
 - An ID is served for a mode exactly when its `<mode>.expert ≠ NONE`.
 - An unserved ID that is not a filtered place has exactly one entry in the mode's list.
@@ -529,17 +524,14 @@ Per place p = i − N_a:
 
 | tensor | dtype | shape | meaning |
 | --- | --- | --- | --- |
-| `vocab/places/status` | U8 | [N_p] | 0 kept; 4 `FilteredPlace` (closed or below the confidence rule) |
+| `vocab/places/status` | U8 | [N_p] | 0 kept; 4 `FilteredPlace` (SPEC §3, §6) |
 | `vocab/places/primary` | U16 | [N_p] | taxonomy node of the primary category |
 | `vocab/places/basic` | U16 | [N_p] | taxonomy node of the basic category, `NONE16` if Overture gives none |
 | `vocab/places/alt_first` | U32 | [N_p + 1] | CSR into `alt` |
 | `vocab/places/alt` | U16 | [·] | alternate categories, ascending, without the primary |
 
-- **A filtered place:**
-  - has `NONE` entries for every mode;
-  - has no entry in any reason list;
-  - never matches a category;
-  - answers `FilteredPlace` wherever a query names it.
+- **A filtered place** has `NONE` entries for every mode and no entry in any reason list.
+  It never matches a category; its category tensors are still filled.
 
 The taxonomy of the pinned release (T nodes, T < 65535):
 
@@ -552,19 +544,18 @@ The taxonomy of the pinned release (T nodes, T < 65535):
 | `vocab/taxonomy/redirect.bytes`, `redirect.first` | U8, U32 | strings [D] | retired category keys that Overture redirects, sorted |
 | `vocab/taxonomy/redirect_to` | U16 | [D] | the node each one redirects to |
 
-In release 2026-10-21.0, every basic category is also a taxonomy node with the same key
-(298 of 2,302 nodes), so `basic` indexes the same table.
+**Basic categories are taxonomy nodes.** `basic` indexes the same node table, so every
+basic category must be a taxonomy node with the same key, and the build fails otherwise. In
+release 2026-10-21.0 this holds: 298 basic categories, all of them among the 2,302 nodes.
 
-**Category queries** [Q11]. A query names a category in one of two namespaces: `node` (a
-taxonomy node) or `basic` (a basic category).
-1. **Resolve the key:** if it is in `redirect`, replace it by the key of `redirect_to`.
-   Then look it up in `name`; for `basic`, the node must have `is_basic = 1`. A key that is
-   not found is an error, not an empty answer.
-2. **`node` X matches** a kept place p when `primary[p]` or any `alt` of p is X or a
-   descendant of X. A node is a descendant of X when following `parent` from it reaches X.
-3. **`basic` B matches** a kept place p when `basic[p] = B`.
+**Evaluating a category query** (SPEC §6) on these tensors:
+1. **Resolve the key:** a key found in `redirect` is replaced by the key of `redirect_to`.
+   Then it is looked up in `name`. A basic-category query also needs `is_basic = 1`.
+2. **A taxonomy query for node X** matches a kept place p when `primary[p]` or an `alt` of p
+   reaches X by following `parent` zero or more times.
+3. **A basic-category query for B** matches a kept place p when `basic[p] = B`.
 
-The model stores no coordinates (SPEC §7) and no place names [Q9].
+No coordinates and no place names are stored (SPEC §7, §8).
 
 ## 8. Meaning of the bytes
 
@@ -612,7 +603,7 @@ This is what the metric tensors guarantee. Any CCH sweep that relies only on it 
   piece, in the same slot. For CAR that is `seg_o[k] = seg_d[k]`. For ACTIVE it is the same
   `road` and nodes, in either direction.
   - Let p_o and p_d be the parts before the ID (§7.2) on r.
-  - When p_d ≥ p_o, the direct term is p_d − p_o [Q6].
+  - When p_d ≥ p_o, the direct term is p_d − p_o; equal parts give 0 s (SPEC §9).
 - **The answer** is the min of the route term and the direct term, then SPEC §7 and §9
   (cap, `BEYOND`, same ID, `DifferentComponent`).
 
@@ -647,7 +638,7 @@ A reader **must** refuse:
 - chunks that do not concatenate to the logical shape;
 - a road-hash link mismatch (§9).
 
-A reader **must ignore** manifest keys it does not know [Q8].
+A reader **must ignore** manifest keys it does not know (SPEC §8).
 
 A reader **should** check, at least per pack it loads:
 - the CSR shapes, and that `up_head` is ascending and below the node's id (§5.2);
@@ -670,7 +661,11 @@ queries_sha256}`. A replay refuses a model whose `model_id` differs.
 - **A time** is an integer below 65535, or the string `"BEYOND"`.
 - **A reason** is `{"reason": "UnknownId" | "DifferentComponent" | "NoEligibleRoad" |
   "NoRoad" | "TrappedComponent" | "FilteredPlace", "id": <the ID it concerns>}`.
-- **A category** is `{"node": <key>}` or `{"basic": <key>}` (§7.4).
+- **A category** in `nearest` and `chained` is `{"category": <key>}` (a taxonomy node) or
+  `{"basic": <key>}` (SPEC §6).
+- **`expr`** is the JSON tree of SPEC §9, as is. `kind` defaults to `"addresses"`.
+- **`top`:** the weighted answer, best first, at most k entries. `score` is a decimal
+  string, because a `u64` may exceed the integers JSON represents exactly.
 - **An alias** may appear in `args`. Answers name kept IDs only (§7.1).
 
 | op | args | answer |
@@ -680,7 +675,8 @@ queries_sha256}`. A replay refuses a model whose `model_id` differs.
 | `nearest` | `{category, id, mode, dir}` | `{time, place}`, or `{time: "BEYOND", place: null}` |
 | `column` | `{sources: [{id, start?}], mode, dir}` | `{times_sha256, beyond}` |
 | `reachable_from_all`, `reachable_from_any` | `{sources, t, mode}` | `{count, ids_sha256}` |
-| `multi_criteria` | `{expr}` | `{count, ids_sha256}` [Q12] |
+| `multi_criteria`, boolean form | `{expr, kind?}` | `{count, ids_sha256}` |
+| `multi_criteria`, weighted form | `{expr, kind?, k}` | `{top: [{id, score}]}` |
 | `chained` | `{id, transfer_category, penalty, mode_out: "car", mode_in: "walk", dir}` | `{time, place}` |
 
 - **`ids_sha256`:** the SHA-256 over the 16-byte IDs of the answer, ascending.
@@ -695,7 +691,8 @@ queries_sha256}`. A replay refuses a model whose `model_id` differs.
 `format_version` is `MAJOR.MINOR.PATCH` (SPEC §8):
 - **PATCH:** this document's wording only; same bytes.
 - **MINOR:** adds optional tensors, or optional manifest keys, that a reader of a lower
-  minor ignores [Q8]. Examples: the triangle tensors of §6.3, or a CAR end view (§5.3).
+  minor ignores (SPEC §8). Examples: the triangle tensors of §6.3, or a CAR end view
+  (§5.3).
   - Readers ignore unknown manifest keys (§10).
   - A reader of 2.y reads any 2.x. When x < y, the tensors and keys added after 2.x are
     absent.
@@ -710,49 +707,3 @@ Not format changes:
   like any road.
 
 The compiler promises byte-identical output only for the same compiler version (SPEC §10).
-
-## 13. Decisions and open questions
-
-Answered in review of the milestone-1 draft (2026-11-08). They are to be carried into SPEC
-where they concern meaning; this section then keeps only the byte-level consequences.
-
-- **Q1, decided:** triangles are derived from the sorted upper-neighbour lists (§6.3).
-  The triangle tensors are optional and not written by default.
-- **Q2, decided:**
-  - the delays the profile charges to a road are part of its master time (§5.3, §5.4);
-  - each turn cost is rounded once by rnd (§6.1);
-  - ID offsets are rnd(w × length fraction), with the other offset taking the rest (§7.2).
-- **Q3, decided:**
-  - rounding groups are (way, direction, metric), with ties in travel order (§6.1);
-  - the model stores each road's group key (`way`, `way_dir`, `way_seq`; the metric by
-    tensor prefix), so new f32 times can be re-rounded exactly.
-- **Q4, decided:** ACTIVE snaps once per mode. Bike and walk have separate entries in the
-  same family, possibly on different pieces and experts (§7.2).
-- **Q5, decided:** `blobc build` takes an optional `--extent <poly>`.
-  - With it, only IDs inside the polygon are in the model.
-  - Without it, the model holds every ID within the snap radius of a road: within the
-    radius of some mode, from a piece of that mode's family graph.
-  - France builds use Geofabrik's `france.poly`.
-  - The manifest records the polygon file (§3).
-- **Q6, decided:** two IDs with equal offsets on one road count as "ahead": 0 s (§8).
-- **Q7, decided:**
-  - a merged duplicate is stored as an alias of the kept ID (§7.1);
-  - a place dropped by the place rules is in the model with reason `FilteredPlace`,
-    code 4 (§7.3, §7.4);
-  - only IDs absent from the release (or outside the extent) answer `UnknownId`.
-- **Q8, decided:** a minor version may add optional manifest keys, and runtimes ignore
-  unknown keys. Anything else stays major (§12).
-- **Q9, decided:** no place names in the model.
-- **Q10, decided:** `LICENSES` is in the model directory; the build report is outside it
-  (§2).
-- **Q11, decided:** a category query names a taxonomy node and matches places whose primary
-  category, or any alternate, is that node or a descendant. Basic categories are queried as
-  their own namespace. Redirects resolve first (§7.4).
-- **Also decided:**
-  - an ID with a bike or walk direction it may not use has `INF` offsets for it (§7.2);
-  - `NoRoad` means no piece of the family's graph within the radius;
-  - `NoEligibleRoad` means pieces within the radius but none eligible, and stores the
-    distance to the nearest one (§7.3);
-  - the build fails on any Overture ID that is not a valid UUID (§7.1).
-- **Q12, open:** the `multi_criteria` expression syntax and what the weighted score sums
-  (§11).
