@@ -47,7 +47,7 @@ impl Runtime {
         let mut by_expert: std::collections::BTreeMap<u32, Vec<Source>> = std::collections::BTreeMap::new();
         for s in sources {
             let x = mv.expert[s.id as usize];
-            assert_ne!(x, NONE, "a column source must be served");
+            anyhow::ensure!(x != NONE, "a column source must be served (internal index {})", s.id);
             let start = if f.no_start { 0 } else { s.start };
             by_expert.entry(x).or_default().push(Source { id: s.id, start });
         }

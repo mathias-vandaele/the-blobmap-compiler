@@ -1,0 +1,25 @@
+[package]
+name = "blobmap-conformance"
+description = "The conformance suite (SPEC §11): reference Dijkstra from the inputs, model invariants, re-customization, snapping re-check, golden files and mutants."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+hex.workspace = true
+rand.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+blobmap-format.workspace = true
+blobmap-fixtures.workspace = true
+blobmap-profile.workspace = true
+blobmap-osm.workspace = true
+blobmap-graph.workspace = true
+blobmap-overture.workspace = true
+blobmap-snap.workspace = true
+blobmap-build.workspace = true
+blobmap-runtime.workspace = true
+
+[lints]
+workspace = true

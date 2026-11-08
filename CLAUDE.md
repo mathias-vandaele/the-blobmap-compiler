@@ -46,6 +46,18 @@ concept that contradicts SPEC.md.
 
 ## Crate map
 
-Planned in PLAN.md and not created yet; no code until PLAN.md is approved. Build order:
-`format` → `fixtures` → `profile` → `osm` → `graph` → `order` → `cch` → `overture` →
-`snap` → `build` → `runtime` → `conformance` → `cli` (`blobc`).
+Build order (PLAN.md), each crate under `crates/`:
+- `format`: the FORMAT.md writer and validating reader, manifest, hashes.
+- `fixtures`: synthetic `.osm.pbf`, Overture parquet and taxonomy for the tiny tier; the
+  `fixtures` binary writes every scenario's inputs.
+- `profile`: car and active profiles, place rules, `build.toml`.
+- `osm`: ways, pieces, restrictions. `graph`: CAR turn graph with via-way copies, ACTIVE
+  union graph, rounding, experts.
+- `order`: `Orderer` (inertial flow, fixed) and cells. `cch`: one hierarchy per expert.
+- `overture`: release, taxonomy, place rules, aliases, extent. `snap`: IDs onto pieces.
+- `build`: the `Stage`s, groups and packs, vocabulary, model writer, reports.
+- `runtime`: the CPU reference runtime. `conformance`: the SPEC §11 suite, golden files,
+  mutants. `cli`: `blobc build | verify | inspect`.
+
+`ci.sh` runs the milestone 2 gate; `tools/determinism.sh` the thread-count check. Golden
+files live in `golden/<tier>/<scenario>/`.

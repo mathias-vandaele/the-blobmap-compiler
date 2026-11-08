@@ -2,12 +2,14 @@
 //!
 //! - **graph:** the family's graph (NoRoad when none is in the radius): for CAR, the pieces
 //!   with a segment; for ACTIVE, the pieces with a road.
-//! - **eligible:** pieces of the mode's graph (FORMAT §7.2) that pass the profile's tag rules.
+//! - **eligible:** pieces of the mode's graph that pass the profile's tag rules. A mode's
+//!   graph is the pieces with a road it may use (SPEC §6): a finite master time. A road of
+//!   65,535 s or more has `w = INF` but is still usable.
 //! - **servable:** eligible pieces in an expert that is not trapped. An ACTIVE piece whose
 //!   two ends lie in different experts never lies on a route (FORMAT §5.4), so it is skipped
 //!   like a trapped one.
 
-use blobmap_format::{INF, NONE};
+use blobmap_format::NONE;
 use blobmap_graph::{ActiveGraph, CarGraph, Experts};
 use blobmap_osm::Pieces;
 
@@ -55,7 +57,7 @@ impl Membership {
     /// For ACTIVE metric `m` (an index into `blobmap_graph::active::METRICS`).
     pub fn active(p: &Pieces, g: &ActiveGraph, e: &Experts, m: usize) -> Membership {
         let graph: Vec<bool> = g.road_of_piece.iter().map(|r| r.iter().any(|&x| x != NONE)).collect();
-        let usable = |k: usize| g.road_of_piece[k].iter().any(|&r| r != NONE && g.w[m][r as usize] != INF);
+        let usable = |k: usize| g.road_of_piece[k].iter().any(|&r| r != NONE && g.time[m][r as usize].is_finite());
         let eligible: Vec<bool> = (0..p.len()).map(|k| graph[k] && p.eligible[k] && usable(k)).collect();
         let servable = (0..p.len()).map(|k| eligible[k] && active_expert(p, e, k).is_some()).collect();
         Membership { graph, eligible, servable }

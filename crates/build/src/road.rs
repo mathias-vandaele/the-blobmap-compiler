@@ -7,16 +7,17 @@ use crate::family::Family;
 use crate::hier::Built;
 use crate::layout::Layout;
 
-pub fn tables(f: &dyn Family, b: &Built, l: &Layout) -> Unit {
+/// `entry_base`: the manifest index of the family's first entry (FORMAT §5.1 `entry`).
+pub fn tables(f: &dyn Family, b: &Built, l: &Layout, entry_base: u32) -> Unit {
     let mut u = Unit::default();
     let e = f.experts();
-    let p = format!("road/{}/experts/", f.name());
+    let p = format!("road/{}/experts", f.name());
     let xs = &b.experts;
     u.put_in(&p, "nodes", Tensor::vec(&xs.iter().map(|x| x.nodes.len() as u32).collect::<Vec<_>>()));
     u.put_in(&p, "links", Tensor::vec(&xs.iter().map(|x| x.h.links()).collect::<Vec<u64>>()));
     u.put_in(&p, "levels", Tensor::vec(&xs.iter().map(|x| x.h.levels()).collect::<Vec<u32>>()));
     u.put_in(&p, "trapped", Tensor::vec(&e.trapped.iter().map(|&t| t as u8).collect::<Vec<u8>>()));
-    u.put_in(&p, "entry", Tensor::vec(&l.entry_of));
+    u.put_in(&p, "entry", Tensor::vec(&l.entry_of.iter().map(|e| e + entry_base).collect::<Vec<u32>>()));
     let mut block_first = vec![0u32];
     let (mut expert, mut kind, mut id_first, mut nodes, mut pack, mut row_first, mut levels, mut level_base) =
         (vec![], vec![], vec![], vec![], vec![], vec![], vec![], vec![]);
@@ -35,7 +36,7 @@ pub fn tables(f: &dyn Family, b: &Built, l: &Layout) -> Unit {
         block_first.push(expert.len() as u32);
     }
     u.put_in(&p, "block_first", Tensor::vec(&block_first));
-    let p = format!("road/{}/blocks/", f.name());
+    let p = format!("road/{}/blocks", f.name());
     u.put_in(&p, "expert", Tensor::vec(&expert));
     u.put_in(&p, "kind", Tensor::vec(&kind));
     u.put_in(&p, "id_first", Tensor::vec(&id_first));
@@ -50,7 +51,7 @@ pub fn tables(f: &dyn Family, b: &Built, l: &Layout) -> Unit {
 
 pub fn pack(f: &dyn Family, b: &Built, l: &Layout, k: usize) -> Unit {
     let mut u = Unit::default();
-    let p = format!("road/{}/p{k}/", f.name());
+    let p = format!("road/{}/p{k}", f.name());
     let pk = &l.packs[k];
     let metrics = f.metrics();
     let mut level_first = Vec::new();

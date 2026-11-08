@@ -308,8 +308,10 @@ impl Stage<WriteInput<'_>> for WriteModel {
         let fams: [(&dyn Family, &Built, &Layout); 2] =
             [(f.car, f.car_built, f.car_layout), (f.active, f.active_built, f.active_layout)];
         let mut tables: BTreeMap<String, Hash> = BTreeMap::new();
+        let mut entry_base = 0;
         for (fam, b, l) in fams {
-            tables.extend(writer.write_unit(&road::tables(fam, b, l))?.hashes);
+            tables.extend(writer.write_unit(&road::tables(fam, b, l, entry_base))?.hashes);
+            entry_base += l.entries.len() as u32;
         }
         // Packs, then entries in manifest order.
         let mut entries: Vec<(mf::Entry, Vec<usize>)> = Vec::new();

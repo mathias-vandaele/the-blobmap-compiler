@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use blobmap_format::{INF, NONE, rnd};
 
 use crate::model::{Expert, Fam, Runtime};
@@ -60,7 +60,7 @@ pub fn round(roads: &[(i64, u8, u32, bool, f32)]) -> Vec<u16> {
 
 /// Link weights of one expert from its road weights (FORMAT §6.2, §6.3). `w` is per node for
 /// CAR and per arc for ACTIVE.
-pub fn customize(e: &Expert, w: &[u16]) -> (Vec<u16>, Vec<u16>) {
+pub fn customize(e: &Expert, w: &[u16]) -> Result<(Vec<u16>, Vec<u16>)> {
     let links = e.up_head.len();
     let (mut up, mut down) = (vec![INF; links], vec![INF; links]);
     for v in 0..e.n as u32 {
@@ -93,13 +93,13 @@ pub fn customize(e: &Expert, w: &[u16]) -> (Vec<u16>, Vec<u16>) {
             let x = e.up_head[i];
             for j in r.start..i {
                 let y = e.up_head[j];
-                let t = e.link(x, y).expect("chordal");
+                let t = e.link(x, y).with_context(|| format!("node {v}: no link {x}-{y}, the hierarchy is not chordal"))?;
                 up[t] = up[t].min(down[i].saturating_add(up[j]));
                 down[t] = down[t].min(down[j].saturating_add(up[i]));
             }
         }
     }
-    (up, down)
+    Ok((up, down))
 }
 
 pub struct FamilyWeights {

@@ -1,0 +1,22 @@
+[package]
+name = "blobmap-cli"
+description = "blobc: build, verify and inspect BlobMap models (SPEC §10)."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "blobc"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+blobmap-format.workspace = true
+blobmap-build.workspace = true
+blobmap-conformance.workspace = true
+blobmap-runtime.workspace = true
+
+[lints]
+workspace = true

@@ -370,7 +370,8 @@ fn viaway() -> Scenario {
         + "END\nEND\n";
     let mut checks = vec![
         Check::Unknown { id: outside },
-        Check::Reason { id: no_road.clone(), mode: "car", reason: "NoRoad" },
+        Check::Served { id: no_road.clone(), mode: "car" },
+        Check::Reason { id: no_road.clone(), mode: "bike", reason: "NoRoad" },
         Check::Reason { id: no_road, mode: "walk", reason: "NoRoad" },
         Check::Restrictions { at_least: 4 },
     ];

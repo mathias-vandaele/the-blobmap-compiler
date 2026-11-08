@@ -208,7 +208,7 @@ impl Family for Active<'_> {
         let g = self.g;
         let mut cross: Vec<u32> = (0..g.len()).filter(|&r| self.cross(r)).map(|r| r as u32).collect();
         cross.sort_by_key(|&r| (g.way[r as usize], g.dir[r as usize], g.seq[r as usize]));
-        road_tensors(g, &cross, unit, "road/active/cross/");
+        road_tensors(g, &cross, unit, "road/active/cross");
     }
     fn road_key(&self, v: u32) -> (i64, u32, u8) {
         self.key[v as usize]
