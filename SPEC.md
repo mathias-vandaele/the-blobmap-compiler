@@ -54,7 +54,9 @@ Place rules (defaults, kept in versioned config; the config hash goes into the m
 | Duplicates | merged when same basic category, within 30 m, compatible names; the highest confidence is kept, ties to the smallest ID |
 | Categories | Overture's taxonomy of the pinned release: basic category and taxonomy hierarchy, with Overture's redirect rules |
 
-Each build writes a data report, outside the model directory (§8): place counts per country and basic category against the previous build, flagging any change above 20 %, plus the number of trapped components (§5), which usually point at OSM errors. Provider score distributions drift between releases, so the rules are reviewed against this report every month.
+Each build writes a data report, outside the model directory (§8).
+- **Place counts** per country and basic category, compared with the previous build's data report and flagging any change above 20 %. The previous report is passed as `--previous-report <file>` (§10); without it there is no comparison.
+- **Trapped components** (§5), which usually point at OSM errors: every one, sorted by size, with its node count, the number of IDs whose nearest eligible piece lies in it, and one OSM way id, so the large ones can be fixed in OSM. Provider score distributions drift between releases, so the rules are reviewed against this report every month.
 
 ## 4. Modes and profiles
 
@@ -83,6 +85,7 @@ The compiler splits the network into experts by connectivity and splits large ex
 1. **Build each mode family's graph** over the whole `.pbf` (CAR: the turn graph; ACTIVE: the bike and walk union).
 2. **Compute strongly connected components.** Each component is an expert: Eurasia plus Africa is one CAR expert; Britain is its own while ferries and shuttles are excluded; every island is its own. CAR and ACTIVE components are computed separately and need not line up.
 3. **Keep every component.** Small ones are packed into expert groups by size, to keep shard counts reasonable. A component attached to a larger one only by one-way roads (a one-way street into a dead end, a mis-tagged junction) is a trapped component, usually a data error: it stays in the model, but no ID snaps to it (§6). A component with no road at all to the rest is an island, served whatever its size.
+   - **Precisely:** group the components that roads join, ignoring road direction. In each group, the largest component is served and every other one is trapped, with ties to the smaller expert index. A group of one component is an island.
 4. **ACTIVE reachability per metric.** An ACTIVE expert is a component of the union graph. Inside it, a pair one mode cannot connect gets ∞ for that metric, which is exact.
 5. **Cells, when an expert is too large to build at once.** The compiler coarsens the expert, finds its top nested-dissection separators on the coarse graph, and splits it into cells that fit the memory budget. Each cell is ordered and contracted on its own; the separators are ordered above all cells and contracted last.
 6. **One hierarchy per expert.** Contracting a cell's interior only creates shortcuts among that cell's own nodes and its separator nodes, so the assembled hierarchy is exact. Its shards follow the cells.
@@ -204,7 +207,7 @@ The spec defines each operation by its exact result, never by an algorithm. A ru
 One command builds a model from a `.pbf` and an Overture release, deterministically, within 62 GB of RAM whatever the input size.
 
 ```
-blobc build   --pbf <file.osm.pbf> --overture <release dir> --config <config dir> --out <model dir> [--extent <poly>]
+blobc build   --pbf <file.osm.pbf> --overture <release dir> --config <config dir> --out <model dir> [--extent <poly>] [--previous-report <file>]
 blobc verify  <model dir> [--tier tiny|small|region|country]
 blobc inspect <model dir>
 ```

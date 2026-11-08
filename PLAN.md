@@ -1,7 +1,7 @@
 # PLAN
 
 How the milestones of SPEC §13 get built. SPEC.md says what; FORMAT.md says the bytes; this
-file only orders the work. Status: awaiting approval; no compiler code before that.
+file only orders the work. Status: approved 2026-11-08; milestone 2 in progress.
 
 ## Milestone 2: toy and synthetic
 
@@ -125,15 +125,8 @@ The gate passes on a clean commit when all of these hold:
 
 `ci.sh` runs 1–4 locally (SPEC §11: every commit).
 
-### Open items for milestone 2
-
-These need an answer before the code that depends on them:
-- **Trapped components** (SPEC §5): my reading is "every SCC of a family graph that is not
-  the largest SCC of its weakly connected component". An island is a weakly connected
-  component with one SCC. Ties go to the smaller expert index.
-- **"Against the previous build"** (SPEC §3): the data report needs the previous model.
-  I propose an optional `blobc build --previous <model dir>`; without it, the report has no
-  comparison.
+Decided at approval: trapped components follow SPEC §5 ("Precisely"), and the data report
+compares against `--previous-report` (SPEC §3, §10).
 
 ## Milestones 3–7
 
@@ -145,8 +138,13 @@ outside the read-only reference folders.
     the build report.
   - **Gate:**
     - small tier (a Lille extract), region tier (HdF) and country tier all green;
-    - car MAE against OSRM ≤ the research engine's (about 19 s), on its cached pairs from
-      local OSRM data, never the live API;
+    - accuracy against local OSRM data, on the research's cached pairs, never the live
+      API:
+      - car: MAE ≤ the research engine's (about 19 s). The report notes that via-way
+        restrictions are now applied, unlike in the research, so the two engines differ.
+      - walk: median relative error about 0.06 %, as in the research.
+      - bike: median relative error about 5 %, as in the research (the missing turn costs,
+        SPEC §4);
     - every component served: the expert list shows Corsica and the islands, and every
       non-trapped expert serves IDs.
 - **4. Cells.**
