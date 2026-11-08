@@ -91,7 +91,11 @@ impl Runner {
         mem::reset_peak();
         let t = Instant::now();
         let out = s.run(input).with_context(|| format!("stage {}", s.name()))?;
-        self.stages.push(StageReport { name: s.name(), wall_s: t.elapsed().as_secs_f64(), peak_rss_bytes: mem::peak_rss() });
+        mem::trim();
+        let r = StageReport { name: s.name(), wall_s: t.elapsed().as_secs_f64(), peak_rss_bytes: mem::peak_rss() };
+        // As each stage ends, so a long build shows where it is.
+        eprintln!("{:>18} {:>9.3} s  peak {:>6} MiB  after {:>6} MiB", r.name, r.wall_s, r.peak_rss_bytes.unwrap_or(0) >> 20, mem::rss().unwrap_or(0) >> 20);
+        self.stages.push(r);
         Ok(out)
     }
 }

@@ -13,6 +13,20 @@ pub fn peak_rss() -> Option<u64> {
     status_bytes("VmHWM:")
 }
 
+/// Resident set size in bytes now.
+pub fn rss() -> Option<u64> {
+    status_bytes("VmRSS:")
+}
+
+/// Gives the allocator's free memory back to the system (glibc keeps it per thread arena
+/// otherwise, and a later stage cannot reuse another arena's holes).
+pub fn trim() {
+    // SAFETY: malloc_trim only releases free heap memory; it has no preconditions.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 /// Reset the high-water mark to the current RSS (no-op where unsupported).
 pub fn reset_peak() {
     let _ = std::fs::write("/proc/self/clear_refs", "5");

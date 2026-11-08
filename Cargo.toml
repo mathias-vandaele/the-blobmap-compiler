@@ -16,6 +16,7 @@ clap = { version = "4.6", features = ["derive"] }
 deunicode = "=1.6.2"
 flate2 = "=1.1.10"
 hex = "=0.4.3"
+libc = "=0.2.191"
 memmap2 = "0.9"
 osmpbf = "=0.3.8"
 parquet = { version = "=60.0.0", default-features = false, features = ["arrow", "zstd", "snap"] }

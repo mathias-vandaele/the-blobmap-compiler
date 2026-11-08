@@ -69,9 +69,6 @@ fn run() -> Result<bool> {
         Cmd::Build { pbf, overture, config, out, extent, previous_report } => {
             let a = blobmap_build::Args { pbf, overture, config, out, extent, previous_report };
             let r = blobmap_build::build(&a)?;
-            for s in &r.stages {
-                eprintln!("{:>18} {:>9.3} s  peak {:>6} MiB", s.name, s.wall_s, s.peak_rss_bytes.unwrap_or(0) >> 20);
-            }
             println!("model_id {}", r.manifest.model_id);
             println!("inputs_hash {}", r.manifest.inputs_hash);
             Ok(true)
