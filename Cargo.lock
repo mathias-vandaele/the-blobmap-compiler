@@ -187,6 +187,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "blobmap-osm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blobmap-fixtures",
+ "blobmap-profile",
+ "osmpbf",
+ "rayon",
+]
+
+[[package]]
 name = "blobmap-profile"
 version = "0.1.0"
 dependencies = [

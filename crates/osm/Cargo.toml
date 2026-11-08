@@ -1,0 +1,18 @@
+[package]
+name = "blobmap-osm"
+description = "Reading the .osm.pbf: ways, routing nodes, pieces with lengths, delays and shapes, turn restrictions."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+osmpbf.workspace = true
+rayon.workspace = true
+blobmap-profile.workspace = true
+
+[dev-dependencies]
+blobmap-fixtures.workspace = true
+
+[lints]
+workspace = true
