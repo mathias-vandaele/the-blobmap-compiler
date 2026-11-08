@@ -123,6 +123,31 @@ fn run() -> Result<bool> {
                     e.shards.len()
                 );
             }
+            // Experts built as cells: the top block's levels and the deepest cell's (SPEC §5).
+            let rt = blobmap_runtime::Runtime::open(&model)?;
+            for (fam, t) in &rt.tables {
+                for x in 0..t.nodes.len() {
+                    let bs = t.block_first[x] as usize..t.block_first[x + 1] as usize;
+                    if bs.len() < 2 {
+                        continue;
+                    }
+                    let top: Vec<usize> = bs.clone().filter(|&b| t.b_kind[b] == 1).collect();
+                    let cells: Vec<usize> = bs.filter(|&b| t.b_kind[b] == 2).collect();
+                    let deepest = cells.iter().copied().max_by_key(|&b| (t.b_levels[b], std::cmp::Reverse(b))).unwrap();
+                    println!(
+                        "{:>6} expert {x}: levels {} = top {} ({} nodes) + deepest cell {} ({} nodes); {} cells of {}..{} nodes",
+                        fam.name(),
+                        t.levels[x],
+                        top.iter().map(|&b| t.b_levels[b]).sum::<u32>(),
+                        top.iter().map(|&b| t.b_nodes[b]).sum::<u32>(),
+                        t.b_levels[deepest],
+                        t.b_nodes[deepest],
+                        cells.len(),
+                        cells.iter().map(|&b| t.b_nodes[b]).min().unwrap(),
+                        cells.iter().map(|&b| t.b_nodes[b]).max().unwrap(),
+                    );
+                }
+            }
             Ok(true)
         }
     }

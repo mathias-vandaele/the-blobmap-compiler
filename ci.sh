@@ -5,7 +5,9 @@
 #      mutant caught;
 #   3. byte-identical builds with 1, 2, 8 and 24 threads;
 #   4. the cells scenario built as cells and in one piece: different model_id, same
-#      inputs_hash, same golden replay.
+#      inputs_hash, same golden replay;
+#   5. with BLOBC_DATA set to a data directory holding the small tier's inputs
+#      (tiers/small.toml), every small-tier set built and verified against golden/small.
 set -euo pipefail
 root="$(cd "$(dirname "$0")" && pwd)"
 cd "$root"
@@ -62,5 +64,22 @@ if [ "$(field model_id "$a")" != "$(field model_id "$b")" ] && [ "$(field inputs
 else
     echo "FAIL cells: model_id or inputs_hash"
     fail=1
+fi
+echo "== 5. small tier"
+if [ -n "${BLOBC_DATA:-}" ]; then
+    for name in $(sed -nE 's/^name = "(.*)"$/\1/p' tiers/small.toml); do
+        get() { awk -v n="$name" -v k="$1" '$0 ~ "^name = \"" n "\"" {s=1} s && $1 == k {gsub(/"/, "", $3); print $3; exit}' tiers/small.toml; }
+        out="$work/m/small-$name"
+        ext="$(get extent)"
+        "$BLOBC" build --pbf "$BLOBC_DATA/$(get pbf)" --overture "$BLOBC_DATA/$(get overture)" --config "$BLOBC_DATA/$(get config)" \
+            --out "$out" ${ext:+--extent "$BLOBC_DATA/$ext"} >"$work/log" 2>&1 || { echo "FAIL build $name"; cat "$work/log"; fail=1; continue; }
+        if "$BLOBC" verify "$out" --tier small --data "$BLOBC_DATA" --golden "$root/golden" >"$work/log" 2>&1; then
+            echo "ok   small $name: $(tail -1 "$work/log")"
+        else
+            echo "FAIL small $name"; cat "$work/log"; fail=1
+        fi
+    done
+else
+    echo "skipped: BLOBC_DATA is not set"
 fi
 [ "$fail" = 0 ] && echo "GATE PASSED" || { echo "GATE FAILED"; exit 1; }

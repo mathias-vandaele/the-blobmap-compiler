@@ -59,7 +59,9 @@ Build order (PLAN.md), each crate under `crates/`:
 - `runtime`: the CPU reference runtime. `conformance`: the SPEC §11 suite, golden files,
   mutants. `cli`: `blobc build | verify | inspect`.
 
-`ci.sh` runs the milestone 2 gate; `tools/determinism.sh` the thread-count check. Golden
+`ci.sh` runs the milestone 2 gate, and the small tier when `BLOBC_DATA` names a data
+directory; `tools/determinism.sh` the thread-count check. Golden
 files live in `golden/<tier>/<inputs>/`. `tiers/<tier>.toml` lists each tier's inputs by
 path and SHA-256 (`blobc verify --data <dir>`); the `tier` binary of `conformance` writes
-them (`tier tiny <dir> tiers/tiny.toml`, `tier add …`).
+them (`tier tiny <dir> tiers/tiny.toml`, `tier add …`). Milestone 3 tools: `fixtures`
+`extract` (city extracts); `conformance` `accuracy` (cached OSRM pairs), `experts` (served components).
