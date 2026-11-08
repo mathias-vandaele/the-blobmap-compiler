@@ -2,6 +2,8 @@
 
 Nov 8, 2026 · @Mathias Vandaele
 
+SPEC version 2.0.0
+
 ## 1. Purpose and scope
 
 `blobc` compiles one OpenStreetMap `.pbf` and one pinned Overture release into one model: a manifest plus sharded safetensors that any runtime can execute to answer exact travel-time queries by car, bike and walk.
@@ -219,7 +221,7 @@ A model is correct when the CPU reference runtime matches Dijkstra on the origin
 
 | Tier | Content | When |
 | --- | --- | --- |
-| tiny | the 3×3 toy town (17 links, 5 levels, its known distance grid) and synthetic graphs | every commit |
+| tiny | the 3×3 toy town (17 links, 5 levels, its known distance grid) and synthetic graphs, including via-way restrictions (`no_*` and `only_*`, with one and with two via ways) | every commit |
 | small | a city-sized `.pbf` | every commit |
 | region | a region-sized `.pbf` | by hand |
 | country | France | by hand, every release |
@@ -227,6 +229,9 @@ A model is correct when the CPU reference runtime matches Dijkstra on the origin
 Checks:
 
 - CCH against Dijkstra: single and multi-source columns, start times, the reversed graph, both ACTIVE metrics, turn-aware Dijkstra for CAR.
+- Via-way restrictions:
+  - every forbidden sequence is avoided, against a turn-aware Dijkstra that tracks the segments driven;
+  - an address on a via segment, reached through a restricted prefix, gets its exact time, in both directions.
 - Re-customization with random metrics on the same hierarchy.
 - The address and place heads, including same-piece pairs and same-ID queries.
 - Snapping re-check: re-snapping reproduces the stored entries exactly.

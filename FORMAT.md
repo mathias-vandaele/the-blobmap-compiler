@@ -6,7 +6,7 @@ means; this document says only how it is laid out in bytes. Section references s
 SPEC wins and this document is wrong.
 
 - **Format name:** `blobmap-model`. **Version:** `2.0.0` (§12).
-- **Status:** draft for milestone 1 (SPEC §13), awaiting approval.
+- **Status:** approved at milestone 1 (SPEC §13), 2026-11-08.
 
 Contents: §1 conventions · §2 files · §3 manifest · §4 storage units and names · §5 road part ·
 §6 re-customization · §7 vocabulary part · §8 meaning of the bytes · §9 hashes ·
@@ -129,7 +129,7 @@ So a shard never mixes units (SPEC §8). Chunks are at most the target, so no sh
 | `format_version` | string | `"2.0.0"` |
 | `model_id` | string | §9; the identity of the model's content |
 | `inputs_hash` | string | §9; the identity of what the answers depend on, which keys golden files (§11) |
-| `spec_version` | string | the version of SPEC.md the model was built to; `"2"` for SPEC v2 |
+| `spec_version` | string | the version of SPEC.md the model was built to, read from its "SPEC version" line (`"2.0.0"`) |
 | `compiler` | object | `{name: "blobc", version, commit, dirty}`: commit is the 40-hex git commit, dirty a boolean |
 | `inputs` | object | below |
 | `config` | object | below |
@@ -400,7 +400,9 @@ SPEC §7 defines the rounding groups and the rule. In bytes:
   - CAR rows with `kind = 2` (via-way copies, §5.3) are not members.
   - A road whose new time is `+∞` leaves its group; one whose time becomes finite joins it.
 - **Copies:** after rounding, each CAR copy takes the `car.time_s` and `car.w` of its
-  original. The original is the member with the same (`way`, `way_dir`, `way_seq`).
+  original. The original is the member with the same (`way`, `way_dir`, `way_seq`). When
+  `copy_of = NONE`, the original is in another expert, and re-rounding finds it by this
+  way key, since rounding groups span the family.
 - **Travel order:** `way_seq` ascending if `way_dir = 0`, descending if 1.
 
 For each group, the exact integer computation:

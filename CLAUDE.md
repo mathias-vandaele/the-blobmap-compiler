@@ -10,6 +10,7 @@
   memory notes. Where they disagree with SPEC.md or FORMAT.md, those two win.
 - If you find a real contradiction or gap in SPEC.md or FORMAT.md, stop and ask. Do not
   pick an answer silently.
+- **PLAN.md** orders the work by milestone. It decides nothing about meaning or bytes.
 - Do not create other docs. A change of meaning goes into SPEC.md, a change of bytes into
   FORMAT.md, and only once it is approved.
 
@@ -45,5 +46,6 @@ concept that contradicts SPEC.md.
 
 ## Crate map
 
-No crates yet. Milestone 1 (SPEC §13) is docs only: no compiler code until FORMAT.md and
-PLAN.md are approved.
+Planned in PLAN.md and not created yet; no code until PLAN.md is approved. Build order:
+`format` → `fixtures` → `profile` → `osm` → `graph` → `order` → `cch` → `overture` →
+`snap` → `build` → `runtime` → `conformance` → `cli` (`blobc`).
