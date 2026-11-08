@@ -1,0 +1,22 @@
+# Inputs of the region tier (SPEC §10, verify): paths under `blobc verify --data`.
+tier = "region"
+
+[[inputs]]
+name = "hdf"
+pbf = "osm/hdf.osm.pbf"
+overture = "overture/2026-10-21.0"
+config = "config"
+extent = "poly/hdf.poly"
+
+[inputs.files]
+"config/active.toml" = "63861f425a92bbf3161d3fd9b6cd60f152635e4db2b6246273cae83025e77589"
+"config/build.toml" = "02a91882a18c57b8cf08ac7db43426b40c2920a3051c008d8f4b55244203ef4f"
+"config/car.toml" = "287c586e2c24f6047c14d95be95a603450ec540f0f1712f207ed068bf830db50"
+"config/places.toml" = "c37fcad0881de6bf6d43ae60198a3e31704937a5afefacdbd7889407c1ced449"
+"osm/hdf.osm.pbf" = "689f4132b428d5025ecea6e29baa4f25d73095db12c2dff31f0ed1ba93fd7a5d"
+"overture/2026-10-21.0/raw/address.parquet" = "d9cbb6ece965288c43e667532262f6a4da95d14fc379f9fe47725bf301f995c0"
+"overture/2026-10-21.0/raw/place.parquet" = "dc3b44e6a6f0c9ca6b9d27a437b47587d197faf6c413f554f9034ce8c1d7755e"
+"overture/2026-10-21.0/taxonomy/basic_categories.csv" = "c0aed53113a825240d71b981746f5296b88a2bb20005528b104045c3c97b7afc"
+"overture/2026-10-21.0/taxonomy/mapping_sheet.csv" = "5dfb038fb8fbadfb31bbb51e577b53eb4488140bc93e1d32b005edba2f212ce6"
+"overture/2026-10-21.0/taxonomy/taxonomy.csv" = "59eecbf9e24859bcdab459e8efeea673b7fcbab06b45bd1c7067f215b3bc25d4"
+"poly/hdf.poly" = "5fe8328529a6a616b6d6556ed69b30a31a7aeae97486e4afa1cb0fd8970bb552"
