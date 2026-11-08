@@ -183,8 +183,48 @@ impl Expected<'_> {
                 self.ids_answer((0..self.r.n()).filter(|&i| if all { !cols.is_empty() && cols.iter().all(|c| ok(c, i)) } else { cols.iter().any(|c| ok(c, i)) }))
             }
             "multi_criteria" => self.multi_criteria(a),
+            "chained" | "chained_column" => self.chained(op, a),
             _ => unreachable!("op {op}"),
         }
+    }
+
+    /// SPEC §9 chained trips, from the matrices: car(x, p) ⊕ penalty ⊕ walk(p, y).
+    fn chained(&self, op: &str, a: &Value) -> Value {
+        let (car, walk) = (self.mode("car"), self.mode("walk"));
+        let c = self.category(&a["transfer_category"]).expect("a known category");
+        let pen = a["penalty"].as_u64().unwrap() as u16;
+        let transfers: Vec<usize> =
+            (0..self.r.n()).filter(|&p| self.matches(p, &c) && self.r.modes[car].at[p].is_ok() && self.r.modes[walk].at[p].is_ok()).collect();
+        let trip = |x: usize, y: usize, p: usize| self.m[car][x][p].saturating_add(pen).saturating_add(self.m[walk][p][y]);
+        if op == "chained" {
+            let (sa, sb) = (a["a"].as_str().unwrap(), a["b"].as_str().unwrap());
+            let x = match self.served(sa, car) {
+                Ok(i) => i,
+                Err(r) => return r,
+            };
+            let y = match self.served(sb, walk) {
+                Ok(i) => i,
+                Err(r) => return r,
+            };
+            return match transfers.iter().map(|&p| (trip(x, y, p), self.r.ids[p])).filter(|t| t.0 != INF).min() {
+                Some((t, p)) => json!({"time": t, "place": uuid(&p)}),
+                None => json!({"time": "BEYOND", "place": null}),
+            };
+        }
+        let from = a["dir"] == "from";
+        let id = a["id"].as_str().unwrap();
+        let i = match self.served(id, if from { car } else { walk }) {
+            Ok(i) => i,
+            Err(r) => return r,
+        };
+        let col: Vec<u16> = (0..self.r.n())
+            .map(|y| transfers.iter().map(|&p| if from { trip(i, y, p) } else { trip(y, i, p) }).min().unwrap_or(INF))
+            .collect();
+        let mut h = Sha256::new();
+        for t in &col {
+            h.update(t.to_le_bytes());
+        }
+        json!({"times_sha256": hex::encode(h.finalize()), "beyond": col.iter().filter(|&&t| t == INF).count()})
     }
 
     fn multi_criteria(&self, a: &Value) -> Value {

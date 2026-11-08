@@ -230,6 +230,10 @@ fn town() -> Scenario {
     let closed = b.place(60.0, 330.0, Some("cafe"), Some("cafe"), "Closed Cafe");
     b.last_place().operating_status = Some("permanently_closed".into());
     let bare = b.place(210.0, 470.0, None, None, "Somewhere");
+    // Retired keys, redirected (SPEC §6): primary `drugstore` is a pharmacy, alternate
+    // `pizzeria` a pizza restaurant.
+    let drugstore = b.place(170.0, 280.0, Some("drugstore"), Some("pharmacy"), "Droguerie");
+    b.last_place().alternates = vec!["pizzeria".into()];
     b.place(370.0, 480.0, Some("space_elevator"), None, "Elevator");
     b.place(20.0, 220.0, Some("parking"), Some("parking"), "Parking West");
     b.place(480.0, 380.0, Some("parking"), Some("parking"), "Parking East");
@@ -265,6 +269,8 @@ fn town() -> Scenario {
             Check::Beyond { mode: "bike", a: tie_src.clone(), b: east.clone() },
             Check::Reachable { mode: "walk", a: tie_src.clone(), b: east },
             Check::Tie { category: "cafe", id: tie_src, mode: "walk", place: cafe_a.min(cafe_b) },
+            Check::Matches { category: "pharmacy", place: drugstore.clone() },
+            Check::Matches { category: "pizza_restaurant", place: drugstore },
             Check::SamePiece { mode: "car", a: same_a.clone(), b: same_b.clone() },
             Check::SamePiece { mode: "walk", a: same_a, b: same_b },
             Check::SamePiece { mode: "car", a: one_a.clone(), b: one_b.clone() },

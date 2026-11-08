@@ -337,6 +337,11 @@ pub fn scenario(rt: &Runtime, ex: &Expected, checks: &[Check], cells_variant: bo
                 let want = ex.answer("nearest", &json!({"category": {"category": category}, "id": id, "mode": mode, "dir": "from"}));
                 o.expect(got == want, || format!("tie {category}: {got} != {want}"));
             }
+            Check::Matches { category, place } => {
+                let c = rt.category(&json!({"category": category}))?;
+                let p = rt.resolve(place).map(|i| i as usize - rt.vocab.address.len());
+                o.expect(p.is_ok_and(|p| rt.matches(p, c)), || format!("{place} does not match {category}"));
+            }
             Check::SamePiece { mode, a, b } => {
                 let m = rt.mode(mode)?;
                 let (ia, ib) = (rt.resolve(a), rt.resolve(b));

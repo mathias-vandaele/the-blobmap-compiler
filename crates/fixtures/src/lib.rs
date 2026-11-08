@@ -92,6 +92,11 @@ pub enum Check {
         a: String,
         b: String,
     },
+    /// The place matches the taxonomy category (its own keys went through the redirects).
+    Matches {
+        category: &'static str,
+        place: String,
+    },
     AtNode {
         id: String,
         mode: &'static str,

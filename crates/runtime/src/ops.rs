@@ -207,11 +207,7 @@ impl Runtime {
                 };
                 let col = self.column(&src, m, dir()?)?;
                 if op == "column" {
-                    let mut h = Sha256::new();
-                    for t in &col {
-                        h.update(t.to_le_bytes());
-                    }
-                    return Ok(json!({"times_sha256": hex::encode(h.finalize()), "beyond": col.iter().filter(|&&t| t == INF).count()}));
+                    return Ok(column_json(&col));
                 }
                 let t = args["t"].as_u64().context("t")?;
                 Ok(self.id_answer((0..col.len() as u32).filter(|&i| col[i as usize] != INF && col[i as usize] as u64 <= t), with_ids))
@@ -236,9 +232,78 @@ impl Runtime {
                 Ok(self.id_answer((0..n as u32).filter(|&i| hit[i as usize]), with_ids))
             }
             "multi_criteria" => self.multi_criteria(args, with_ids),
-            "chained" => bail!("chained trips are not defined precisely enough to evaluate (no destination in SPEC §9)"),
+            "chained" | "chained_column" => {
+                let c = self.category(&args["transfer_category"])?;
+                let penalty = args["penalty"].as_u64().context("penalty")?;
+                ensure!(penalty < INF as u64, "penalty must be below {INF}");
+                if op == "chained" {
+                    self.chained(args["a"].as_str().context("a")?, args["b"].as_str().context("b")?, c, penalty as u16)
+                } else {
+                    self.chained_column(args["id"].as_str().context("id")?, c, penalty as u16, dir()?)
+                }
+            }
             _ => bail!("unknown op {op:?}"),
         }
+    }
+
+    /// Transfer places of a chained trip (SPEC §9): kept places of the category served for
+    /// both car and walk, as internal indices.
+    fn transfers(&self, c: Category, car: usize, walk: usize) -> Vec<u32> {
+        let na = self.vocab.address.len();
+        (0..self.vocab.place.len())
+            .map(|p| (p, (na + p) as u32))
+            .filter(|&(p, i)| self.matches(p, c) && self.served(i, car).is_ok() && self.served(i, walk).is_ok())
+            .map(|(_, i)| i)
+            .collect()
+    }
+
+    /// `chained(a, b)`: min over transfer places p of car(a, p) ⊕ penalty ⊕ walk(p, b), and p.
+    pub fn chained(&self, a: &str, b: &str, c: Category, penalty: u16) -> Result<Value> {
+        let (car, walk) = (self.mode("car")?, self.mode("walk")?);
+        let ia = match self.source(a, car) {
+            Ok(i) => i,
+            Err(r) => return Ok(reason_json(r, a)),
+        };
+        let ib = match self.source(b, walk) {
+            Ok(i) => i,
+            Err(r) => return Ok(reason_json(r, b)),
+        };
+        let drive = self.column(&[Source { id: ia, start: 0 }], car, Dir::From)?;
+        let on_foot = self.column(&[Source { id: ib, start: 0 }], walk, Dir::To)?;
+        let mut best: Option<(u16, Id)> = None;
+        for p in self.transfers(c, car, walk) {
+            let t = self.faults.add(self.faults.add(drive[p as usize], penalty), on_foot[p as usize]);
+            let cand = (t, self.vocab.id(p));
+            if t != INF && best.is_none_or(|b| self.better(cand, b)) {
+                best = Some(cand);
+            }
+        }
+        Ok(match best {
+            Some((t, p)) => json!({"time": t, "place": id_string(&p)}),
+            None => json!({"time": "BEYOND", "place": null}),
+        })
+    }
+
+    /// The chained column (SPEC §9): `From` car from `id` to each transfer place, then walk
+    /// on to every ID; `To` car from every ID to each transfer place, then walk on to `id`.
+    pub fn chained_column(&self, id: &str, c: Category, penalty: u16, dir: Dir) -> Result<Value> {
+        let (car, walk) = (self.mode("car")?, self.mode("walk")?);
+        let (first, second) = if dir == Dir::From { (car, walk) } else { (walk, car) };
+        let i = match self.source(id, first) {
+            Ok(i) => i,
+            Err(r) => return Ok(reason_json(r, id)),
+        };
+        // The leg at `id`'s end, to or from each transfer place; then the other leg as a
+        // multi-source column started at those times plus the penalty.
+        let leg = self.column(&[Source { id: i, start: 0 }], first, dir)?;
+        let src: Vec<Source> = self
+            .transfers(c, car, walk)
+            .into_iter()
+            .map(|p| Source { id: p, start: self.faults.add(leg[p as usize], penalty) })
+            .filter(|s| s.start != INF)
+            .collect();
+        let col = self.column(&src, second, dir)?;
+        Ok(column_json(&col))
     }
 
     fn multi_criteria(&self, args: &Value, with_ids: bool) -> Result<Value> {
@@ -305,6 +370,15 @@ impl Runtime {
             }
         }
     }
+}
+
+/// A column's golden answer (FORMAT §11).
+fn column_json(col: &[u16]) -> Value {
+    let mut h = Sha256::new();
+    for t in col {
+        h.update(t.to_le_bytes());
+    }
+    json!({"times_sha256": hex::encode(h.finalize()), "beyond": col.iter().filter(|&&t| t == INF).count()})
 }
 
 fn collect_terms<'a>(e: &'a Value, out: &mut Vec<&'a Value>) -> Result<()> {

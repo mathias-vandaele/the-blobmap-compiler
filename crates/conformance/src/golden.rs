@@ -86,6 +86,36 @@ pub fn queries(e: &Expected, named: &[String]) -> Vec<Value> {
             }
         }
     }
+    // Chained trips (SPEC §9): car, a penalty, then walk; no mode. Besides the sample, an
+    // unknown ID and the first IDs not served for car and for walk.
+    let unserved = |mode: &str| -> Option<String> {
+        let mi = e.r.modes.iter().position(|x| x.name == mode).unwrap();
+        (0..e.r.n()).find(|&i| e.r.modes[mi].at[i].is_err()).map(|i| uuid(&e.r.ids[i]))
+    };
+    let mut odd = vec!["00000000-0000-4000-8000-000000000000".to_string()];
+    odd.extend(unserved("car"));
+    odd.extend(unserved("walk"));
+    for key in category_keys(e).into_iter().take(3) {
+        for x in &odd {
+            q.push(("chained".into(), json!({"a": x, "b": ids[0], "transfer_category": key, "penalty": 60})));
+            q.push(("chained".into(), json!({"a": ids[0], "b": x, "transfer_category": key, "penalty": 60})));
+            for dir in ["from", "to"] {
+                q.push(("chained_column".into(), json!({"id": x, "transfer_category": key, "penalty": 60, "dir": dir})));
+            }
+        }
+        for penalty in [0, 300] {
+            for a in ids.iter().take(8) {
+                for b in ids.iter().take(8) {
+                    q.push(("chained".into(), json!({"a": a, "b": b, "transfer_category": key, "penalty": penalty})));
+                }
+            }
+            for dir in ["from", "to"] {
+                for id in ids.iter().take(4) {
+                    q.push(("chained_column".into(), json!({"id": id, "transfer_category": key, "penalty": penalty, "dir": dir})));
+                }
+            }
+        }
+    }
     q.into_iter().map(|(op, args)| json!({"op": op, "answer": e.answer(&op, &args), "args": args})).collect()
 }
 

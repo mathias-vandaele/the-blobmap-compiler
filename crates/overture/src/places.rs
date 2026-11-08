@@ -43,7 +43,7 @@ pub fn filtered(p: &RawPlace, rules: &PlaceRules, tax: &Taxonomy) -> bool {
     if p.status.as_ref().is_some_and(|s| rules.rules.closed_statuses.contains(s)) {
         return true;
     }
-    let node = p.primary.as_deref().and_then(|k| tax.id(k));
+    let node = p.primary.as_deref().and_then(|k| tax.resolve(k));
     let min = rules
         .confidence
         .under

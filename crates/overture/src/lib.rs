@@ -46,6 +46,8 @@ pub struct Address {
     pub lat: f64,
     pub lon: f64,
     pub country: String,
+    /// Index of the row's source licences in `Catalog::license_sets`.
+    pub license: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -62,6 +64,8 @@ pub struct Place {
     pub alt: Vec<u16>,
     /// The basic category's key as Overture gives it (the data report counts by it).
     pub basic_key: Option<String>,
+    /// Index of the row's source licences in `Catalog::license_sets`.
+    pub license: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -86,8 +90,10 @@ pub struct Catalog {
     pub places: Vec<Place>,
     /// Merged duplicates and the index in `places` of the place kept, sorted by ID.
     pub aliases: Vec<(Id, u32)>,
-    /// Source licences, with the number of rows that carry each.
-    pub licenses: BTreeMap<String, u64>,
+    /// The source licences of each alias's own row, as `license_sets` indices.
+    pub alias_license: Vec<u32>,
+    /// The distinct sets of source licences that rows carry, sorted.
+    pub license_sets: Vec<Vec<String>>,
     pub stats: CatalogStats,
 }
 
@@ -98,19 +104,21 @@ impl Catalog {
         let raw_a = release.read_addresses(keep)?;
         let raw_p = release.read_places(keep)?;
         let mut stats = CatalogStats { addresses: raw_a.len() as u64, places: raw_p.len() as u64, ..CatalogStats::default() };
-        let mut licenses: BTreeMap<String, u64> = BTreeMap::new();
+        // Licence sets, interned in sorted order.
+        let mut license_sets: Vec<Vec<String>> = raw_a.iter().map(|a| &a.licenses).chain(raw_p.iter().map(|p| &p.licenses)).map(|l| sorted(l)).collect();
+        license_sets.sort();
+        license_sets.dedup();
+        let license = |l: &[String]| license_sets.binary_search(&sorted(l)).unwrap() as u32;
         let mut addresses = Vec::with_capacity(raw_a.len());
         for a in &raw_a {
-            addresses.push(Address { id: parse_uuid(&a.id)?, lat: a.lat, lon: a.lon, country: a.country.clone() });
-            for l in &a.licenses {
-                *licenses.entry(l.clone()).or_default() += 1;
-            }
+            addresses.push(Address { id: parse_uuid(&a.id)?, lat: a.lat, lon: a.lon, country: a.country.clone(), license: license(&a.licenses) });
         }
         addresses.sort_by_key(|a| a.id);
+        // A place's keys go through the redirects, like query keys (SPEC §6).
         let key = |k: &Option<String>, stats: &mut CatalogStats| -> u16 {
             match k {
                 None => NONE16,
-                Some(k) => taxonomy.id(k).unwrap_or_else(|| {
+                Some(k) => taxonomy.resolve(k).unwrap_or_else(|| {
                     *stats.missing_keys.entry(k.clone()).or_default() += 1;
                     NONE16
                 }),
@@ -121,17 +129,15 @@ impl Catalog {
             let id = parse_uuid(&p.id)?;
             let primary = key(&p.primary, &mut stats);
             let basic = key(&p.basic, &mut stats);
-            let mut alt: Vec<u16> = p.alternates.iter().filter_map(|k| taxonomy.id(k)).filter(|&a| a != primary).collect();
+            let mut alt: Vec<u16> = p.alternates.iter().filter_map(|k| taxonomy.resolve(k)).filter(|&a| a != primary).collect();
             alt.sort_unstable();
             alt.dedup();
             let status = if places::filtered(p, rules, &taxonomy) { 4 } else { 0 };
             stats.filtered += (status == 4) as u64;
             stats.primary_none += (primary == NONE16) as u64;
-            for l in &p.licenses {
-                *licenses.entry(l.clone()).or_default() += 1;
-            }
+            let license = license(&p.licenses);
             places.push((
-                Place { id, lat: p.lat, lon: p.lon, country: p.country.clone(), status, primary, basic, alt, basic_key: p.basic.clone() },
+                Place { id, lat: p.lat, lon: p.lon, country: p.country.clone(), status, primary, basic, alt, basic_key: p.basic.clone(), license },
                 i,
             ));
         }
@@ -142,18 +148,20 @@ impl Catalog {
         stats.merged = merges.len() as u64;
         let merged: std::collections::HashMap<usize, usize> = merges.iter().map(|&(m, k)| (kept[m as usize], kept[k as usize])).collect();
         let mut out: Vec<(Place, usize)> = Vec::new();
-        let mut alias_raw: Vec<(Id, Id)> = Vec::new();
+        let mut alias_raw: Vec<(Id, Id, u32)> = Vec::new();
         for (k, p) in places.into_iter().enumerate() {
             match merged.get(&k) {
-                Some(&to) => alias_raw.push((p.0.id, parse_uuid(&raw_p[to].id)?)),
+                Some(&to) => alias_raw.push((p.0.id, parse_uuid(&raw_p[to].id)?, p.0.license)),
                 None => out.push(p),
             }
         }
         out.sort_by_key(|a| a.0.id);
         let places: Vec<Place> = out.into_iter().map(|p| p.0).collect();
         let index = |id: &Id| places.binary_search_by(|p| p.id.cmp(id)).ok().map(|i| i as u32);
-        let mut aliases: Vec<(Id, u32)> = alias_raw.iter().map(|(a, k)| (*a, index(k).expect("kept place"))).collect();
+        let mut aliases: Vec<(Id, u32, u32)> = alias_raw.iter().map(|(a, k, l)| (*a, index(k).expect("kept place"), *l)).collect();
         aliases.sort();
+        let alias_license = aliases.iter().map(|a| a.2).collect();
+        let aliases: Vec<(Id, u32)> = aliases.into_iter().map(|a| (a.0, a.1)).collect();
         // No ID twice across the three tables (FORMAT §7.1).
         let mut all: Vec<&Id> =
             addresses.iter().map(|a| &a.id).chain(places.iter().map(|p| &p.id)).chain(aliases.iter().map(|a| &a.0)).collect();
@@ -161,8 +169,34 @@ impl Catalog {
         if let Some(w) = all.windows(2).find(|w| w[0] == w[1]) {
             bail!("Overture ID {} appears twice in the release", uuid_string(w[0]));
         }
-        Ok(Catalog { release: release.name.clone(), taxonomy, addresses, places, aliases, licenses, stats })
+        Ok(Catalog { release: release.name.clone(), taxonomy, addresses, places, aliases, alias_license, license_sets, stats })
     }
+
+    /// Source licences with the number of rows carrying each, over the given rows: address
+    /// indices, place indices and alias indices (SPEC §12: the rows in the model).
+    pub fn license_counts(&self, addresses: &[usize], places: &[usize], aliases: &[usize]) -> BTreeMap<String, u64> {
+        let mut per_set = vec![0u64; self.license_sets.len()];
+        let sets = addresses.iter().map(|&i| self.addresses[i].license).chain(places.iter().map(|&p| self.places[p].license));
+        for l in sets.chain(aliases.iter().map(|&a| self.alias_license[a])) {
+            per_set[l as usize] += 1;
+        }
+        let mut out: BTreeMap<String, u64> = BTreeMap::new();
+        for (set, &n) in self.license_sets.iter().zip(&per_set) {
+            for l in set {
+                if n > 0 {
+                    *out.entry(l.clone()).or_default() += n;
+                }
+            }
+        }
+        out
+    }
+}
+
+fn sorted(l: &[String]) -> Vec<String> {
+    let mut v = l.to_vec();
+    v.sort();
+    v.dedup();
+    v
 }
 
 #[cfg(test)]

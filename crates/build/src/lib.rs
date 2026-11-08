@@ -396,7 +396,7 @@ impl Stage<WriteInput<'_>> for WriteModel {
             extent: i.manifest.extent.as_ref().map(|e| hash_of(&e.sha256)),
             spec_version: spec,
         });
-        let (licenses, attribution) = licenses(i, w.catalog);
+        let (licenses, attribution) = licenses(i, w.catalog, w.ids);
         std::fs::write(out.join(blobmap_format::LICENSES_FILE), &licenses)?;
         let c = &i.config;
         let manifest = Manifest {
@@ -451,7 +451,8 @@ fn prepare_out(out: &Path) -> Result<()> {
 }
 
 /// The `LICENSES` file and the manifest's attribution strings (SPEC §12).
-fn licenses(i: &InputsRead, c: &Catalog) -> (String, Vec<String>) {
+fn licenses(i: &InputsRead, c: &Catalog, ids: &vocab::Ids) -> (String, Vec<String>) {
+    let counts = c.license_counts(&ids.addresses, &ids.places, &ids.alias_rows);
     let mut t = String::new();
     t.push_str("BlobMap model: licences of the inputs (SPEC §12)\n\n");
     t.push_str("Roads\n");
@@ -463,12 +464,12 @@ fn licenses(i: &InputsRead, c: &Catalog) -> (String, Vec<String>) {
     t.push_str("  produced works and need the attribution.\n\n");
     t.push_str("Addresses and places\n");
     t.push_str(&format!("  Source: Overture Maps Foundation, release {}\n", c.release));
-    t.push_str("  Licences of the source records read, with their counts:\n");
-    for (l, n) in &c.licenses {
+    t.push_str("  Licences of the source records in this model, with their counts:\n");
+    for (l, n) in &counts {
         t.push_str(&format!("    {l}: {n}\n"));
     }
     let mut a = vec!["© OpenStreetMap contributors (ODbL 1.0)".to_string(), format!("Overture Maps Foundation, release {}", c.release)];
-    a.extend(c.licenses.keys().map(|l| format!("Overture source data under {l}")));
+    a.extend(counts.keys().map(|l| format!("Overture source data under {l}")));
     (t, a)
 }
 

@@ -71,6 +71,8 @@ pub struct Ids {
     pub places: Vec<usize>,
     /// (alias, internal index of its kept place).
     pub aliases: Vec<(Id, u32)>,
+    /// Indices into `Catalog::aliases` of the aliases kept.
+    pub alias_rows: Vec<usize>,
 }
 
 /// Without `--extent`, an ID is in the model when some mode's family graph has a piece
@@ -84,8 +86,9 @@ pub fn select(c: &Catalog, snaps: &[ModeSnap], polygon: bool) -> Ids {
     for (k, &p) in places.iter().enumerate() {
         new_place[p] = (addresses.len() + k) as u32;
     }
-    let aliases = c.aliases.iter().filter(|a| new_place[a.1 as usize] != NONE).map(|a| (a.0, new_place[a.1 as usize])).collect();
-    Ids { addresses, places, aliases }
+    let alias_rows: Vec<usize> = (0..c.aliases.len()).filter(|&k| new_place[c.aliases[k].1 as usize] != NONE).collect();
+    let aliases = alias_rows.iter().map(|&k| (c.aliases[k].0, new_place[c.aliases[k].1 as usize])).collect();
+    Ids { addresses, places, aliases, alias_rows }
 }
 
 /// Per mode, how many IDs are served and how many have each reason (data report).
