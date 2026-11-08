@@ -79,7 +79,7 @@ fn parse_shard(bytes: &[u8], file: &str) -> Result<Vec<(String, Dtype, Vec<u64>,
     }
     // Contiguous data without holes, as safetensors requires.
     let mut ranges: Vec<Range<usize>> = out.iter().map(|x| x.3.clone()).collect();
-    ranges.sort_by_key(|r| r.start);
+    ranges.sort_by_key(|r| (r.start, r.end));
     let mut at = base;
     for r in &ranges {
         ensure!(r.start == at, "{file}: tensor data is not contiguous");

@@ -82,6 +82,11 @@ pub struct CarGraph {
     pub turn_from: Vec<u32>,
     pub turn_to: Vec<u32>,
     pub turn_cost: Vec<u16>,
+    /// The turns before any restriction, by the original segment they leave, and the
+    /// restrictions as forbidden sequences of original segments: what an independent
+    /// turn-aware Dijkstra needs (SPEC §11).
+    pub base: Vec<Vec<(u32, u16)>>,
+    pub forbidden: Vec<Vec<u32>>,
     pub stats: CarStats,
 }
 
@@ -297,6 +302,8 @@ impl CarGraph {
             g.turn_to.push(b);
             g.turn_cost.push(c);
         }
+        g.base = base;
+        g.forbidden = seqs;
         g
     }
 
