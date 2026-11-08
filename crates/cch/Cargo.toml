@@ -1,0 +1,13 @@
+[package]
+name = "blobmap-cch"
+description = "The hierarchy of one expert: contraction per block, levels, layout ids, customization."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+blobmap-format.workspace = true
+blobmap-order.workspace = true
+
+[lints]
+workspace = true
