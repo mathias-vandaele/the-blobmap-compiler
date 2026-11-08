@@ -1,0 +1,81 @@
+# ACTIVE profile (SPEC §4): bike and walk on one node-based graph (OSRM v6.0.0 bicycle.lua
+# and foot.lua values; speeds flat, no turn costs), plus the snapping rules of SPEC §6. The
+# evaluation order of the rules is code (crate `profile`); its numbers and tag lists are
+# here. The file's sha256 goes into the manifest and into inputs_hash.
+
+[profile]
+name = "active"
+version = 1
+family = "active"
+modes = ["bike", "walk"]
+reference = "OSRM v6.0.0 bicycle.lua and foot.lua"
+
+# Never routable for either mode (besides impassable=yes, status=impassable, route=ferry
+# and any proposed=* tag).
+[never]
+highway = ["proposed", "construction", "abandoned", "motorway", "motorway_link"]
+
+[access]
+walk_closed = ["no", "private", "agricultural", "forestry", "delivery"]
+bike_closed = ["no", "private", "agricultural", "forestry", "delivery", "use_sidepath"]
+open = ["yes", "designated", "permissive"]
+
+[walk]
+kmh = 5.0
+# Highways walked without an access tag; others need foot / access in [access].open.
+default_highways = ["primary", "primary_link", "secondary", "secondary_link", "tertiary", "tertiary_link",
+    "unclassified", "residential", "road", "living_street", "service", "track", "path", "steps",
+    "pedestrian", "footway", "platform", "pier"]
+signal_s = 2.0
+crossing_s = 0.0
+
+[walk.surface_factor]
+fine_gravel = 0.75
+gravel = 0.75
+pebblestone = 0.75
+mud = 0.5
+sand = 0.5
+
+[bike]
+kmh = 15.0
+track_kmh = 12.0
+path_kmh = 13.0
+# Highways ridden at `kmh` without an access tag (track and path have their own speeds).
+ride_highways = ["cycleway", "primary", "primary_link", "secondary", "secondary_link", "tertiary",
+    "tertiary_link", "residential", "unclassified", "living_street", "road", "service"]
+signal_s = 2.0
+crossing_s = 0.0
+# Pushing where the bike may not ride (bicycle.lua bike_push_handler).
+push = true
+push_kmh = 4.0
+push_steps_kmh = 2.0
+
+# bicycle.lua surface_speeds below its default speed, used as caps (km/h).
+[bike.surface_cap]
+wood = 10.0
+metal = 10.0
+"cobblestone:flattened" = 10.0
+paving_stones = 10.0
+compacted = 10.0
+fine_gravel = 10.0
+ground = 10.0
+cobblestone = 7.0
+unpaved = 6.0
+gravel = 6.0
+pebblestone = 6.0
+grass_paver = 6.0
+earth = 6.0
+grass = 6.0
+dirt = 8.0
+mud = 3.0
+sand = 3.0
+woodchips = 3.0
+sett = 9.0
+
+# Snapping (SPEC §6), for each mode on the shared graph: the radius, and the pieces no ID
+# may stand on (as in car.toml; no highway is excluded for bike and walk).
+[snap]
+radius_m = 500
+exclude_highways = []
+exclude_keys = ["bridge", "tunnel", "covered"]
+keep_values = ["no"]

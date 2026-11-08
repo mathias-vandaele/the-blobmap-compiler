@@ -1,0 +1,19 @@
+# Place rules (SPEC §3). The file's sha256 goes into the manifest and into inputs_hash.
+
+[rules]
+name = "places"
+version = 1
+
+# Places whose Overture operating_status is one of these are filtered (FilteredPlace).
+closed_statuses = ["permanently_closed", "temporarily_closed"]
+
+# Minimum confidence: `default`, or the value of the first entry of `under` whose taxonomy
+# node is the place's primary category or one of its ancestors. A missing confidence is 0.
+[confidence]
+default = 0.6
+under = [["health_care", 0.5]]
+
+# Duplicates: same basic category, within radius_m, compatible names. The highest
+# confidence is kept, ties to the smallest ID; the others become its aliases.
+[duplicates]
+radius_m = 30.0
