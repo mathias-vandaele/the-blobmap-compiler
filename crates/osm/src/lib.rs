@@ -40,6 +40,10 @@ pub fn ruler(cl: f64) -> (f64, f64) {
     (m * w * cl, m * w * w2 * (1.0 - E2))
 }
 
+/// The longest master time a piece may have (SPEC §7, long pieces): its weight then stays
+/// below `INF`.
+pub const MAX_PIECE_S: f32 = 65534.0;
+
 /// Master time (SPEC §7) of `len` metres at `kmh`, plus a delay in seconds.
 pub fn arc_time(len: f64, kmh: f32, delay: f64) -> f32 {
     (len / (kmh as f64 / 3.6) + delay) as f32

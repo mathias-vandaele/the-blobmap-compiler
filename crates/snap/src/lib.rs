@@ -83,7 +83,10 @@ fn supercover(ax: f64, ay: f64, bx: f64, by: f64, mut f: impl FnMut(i64, i64)) {
     let inv = |d: f64| if d == 0.0 { f64::INFINITY } else { 1.0 / d.abs() };
     let (tdx, tdy) = (inv(dx), inv(dy));
     let next = |a: f64, c: i64, s: i64| if s > 0 { (c + 1) as f64 - a } else { a - c as f64 };
-    let (mut tx, mut ty) = (next(ax, cx, sx) * tdx, next(ay, cy, sy) * tdy);
+    // A segment parallel to an axis never crosses a line of the other; 0 × ∞ would be NaN
+    // when it starts on one.
+    let cross = |d: f64, a: f64, c: i64, s: i64, td: f64| if d == 0.0 { f64::INFINITY } else { next(a, c, s) * td };
+    let (mut tx, mut ty) = (cross(dx, ax, cx, sx, tdx), cross(dy, ay, cy, sy, tdy));
     f(cx, cy);
     let steps = (ex - cx).abs() + (ey - cy).abs();
     for _ in 0..steps {
@@ -241,6 +244,40 @@ impl Grid {
     }
 }
 
+/// `Grid::find` without the grid: every segment of every piece, for checking the grid.
+pub fn find_brute(p: &Pieces, lat: f64, lon: f64, radius_m: f64, sets: &dyn Sets) -> Found {
+    let local = Local::at(lat, lon);
+    let mut f = Found::default();
+    for k in 0..p.len() as u32 {
+        if !sets.in_graph(k) {
+            continue;
+        }
+        let r = p.points(k as usize);
+        for i in r.start..r.end - 1 {
+            let (ax, ay) = local.xy(p.pt_lat[i], p.pt_lon[i]);
+            let (bx, by) = local.xy(p.pt_lat[i + 1], p.pt_lon[i + 1]);
+            let (d, t) = seg_dist(ax, ay, bx, by);
+            if d > radius_m {
+                continue;
+            }
+            let better = |h: &Option<Hit>| h.is_none_or(|h| d < h.dist_m);
+            let mk = || Some(Hit { piece: k, dist_m: d, frac: frac_along(p, k as usize, i, t) });
+            if better(&f.any) {
+                f.any = mk();
+            }
+            if sets.eligible(k) {
+                if better(&f.eligible) {
+                    f.eligible = mk();
+                }
+                if sets.servable(k) && better(&f.servable) {
+                    f.servable = mk();
+                }
+            }
+        }
+    }
+    f
+}
+
 /// The two parts of a road of weight w around an ID at fraction g of its length from the
 /// road's tail (SPEC §7, FORMAT §7.2): before = rnd(w × g), after = w − before; both `INF`
 /// where w is.
@@ -287,6 +324,18 @@ mod tests {
             p.pt_first.push(p.pt_lat.len() as u32);
         }
         p
+    }
+
+    #[test]
+    fn supercover_on_a_grid_line() {
+        // Horizontal and vertical segments starting exactly on a grid line stay in their row
+        // or column.
+        let mut cells = Vec::new();
+        supercover(0.5, 0.0, 3.5, 0.0, |x, y| cells.push((x, y)));
+        assert_eq!(cells, [(0, 0), (1, 0), (2, 0), (3, 0)]);
+        cells.clear();
+        supercover(2.0, 1.5, 2.0, -1.5, |x, y| cells.push((x, y)));
+        assert_eq!(cells, [(2, 1), (2, 0), (2, -1), (2, -2)]);
     }
 
     #[test]

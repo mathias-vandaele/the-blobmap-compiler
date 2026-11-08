@@ -479,9 +479,9 @@ fn fixed_ranks(p: &Pieces, osm: &[i64]) -> Result<Option<FixedRanks>> {
     }
     let mut rank = vec![NONE; p.node_osm.len()];
     for (r, id) in osm.iter().enumerate() {
-        match p.node_osm.binary_search(id) {
-            Ok(v) => rank[v] = r as u32,
-            Err(_) => bail!("build.toml [order]: OSM node {id} is not a routing node"),
+        match p.osm_node(*id) {
+            Some(v) => rank[v as usize] = r as u32,
+            None => bail!("build.toml [order]: OSM node {id} is not a routing node"),
         }
     }
     Ok(Some(rank))

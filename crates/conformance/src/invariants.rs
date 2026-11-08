@@ -100,6 +100,14 @@ pub fn structure(rt: &Runtime, rep: &mut Report) -> Result<()> {
                     o.expect(e.kind[v] == 2 || e.copy_of[v] == NONE, || format!("expert {x}: original {v} has copy_of"));
                 }
             }
+            // Road weights (FORMAT §1, §6.1): a finite master time is at most 65534 and its
+            // weight below INF; an infinite one has weight INF.
+            for (m, (ts, ws)) in e.time_s.iter().zip(&e.w).enumerate() {
+                for (r, (&ti, &wi)) in ts.iter().zip(ws).enumerate() {
+                    let ok = if ti.is_finite() { ti <= blobmap_osm::MAX_PIECE_S && wi < INF } else { wi == INF };
+                    o.expect(ok, || format!("expert {x} road {r} metric {m}: time {ti}, weight {wi}"));
+                }
+            }
             o.expect(t.levels[x as usize] == expert_levels(&t.b_kind[bs.clone()], &t.b_levels[bs.clone()]), || format!("expert {x}: levels"));
         }
         // Manifest entries.

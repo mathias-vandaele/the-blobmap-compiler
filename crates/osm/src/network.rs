@@ -17,7 +17,7 @@ use blobmap_profile::SnapRules;
 use blobmap_profile::profile::{Obstacle, ObstacleDir, ObstacleKind};
 use blobmap_profile::ways::{NetworkMode, Speeds, WayProfile};
 
-use crate::{arc_time, cheap_ruler_m, degrees};
+use crate::{MAX_PIECE_S, arc_time, cheap_ruler_m, degrees};
 
 pub struct Way<A> {
     pub id: i64,
@@ -44,13 +44,16 @@ pub struct Network<A> {
 /// directions' master times per metric.
 #[derive(Clone, Debug, Default)]
 pub struct Pieces {
-    /// Routing nodes that end a piece, by OSM id ascending.
+    /// Routing nodes that end a piece: the first `osm_nodes` by OSM id ascending, then the
+    /// nodes made by cutting long pieces (SPEC §7), with OSM id 0, in piece order.
     pub node_osm: Vec<i64>,
+    pub osm_nodes: usize,
     pub node_lat: Vec<f64>,
     pub node_lon: Vec<f64>,
     /// Per piece, in (way, seq) order.
     pub way: Vec<i64>,
-    /// Position of the piece on its way, 0-based in node order.
+    /// Position of the piece on its way, 0-based in node order; the parts of a cut piece
+    /// count as pieces.
     pub seq: Vec<u32>,
     /// Routing nodes at the start and end of the piece in the way's node order (equal for a
     /// closed piece).
@@ -67,6 +70,9 @@ pub struct Pieces {
     pub time: Vec<Vec<[f32; 2]>>,
     /// Pieces dropped because a node had no coordinates.
     pub missing_coords: usize,
+    /// Pieces cut because a master time exceeded the cap (SPEC §7), and the parts made.
+    pub cut: usize,
+    pub cut_parts: usize,
 }
 
 impl Pieces {
@@ -81,6 +87,27 @@ impl Pieces {
     pub fn points(&self, p: usize) -> std::ops::Range<usize> {
         self.pt_first[p] as usize..self.pt_first[p + 1] as usize
     }
+
+    /// The routing node of an OSM node id.
+    pub fn osm_node(&self, id: i64) -> Option<u32> {
+        self.node_osm[..self.osm_nodes].binary_search(&id).ok().map(|i| i as u32)
+    }
+}
+
+/// The part (of k equal parts of a piece of `len` metres) that arrives at a point `at`
+/// metres from the piece's start, travelling along (`fwd`) or against the node order.
+fn part_of(at: f64, len: f64, k: usize, fwd: bool) -> usize {
+    let x = at / (len / k as f64);
+    let i = if fwd { x.ceil() as i64 - 1 } else { x.floor() as i64 };
+    i.clamp(0, k as i64 - 1) as usize
+}
+
+/// The point `d` metres along a polyline with cumulative lengths `cum`.
+fn point_at(lat: &[f64], lon: &[f64], cum: &[f64], d: f64) -> (f64, f64) {
+    let j = cum.partition_point(|&c| c <= d).clamp(1, cum.len() - 1);
+    let span = cum[j] - cum[j - 1];
+    let f = if span > 0.0 { ((d - cum[j - 1]) / span).clamp(0.0, 1.0) } else { 0.0 };
+    (lat[j - 1] + f * (lat[j] - lat[j - 1]), lon[j - 1] + f * (lon[j] - lon[j - 1]))
 }
 
 fn read_ways<P: WayProfile>(path: &Path, profile: &P, rules: &SnapRules) -> Result<Vec<Way<P::Attrs>>> {
@@ -252,45 +279,106 @@ impl<A: Copy + Send + Sync + Speeds> Network<A> {
             );
         }
         let mut out = Pieces { time: vec![Vec::new(); modes.len()], pt_first: vec![0], ..Pieces::default() };
+        // Piece ends: node indices of `ids`, or `ids.len() + k` for the k-th cut node.
         let mut ends: Vec<usize> = Vec::new();
-        let mut cum: Vec<f64> = Vec::new();
+        let mut cut_nodes: Vec<(f64, f64)> = Vec::new();
+        let (mut lat, mut lon, mut cum): (Vec<f64>, Vec<f64>, Vec<f64>) = (Vec::new(), Vec::new(), Vec::new());
         let mut missing = 0usize;
+        // Parts added on the current way so far, which shift the seq of its later pieces.
+        let (mut way_at, mut shift) = (i64::MIN, 0u32);
         self.walk(
             |w, seq, pts, len| {
-                out.way.push(w.id);
-                out.seq.push(seq);
-                ends.push(pts[0]);
-                ends.push(*pts.last().unwrap());
-                out.len_m.push(len);
-                out.eligible.push(w.eligible);
-                for &p in pts {
-                    let (lat, lon) = self.coord(p).unwrap();
-                    out.pt_lat.push(lat);
-                    out.pt_lon.push(lon);
+                if w.id != way_at {
+                    (way_at, shift) = (w.id, 0);
                 }
-                out.pt_first.push(out.pt_lat.len() as u32);
+                (lat, lon) = pts.iter().map(|&p| self.coord(p).unwrap()).unzip();
+                cum.clear();
+                cum.push(0.0);
+                for k in 1..pts.len() {
+                    cum.push(cum[k - 1] + cheap_ruler_m(lat[k - 1], lon[k - 1], lat[k], lon[k]));
+                }
                 let has_obstacle = !self.obstacles.is_empty() && pts.iter().any(|&p| self.obstacle(p).is_some());
-                if has_obstacle {
-                    cum.clear();
-                    cum.push(0.0);
-                    for k in 1..pts.len() {
-                        let ((la, oa), (lb, ob)) = (self.coord(pts[k - 1]).unwrap(), self.coord(pts[k]).unwrap());
-                        cum.push(cum[k - 1] + cheap_ruler_m(la, oa, lb, ob));
+                // Per mode: the attributes and the delays [along, against] with where they are.
+                let per_mode: Vec<_> = modes
+                    .iter()
+                    .map(|mode| {
+                        let delays = if has_obstacle { self.delays(w, pts, len, &cum, &legs, mode) } else { [Vec::new(), Vec::new()] };
+                        (mode.attrs(&w.attrs), delays)
+                    })
+                    .collect();
+                // Master times of part i of k, per mode: [along, against].
+                let times = |k: usize, i: usize| -> Vec<[f32; 2]> {
+                    per_mode
+                        .iter()
+                        .map(|(a, delays)| {
+                            let delay = |d: usize, fwd: bool| -> f64 {
+                                let mut s = 0.0;
+                                for &(at, cost) in &delays[d] {
+                                    if part_of(at, len, k, fwd) == i {
+                                        s += cost;
+                                    }
+                                }
+                                s
+                            };
+                            let part = len / k as f64;
+                            let fwd = if a.forward { arc_time(part, a.speed_fwd_kmh, delay(0, true)) } else { f32::INFINITY };
+                            let bwd = if a.backward { arc_time(part, a.speed_bwd_kmh, delay(1, false)) } else { f32::INFINITY };
+                            [fwd, bwd]
+                        })
+                        .collect()
+                };
+                let fits = |t: &[[f32; 2]]| t.iter().flatten().all(|&x| !x.is_finite() || x <= MAX_PIECE_S);
+                let mut k = 1;
+                while !(0..k).all(|i| fits(&times(k, i))) {
+                    k += 1;
+                    assert!(k < 1 << 20, "way {}: a delay alone exceeds the cap", w.id);
+                }
+                if k > 1 {
+                    out.cut += 1;
+                    out.cut_parts += k;
+                }
+                // Cut points: node indices, and their distances along the piece.
+                let mut at: Vec<(usize, f64)> = vec![(pts[0], 0.0)];
+                for i in 1..k {
+                    let d = len * i as f64 / k as f64;
+                    at.push((self.ids.len() + cut_nodes.len(), d));
+                    cut_nodes.push(point_at(&lat, &lon, &cum, d));
+                }
+                at.push((*pts.last().unwrap(), len));
+                for i in 0..k {
+                    let ((a, da), (b, db)) = (at[i], at[i + 1]);
+                    out.way.push(w.id);
+                    out.seq.push(seq + shift + i as u32);
+                    ends.push(a);
+                    ends.push(b);
+                    out.len_m.push(if k == 1 { len } else { len / k as f64 });
+                    out.eligible.push(w.eligible);
+                    let node = |x: usize, d: f64| if x < self.ids.len() { self.coord(x).unwrap() } else { point_at(&lat, &lon, &cum, d) };
+                    let (la, oa) = node(a, da);
+                    out.pt_lat.push(la);
+                    out.pt_lon.push(oa);
+                    for j in 1..pts.len() - 1 {
+                        if k == 1 || (cum[j] > da && cum[j] < db) {
+                            out.pt_lat.push(lat[j]);
+                            out.pt_lon.push(lon[j]);
+                        }
+                    }
+                    let (lb, ob) = node(b, db);
+                    out.pt_lat.push(lb);
+                    out.pt_lon.push(ob);
+                    out.pt_first.push(out.pt_lat.len() as u32);
+                    for (m, t) in times(k, i).into_iter().enumerate() {
+                        out.time[m].push(t);
                     }
                 }
-                for (m, mode) in modes.iter().enumerate() {
-                    let a = mode.attrs(&w.attrs);
-                    let delay = if has_obstacle { self.delays(w, pts, len, &cum, &legs, mode) } else { [0.0; 2] };
-                    let fwd = if a.forward { arc_time(len, a.speed_fwd_kmh, delay[0]) } else { f32::INFINITY };
-                    let bwd = if a.backward { arc_time(len, a.speed_bwd_kmh, delay[1]) } else { f32::INFINITY };
-                    out.time[m].push([fwd, bwd]);
-                }
+                shift += k as u32 - 1;
             },
             || missing += 1,
         );
         out.missing_coords = missing;
-        // Routing nodes in OSM id order; ids are sorted, so node indices are too.
-        let mut used = ends.clone();
+        // Routing nodes in OSM id order; ids are sorted, so node indices are too. Cut nodes
+        // follow.
+        let mut used: Vec<usize> = ends.iter().copied().filter(|&i| i < self.ids.len()).collect();
         used.sort_unstable();
         used.dedup();
         for &i in &used {
@@ -299,7 +387,14 @@ impl<A: Copy + Send + Sync + Speeds> Network<A> {
             out.node_lat.push(lat);
             out.node_lon.push(lon);
         }
-        let local = |i: usize| used.binary_search(&i).unwrap() as u32;
+        out.osm_nodes = used.len();
+        for &(lat, lon) in &cut_nodes {
+            out.node_osm.push(0);
+            out.node_lat.push(lat);
+            out.node_lon.push(lon);
+        }
+        let osm = self.ids.len();
+        let local = |i: usize| if i < osm { used.binary_search(&i).unwrap() as u32 } else { (used.len() + i - osm) as u32 };
         for e in ends.chunks(2) {
             out.u.push(local(e[0]));
             out.v.push(local(e[1]));
@@ -315,8 +410,9 @@ impl<A: Copy + Send + Sync + Speeds> Network<A> {
         cum: &[f64],
         legs: &HashMap<usize, Vec<(i64, usize, f64, f32)>>,
         mode: &M,
-    ) -> [f64; 2] {
-        let mut delay = [0.0f64; 2];
+    ) -> [Vec<(f64, f64)>; 2] {
+        // Per direction, in the order of travel: (metres from the piece's start, seconds).
+        let mut delay = [Vec::new(), Vec::new()];
         let last = pts.len() - 1;
         for (d, fwd) in [(0usize, true), (1, false)] {
             let speed = if fwd { w.attrs.speeds().0 } else { w.attrs.speeds().1 };
@@ -339,7 +435,7 @@ impl<A: Copy + Send + Sync + Speeds> Network<A> {
                     _ => false,
                 };
                 if !skip {
-                    delay[d] += cost;
+                    delay[d].push((cum[j], cost));
                 }
             }
         }

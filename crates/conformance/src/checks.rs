@@ -64,6 +64,27 @@ fn expected_entry(r: &Reference, m: usize, piece: usize, frac: f64) -> ([Option<
 }
 
 /// Re-snapping from the inputs reproduces the stored entries exactly (SPEC §11).
+/// The reference's grid snapping against a search of every segment (SPEC §6), on every ID
+/// up to `max` per mode, evenly sampled beyond.
+pub fn snapping_brute(r: &Reference, max: usize, rep: &mut Report) {
+    let o = rep.check("snapping without the grid");
+    let step = r.n().div_ceil(max.max(1)).max(1);
+    for (m, mode) in r.modes.iter().enumerate() {
+        let p = if mode.car { &r.car_pieces } else { &r.active_pieces };
+        for i in (0..r.n()).step_by(step) {
+            if matches!(mode.at[i], Err((4, _))) {
+                continue;
+            }
+            o.count();
+            let (lat, lon) = r.points[i];
+            let want = blobmap_snap::find_brute(p, lat, lon, r.radius[m], &r.sets[m]).outcome();
+            let got = mode.at[i].map(|e| (e.piece, e.frac.to_bits())).map_err(|(c, d)| (c, d.to_bits()));
+            let want = want.map(|h| (h.piece, h.frac.to_bits())).map_err(|(c, d)| (c, d.to_bits()));
+            o.expect(got == want, || format!("{} {}: grid {got:?}, every segment {want:?}", mode.name, uuid(&r.ids[i])));
+        }
+    }
+}
+
 pub fn snapping(rt: &Runtime, r: &Reference, rep: &mut Report) -> Result<()> {
     let o = rep.check("snapping re-check");
     let v = &rt.vocab;

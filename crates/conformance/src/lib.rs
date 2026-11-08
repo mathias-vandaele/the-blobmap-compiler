@@ -67,6 +67,7 @@ fn run(rt: &Runtime, ex: &Expected, s: &Scenario, hashes: bool, rep: &mut Report
     }
     checks::experts(rt, ex.r, rep);
     checks::snapping(rt, ex.r, rep)?;
+    checks::snapping_brute(ex.r, 5000, rep);
     checks::recustomization(rt, rep)?;
     checks::distances(rt, ex, rep)?;
     let budget = format!("memory_budget_bytes = {}\n", rt.manifest.build.memory_budget_bytes);

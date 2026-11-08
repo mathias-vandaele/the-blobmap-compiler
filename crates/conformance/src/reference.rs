@@ -56,6 +56,10 @@ pub struct Reference {
     pub aliases: Vec<(Id, u32)>,
     pub modes: Vec<Mode>,
     pub config: Config,
+    /// Per ID (internal-index order): its point. Per mode: the snapping sets and radius.
+    pub points: Vec<(f64, f64)>,
+    pub sets: [Membership; 3],
+    pub radius: [f64; 3],
 }
 
 impl Reference {
@@ -117,7 +121,24 @@ impl Reference {
             })
             .collect();
         debug_assert_eq!(METRICS, ["bike", "walk"]);
-        Ok(Reference { car_pieces, car, car_experts, active_pieces, active, active_experts, catalog, ids, place_of, aliases, modes, config })
+        let points = pts.iter().map(|&k| points[k]).collect();
+        Ok(Reference {
+            car_pieces,
+            car,
+            car_experts,
+            active_pieces,
+            active,
+            active_experts,
+            catalog,
+            ids,
+            place_of,
+            aliases,
+            modes,
+            config,
+            points,
+            sets,
+            radius,
+        })
     }
 
     pub fn n(&self) -> usize {

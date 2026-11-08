@@ -277,7 +277,9 @@ fn town() -> Scenario {
 }
 
 /// Routes just under and just over the 65,534 s cap (SPEC §7, §11): car ways along the
-/// equator, each one piece, with car times 30000, 35525, 20 and 20 s.
+/// equator, each one piece, with car times 30000, 35525, 20 and 20 s. On foot the first
+/// two take 150,000 and 177,625 s, so they are cut into parts (SPEC §7, long pieces), and
+/// IDs on them stay exact below the cap.
 fn cap() -> Scenario {
     let mut b = Builder::new(Frame::new(0.0, 10.0), 3);
     let times = [30000.0, 35525.0, 20.0, 20.0];
@@ -295,6 +297,9 @@ fn cap() -> Scenario {
     let ids: Vec<String> = xs.iter().map(|&x| b.address(x, 0.0)).collect();
     // In the middle of the third way: 65525 + 10 = 65535 s from the start, the cap itself.
     let at_cap = b.address((xs[2] + xs[3]) / 2.0, 0.0);
+    // On the first way, 60,000, 65,000 and 65,600 s on foot from its start.
+    let walk = |t: f64| t * 5.0 / 3.6;
+    let on_foot: Vec<String> = [60000.0, 65000.0, 65600.0].iter().map(|&t| b.address(walk(t), 0.0)).collect();
     let cap = |a: &String, c: &String, under: bool| Check::Cap { mode: "car", a: a.clone(), b: c.clone(), under };
     Scenario {
         name: "cap",
@@ -310,6 +315,12 @@ fn cap() -> Scenario {
             cap(&ids[0], &at_cap, false),
             cap(&ids[1], &ids[4], true),
             Check::Beyond { mode: "walk", a: ids[0].clone(), b: ids[1].clone() },
+            Check::Cap { mode: "walk", a: ids[0].clone(), b: on_foot[0].clone(), under: true },
+            Check::Cap { mode: "walk", a: on_foot[0].clone(), b: ids[0].clone(), under: true },
+            Check::Cap { mode: "walk", a: ids[0].clone(), b: on_foot[1].clone(), under: true },
+            Check::Cap { mode: "walk", a: on_foot[1].clone(), b: ids[0].clone(), under: true },
+            Check::Cap { mode: "walk", a: ids[0].clone(), b: on_foot[2].clone(), under: false },
+            Check::Cap { mode: "walk", a: on_foot[0].clone(), b: on_foot[2].clone(), under: true },
         ],
     }
 }

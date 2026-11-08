@@ -3,8 +3,8 @@
 //! - **graph:** the family's graph (NoRoad when none is in the radius): for CAR, the pieces
 //!   with a segment; for ACTIVE, the pieces with a road.
 //! - **eligible:** pieces of the mode's graph that pass the profile's tag rules. A mode's
-//!   graph is the pieces with a road it may use (SPEC §6): a finite master time. A road of
-//!   65,535 s or more has `w = INF` but is still usable.
+//!   graph is the pieces with a road it may use (SPEC §6): a finite master time, which is
+//!   a finite weight since long pieces are cut (SPEC §7).
 //! - **servable:** eligible pieces in an expert that is not trapped. An ACTIVE piece whose
 //!   two ends lie in different experts never lies on a route (FORMAT §5.4), so it is skipped
 //!   like a trapped one.

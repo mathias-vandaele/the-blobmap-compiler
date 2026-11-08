@@ -322,7 +322,7 @@ impl CarGraph {
         for i in 0..p.len() {
             by_way.entry(p.way[i]).or_default().push(i);
         }
-        let node = |osm: i64| p.node_osm.binary_search(&osm).ok().map(|i| i as u32);
+        let node = |osm: i64| p.osm_node(osm);
         let mut out: Vec<Vec<u32>> = Vec::new();
         for r in restrictions {
             let mut seqs: Vec<Vec<u32>> = Vec::new();
