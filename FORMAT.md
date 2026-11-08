@@ -102,9 +102,17 @@ cover logical tensors, so chunking never changes a hash.
 
 ### 2.4 Filling shards
 
+A **unit** is one of:
+- the road tables of one family (§5.1, and `road/active/cross/` for ACTIVE);
+- one pack (§4);
+- the vocabulary part (§7).
+
+A manifest entry is a run of consecutive pack units. "Never mixes" in SPEC §8 holds because
+no shard holds two units.
+
 The compiler assigns tensors to shards in this order:
-1. **Units, in order:** the road tables of each family (§5.1); then each manifest entry
-   (§3), each pack inside it in pack order; then the vocabulary part.
+1. **Units, in order:** each family's road tables, `car` then `active`; then the packs,
+   in manifest-entry order and pack order inside an entry; then the vocabulary part.
 2. **Within a unit,** tensors in full-name order.
 3. **Filling:** a unit's tensors fill shards one after the other. A new shard starts when
    the next tensor (or chunk) would push the current one past `build.shard_target_bytes`,
@@ -120,6 +128,8 @@ So a shard never mixes units (SPEC §8). Chunks are at most the target, so no sh
 | `format` | string | `"blobmap-model"` |
 | `format_version` | string | `"2.0.0"` |
 | `model_id` | string | §9; the identity of the model's content |
+| `inputs_hash` | string | §9; the identity of what the answers depend on, which keys golden files (§11) |
+| `spec_version` | string | the version of SPEC.md the model was built to; `"2"` for SPEC v2 |
 | `compiler` | object | `{name: "blobc", version, commit, dirty}`: commit is the 40-hex git commit, dirty a boolean |
 | `inputs` | object | below |
 | `config` | object | below |
@@ -208,6 +218,11 @@ be the other endpoint. Equivalently, link (v, u) with v > u is at
   customizes cells one at a time keeps the top pack's metric tensors writable until every
   cell is done.
 
+**Limits.** Each pack's row, link, turn (CAR) and road (ACTIVE) counts must each be below
+2³², since they are U32 CSR offsets. The build fails if any count reaches 2³². The build
+report (SPEC §10) gives, per family, the largest pack and each of these counts for it.
+Milestone 6 (SPEC §13) checks these counts for Eurasia's top block.
+
 **Tensor names.** A full name is `/`-separated words, and its last word is the tensor. Metric
 tensors are prefixed by the metric name (`car.w`, `bike.up`), so a new metric only adds
 tensors (§12).
@@ -295,7 +310,10 @@ CAR layout nodes are directed road segments (SPEC §4); its roads are the segmen
 | `way` | I64 | [n] | OSM way id |
 | `way_dir` | U8 | [n] | 0 along the way's node order, 1 against it |
 | `way_seq` | U32 | [n] | position of the piece on the way, 0-based in node order |
-| `kind` | U8 | [n] | 0 road; 1 ferry: reserved, never written in 2.0 (SPEC §4) |
+| `kind` | U8 | [n] | 0 road; 1 ferry: reserved, never written in 2.0 (SPEC §4); 2 via-way copy (below) |
+| `copy_of` | U32 | [n] | for a copy: layout id of its original, if that is in the same expert; else `NONE`. `NONE` for every original |
+| `copy_first` | U32 | [n + 1] | CSR by row into `copies` |
+| `copies` | U32 | [C] | for an original: layout ids of its copies in the same expert, ascending; empty for a copy |
 
 Turns, by the row of the segment they leave (T turns):
 
@@ -309,6 +327,27 @@ Turns, by the row of the segment they leave (T turns):
 - Turns between different experts are not stored; no route within an expert uses them.
 - Inside a row, turns are ordered by `turn_head` ascending. There is at most one turn per
   pair of segments.
+
+**Turn restrictions** (SPEC §4) are not stored as such. They are compiled into the turn
+graph:
+- **Via a node:** a forbidden turn is absent.
+- **Via one or more ways:** the via segments are copied (the via-way construction).
+  - `only_*` restrictions are first rewritten as the equivalent set of forbidden
+    sequences.
+  - Each forbidden sequence [a₀, a₁, …, a_k] is a sequence of segments, k ≥ 2.
+  - **States:** every original segment is a state. Every proper prefix [a₀ … a_j], with
+    1 ≤ j < k, of a forbidden sequence is a state too: a copy of a_j, stored as a row with
+    `kind = 2`.
+  - **Turns out of a state** P whose last segment is x: for each turn x → b, the turn goes
+    to the state of the longest suffix of P + [b] that is a state (an Aho–Corasick
+    automaton over segments). It is absent if some suffix of P + [b] is a whole forbidden
+    sequence. Its cost is the turn cost of x → b.
+- **Rows of a copy:** a copy has its original's `way`, `way_dir`, `way_seq`, `car.time_s`
+  and `car.w`.
+  - A copy is a layout node like any other, with links and turns of its own.
+  - It is not a road of its own: it is not a member of any rounding group (§6.1), and no ID
+    snaps to it (§7.2).
+  - Heads and seeds take copies into account as §8 says.
 - **One view.** The CAR metric is stored in its *start* view only: turn a → b weighs
   `w[a] ⊕ c(a, b)`, so a label is the time at a segment's start (§6.2, §8).
   - Both query directions are exact with it and these turns, which are indexed by the
@@ -358,7 +397,10 @@ SPEC §7 defines the rounding groups and the rule. In bytes:
 - **Members:** a group of metric m is all roads of one family with the same (`way`,
   `way_dir`) and a finite `<m>.time_s`, over every expert and the cross table (§5.4). Every
   member of every group is stored, so re-rounding needs no data outside the model.
+  - CAR rows with `kind = 2` (via-way copies, §5.3) are not members.
   - A road whose new time is `+∞` leaves its group; one whose time becomes finite joins it.
+- **Copies:** after rounding, each CAR copy takes the `car.time_s` and `car.w` of its
+  original. The original is the member with the same (`way`, `way_dir`, `way_seq`).
 - **Travel order:** `way_seq` ascending if `way_dir = 0`, descending if 1.
 
 For each group, the exact integer computation:
@@ -461,7 +503,7 @@ Each mode has its own entries (SPEC §6). In bytes, "the mode's graph" (SPEC §6
 | tensor | dtype | shape | meaning |
 | --- | --- | --- | --- |
 | `car.expert` | U32 | [N] | CAR expert of the ID, `NONE` if not served for car |
-| `car.seg` | U32 | [N, 2] | layout ids of the piece's two directed segments, [A → B, B → A]; `NONE` for a direction absent from the expert |
+| `car.seg` | U32 | [N, 2] | layout ids of the piece's two directed segments, [A → B, B → A]; always original segments (`kind ≠ 2`, §5.3); `NONE` for a direction absent from the expert |
 | `car.off` | U16 | [N, 2, 2] | for slot k: `[k, 0]` = time from the start of `seg[k]` to the ID, `[k, 1]` = time from the ID to the end of `seg[k]` |
 
 **ACTIVE, `vocab/active/`,** for each mode m (`bike`, `walk`):
@@ -525,13 +567,16 @@ Per place p = i − N_a:
 | tensor | dtype | shape | meaning |
 | --- | --- | --- | --- |
 | `vocab/places/status` | U8 | [N_p] | 0 kept; 4 `FilteredPlace` (SPEC §3, §6) |
-| `vocab/places/primary` | U16 | [N_p] | taxonomy node of the primary category |
-| `vocab/places/basic` | U16 | [N_p] | taxonomy node of the basic category, `NONE16` if Overture gives none |
+| `vocab/places/primary` | U16 | [N_p] | taxonomy node of the primary category; `NONE16` if the place has none, or if its key is absent from the taxonomy |
+| `vocab/places/basic` | U16 | [N_p] | taxonomy node of the basic category; `NONE16` if Overture gives none, or if its key is absent from the taxonomy |
 | `vocab/places/alt_first` | U32 | [N_p + 1] | CSR into `alt` |
-| `vocab/places/alt` | U16 | [·] | alternate categories, ascending, without the primary |
+| `vocab/places/alt` | U16 | [·] | alternate categories, ascending, without the primary; keys absent from the taxonomy are left out |
 
 - **A filtered place** has `NONE` entries for every mode and no entry in any reason list.
   It never matches a category; its category tensors are still filled.
+- **A place with `primary = NONE16`** never matches a category, in either namespace. It
+  is still served as a location. Such places, and keys absent from the taxonomy, are
+  counted in the data report (SPEC §3); they do not fail the build.
 
 The taxonomy of the pinned release (T nodes, T < 65535):
 
@@ -551,9 +596,10 @@ release 2026-10-21.0 this holds: 298 basic categories, all of them among the 2,3
 **Evaluating a category query** (SPEC §6) on these tensors:
 1. **Resolve the key:** a key found in `redirect` is replaced by the key of `redirect_to`.
    Then it is looked up in `name`. A basic-category query also needs `is_basic = 1`.
-2. **A taxonomy query for node X** matches a kept place p when `primary[p]` or an `alt` of p
-   reaches X by following `parent` zero or more times.
-3. **A basic-category query for B** matches a kept place p when `basic[p] = B`.
+2. **A taxonomy query for node X** matches a kept place p with `primary[p] ≠ NONE16` when
+   `primary[p]` or an `alt` of p reaches X by following `parent` zero or more times.
+3. **A basic-category query for B** matches a kept place p with `primary[p] ≠ NONE16` when
+   `basic[p] = B`.
 
 No coordinates and no place names are stored (SPEC §7, §8).
 
@@ -583,25 +629,29 @@ This is what the metric tensors guarantee. Any CCH sweep that relies only on it 
 
 - **ACTIVE:** the route term is
   min over x ∈ {U_o, V_o} and y ∈ {U_d, V_d} of (o → x) ⊕ d(x, y) ⊕ (y → d).
-- **CAR:** the route term is
-  min over slots k of o, turns s → b out of s = `seg_o[k]`, and slots k′ of d of
-  `off_o[k, 1] ⊕ c(s, b) ⊕ d(b, seg_d[k′]) ⊕ off_d[k′, 0]`.
-  - This includes `seg_d[k′] = s`, the way around the block.
+- **CAR:** for a segment y, let arr(y) be y together with its `copies` (§5.3). A trip
+  leaves an ID from the original segment, since no restricted prefix has been driven yet.
+  It may reach an ID on the original or on any copy. The route term is
+  min over slots k of o, turns s → b out of s = `seg_o[k]`, slots k′ of d, and
+  y ∈ arr(`seg_d[k′]`) of `off_o[k, 1] ⊕ c(s, b) ⊕ d(b, y) ⊕ off_d[k′, 0]`.
+  - This includes y = s or a copy of s, the way around the block.
   - Both directions of SPEC §9 evaluate this sum with the stored turns, which are indexed by
     the segment they leave. Every term is added, never subtracted.
   - **`from` (sources → IDs):**
     - seed each b reached by a turn out of a source's segment s with
       `off_o[k, 1] ⊕ c(s, b)`;
     - sweep forward;
-    - the head reads `label[seg_d[k′]] ⊕ off_d[k′, 0]` per slot of each ID.
+    - the head reads, per slot of each ID, the min over y ∈ arr(`seg_d[k′]`) of
+      `label[y] ⊕ off_d[k′, 0]`.
   - **`to` (IDs → sources):**
-    - seed each source's segment `seg_o[k′]` with `off_o[k′, 0]`;
+    - seed each y ∈ arr(`seg_o[k′]`) of each source with `off_o[k′, 0]`;
     - sweep the reversed hierarchy (`down` weights going up, `up` going down);
     - the head of an ID reads, for each slot k and each turn s → b out of `seg[k]`,
       `off[k, 1] ⊕ c(s, b) ⊕ label[b]`.
 - **Direct drive** (SPEC §9 "Same road piece"): o and d share a directed road r of the same
   piece, in the same slot. For CAR that is `seg_o[k] = seg_d[k]`. For ACTIVE it is the same
   `road` and nodes, in either direction.
+  - The direct term exists only when r's weight is finite for the mode.
   - Let p_o and p_d be the parts before the ID (§7.2) on r.
   - When p_d ≥ p_o, the direct term is p_d − p_o; equal parts give 0 s (SPEC §9).
 - **The answer** is the min of the route term and the direct term, then SPEC §7 and §9
@@ -609,6 +659,9 @@ This is what the metric tensors guarantee. Any CCH sweep that relies only on it 
 
 This is exactly a shortest path in the road graph with o and d inserted at their offsets.
 Golden answers are computed that way (§11).
+
+The delays charged to a road (SPEC §4) are spread over its offsets by length, like the
+rest of its time. This is intended.
 
 ## 9. Hashes
 
@@ -622,7 +675,21 @@ Golden answers are computed that way (§11).
 - **Vocabulary part hash** = sha256(`"blobmap-vocab-2"` ‖ 0x00 ‖ the tensor hashes of every
   `vocab/` tensor except `vocab/road_hash`, in full-name order ‖ the raw `vocab/road_hash`).
 - **`model_id`** = hex sha256(`"blobmap-model-2"` ‖ 0x00 ‖ road part hash ‖ vocabulary part
-  hash).
+  hash). It changes with layout: the same inputs built as cells or in one piece give
+  different model IDs.
+- **`inputs_hash`** = hex sha256 of:
+  - `"blobmap-inputs-2"` ‖ 0x00;
+  - the `.pbf`'s sha256;
+  - the Overture `release` string ‖ 0x00;
+  - the sha256 of the car profile, of the active profile, and of the place rules, in that
+    order (§3 `config`);
+  - the extent polygon's sha256, or 32 zero bytes without `--extent`;
+  - `spec_version` ‖ 0x00.
+
+  Sha256 values are taken as 32 raw bytes. Every part is a manifest field, so a reader can
+  recompute it. It leaves out the compiler version and the build options. Answers are
+  defined by SPEC and the inputs alone (SPEC §9), so two models with the same inputs hash
+  must give the same answers.
 - **The link** (SPEC §8): `vocab/road_hash` must equal `parts.road.hash`, and
   `parts.vocabulary.road_hash` repeats it.
   - A reader refuses a model where these three differ.
@@ -653,8 +720,12 @@ mutated models must fail it.
 Per tier, a directory with `golden.json` (the header) and `queries.jsonl` (one query per
 line).
 
-**`golden.json`:** `{format: "blobmap-golden", format_version: "2.0.0", tier, model_id,
-queries_sha256}`. A replay refuses a model whose `model_id` differs.
+**`golden.json`:** `{format: "blobmap-golden", format_version: "2.0.0", tier, inputs_hash,
+queries_sha256}`.
+- A replay refuses a model whose `inputs_hash` (§9) differs, and accepts any model with the
+  same one: whatever its layout, cells, shards or compiler version.
+- Answers are layout-independent. They name IDs only, and the only order they use is the
+  internal-index order of the vocabulary (§7.1), which comes from the IDs.
 
 **Each line of `queries.jsonl`** is `{"op", "args", "answer"}`:
 - **IDs** are canonical UUID strings.
