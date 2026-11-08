@@ -5,10 +5,12 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
+use rayon::prelude::*;
 use blobmap_runtime::Runtime;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::Samples;
 use crate::expected::{Expected, uuid};
 use crate::report::Report;
 
@@ -29,7 +31,10 @@ pub fn sample(e: &Expected, named: &[String], k: usize) -> Vec<String> {
 }
 
 /// The golden queries of a scenario, with their reference answers.
-pub fn queries(e: &Expected, named: &[String]) -> Vec<Value> {
+pub fn queries(e: &Expected, named: &[String], n: &Samples) -> Vec<Value> {
+    let keys = category_keys(e, n.categories);
+    let step = e.r.aliases.len().div_ceil(n.aliases.min(e.r.aliases.len()).max(1)).max(1);
+    let aliases: Vec<&(blobmap_overture::Id, u32)> = e.r.aliases.iter().step_by(step).collect();
     let ids = sample(e, named, 24);
     let mut q: Vec<(String, Value)> = Vec::new();
     let modes = ["car", "bike", "walk"];
@@ -40,7 +45,7 @@ pub fn queries(e: &Expected, named: &[String]) -> Vec<Value> {
             }
         }
         q.push(("travel_time".into(), json!({"a": "00000000-0000-4000-8000-000000000000", "b": ids[0], "mode": m})));
-        for (alias, kept) in &e.r.aliases {
+        for (alias, kept) in aliases.iter().copied() {
             q.push(("travel_time".into(), json!({"a": uuid(alias), "b": uuid(&e.r.ids[*kept as usize]), "mode": m})));
             q.push(("travel_time".into(), json!({"a": ids[0], "b": uuid(alias), "mode": m})));
         }
@@ -58,7 +63,7 @@ pub fn queries(e: &Expected, named: &[String]) -> Vec<Value> {
                 }
             }
             for s in served.iter().take(6) {
-                for key in category_keys(e) {
+                for key in &keys {
                     q.push(("nearest".into(), json!({"category": key, "id": s, "mode": m, "dir": dir})));
                 }
             }
@@ -75,8 +80,8 @@ pub fn queries(e: &Expected, named: &[String]) -> Vec<Value> {
             let s1 = term(json!({"sources": [a], "start": [0]}), m, "from", 900, 2);
             let s2 = term(json!({"sources": [b]}), m, "to", 1200, 3);
             let mut exprs = vec![json!({"and": [s1.clone(), {"not": s2.clone()}]}), json!({"or": [s1.clone(), s2.clone()]})];
-            for key in category_keys(e).into_iter().take(2) {
-                exprs.push(json!({"and": [term(key, m, "from", 1800, 1), s1.clone()]}));
+            for key in keys.iter().take(2) {
+                exprs.push(json!({"and": [term(key.clone(), m, "from", 1800, 1), s1.clone()]}));
             }
             for expr in exprs {
                 for kind in ["addresses", "places", "both"] {
@@ -95,7 +100,7 @@ pub fn queries(e: &Expected, named: &[String]) -> Vec<Value> {
     let mut odd = vec!["00000000-0000-4000-8000-000000000000".to_string()];
     odd.extend(unserved("car"));
     odd.extend(unserved("walk"));
-    for key in category_keys(e).into_iter().take(3) {
+    for key in keys.iter().take(3) {
         for x in &odd {
             q.push(("chained".into(), json!({"a": x, "b": ids[0], "transfer_category": key, "penalty": 60})));
             q.push(("chained".into(), json!({"a": ids[0], "b": x, "transfer_category": key, "penalty": 60})));
@@ -116,11 +121,12 @@ pub fn queries(e: &Expected, named: &[String]) -> Vec<Value> {
             }
         }
     }
-    q.into_iter().map(|(op, args)| json!({"op": op, "answer": e.answer(&op, &args), "args": args})).collect()
+    q.into_par_iter().map(|(op, args)| json!({"op": op, "answer": e.answer(&op, &args), "args": args})).collect()
 }
 
-/// Category arguments: every taxonomy node a kept place uses, and its basic categories.
-fn category_keys(e: &Expected) -> Vec<Value> {
+/// Category arguments: every taxonomy node a kept place uses, and its basic categories;
+/// at most `max`, evenly sampled, plus a redirected key.
+fn category_keys(e: &Expected, max: usize) -> Vec<Value> {
     let t = &e.r.catalog.taxonomy;
     let mut nodes: Vec<u16> = e.r.catalog.places.iter().filter(|p| p.status == 0 && p.primary != blobmap_format::NONE16).map(|p| p.primary).collect();
     nodes.sort_unstable();
@@ -141,6 +147,8 @@ fn category_keys(e: &Expected) -> Vec<Value> {
             }
         }
     }
+    let step = out.len().div_ceil(max.min(out.len()).max(1)).max(1);
+    let mut out: Vec<Value> = out.into_iter().step_by(step).collect();
     // A redirected key, when the taxonomy has one with a target.
     if let Some(k) = (0..t.redirect.len()).find(|&k| t.redirect_to[k] != blobmap_format::NONE16) {
         out.push(json!({"category": t.redirect[k]}));

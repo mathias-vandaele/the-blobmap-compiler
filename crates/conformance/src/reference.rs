@@ -11,7 +11,9 @@ use blobmap_osm::Pieces;
 use blobmap_overture::{Catalog, Id, Polygon, Release};
 use blobmap_profile::config::Config;
 use blobmap_snap::modes::{active_expert, car_expert};
-use blobmap_snap::{Grid, Membership};
+use blobmap_format::NONE;
+use blobmap_snap::{Grid, Membership, Snapped};
+use rayon::prelude::*;
 
 /// The inputs of a build.
 #[derive(Clone, Debug)]
@@ -60,6 +62,9 @@ pub struct Reference {
     pub points: Vec<(f64, f64)>,
     pub sets: [Membership; 3],
     pub radius: [f64; 3],
+    /// The IDs and the aliases, each sorted, with their internal index.
+    sorted_ids: Vec<(Id, u32)>,
+    sorted_aliases: Vec<(Id, u32)>,
 }
 
 impl Reference {
@@ -83,21 +88,21 @@ impl Reference {
             Membership::active(&active_pieces, &active, &active_experts, 1),
         ];
         let radius = [config.car.config.snap.radius_m as f64, config.active.config.snap.radius_m as f64, config.active.config.snap.radius_m as f64];
-        let found: Vec<Vec<blobmap_snap::Found>> = (0..3)
+        let found: Vec<Vec<Snapped>> = (0..3)
             .map(|m| {
                 let (g, p) = if m == 0 { (&cg, &car_pieces) } else { (&ag, &active_pieces) };
-                g.find_all(p, &points, radius[m], &sets[m])
+                points.par_iter().map(|&(lat, lon)| Snapped::new(&g.find(p, lat, lon, radius[m], &sets[m]), NONE)).collect()
             })
             .collect();
         let na = catalog.addresses.len();
-        let inside = |k: usize| polygon.is_some() || found.iter().any(|f| f[k].any.is_some());
+        let inside = |k: usize| polygon.is_some() || found.iter().any(|f| f[k].any);
         let mut pts: Vec<usize> = (0..na).filter(|&k| inside(k)).collect();
         let n_addr = pts.len();
         pts.extend((0..catalog.places.len()).filter(|&p| inside(na + p)).map(|p| na + p));
         let ids: Vec<Id> = pts.iter().map(|&k| if k < na { catalog.addresses[k].id } else { catalog.places[k - na].id }).collect();
         let place_of: Vec<Option<usize>> = pts.iter().map(|&k| (k >= na).then(|| k - na)).collect();
         let index_of_place = |p: u32| pts[n_addr..].binary_search(&(na + p as usize)).ok().map(|i| (n_addr + i) as u32);
-        let aliases = catalog.aliases.iter().filter_map(|&(a, p)| index_of_place(p).map(|i| (a, i))).collect();
+        let aliases: Vec<(Id, u32)> = catalog.aliases.iter().filter_map(|&(a, p)| index_of_place(p).map(|i| (a, i))).collect();
         let names = ["car", "bike", "walk"];
         let modes = (0..3)
             .map(|m| {
@@ -107,14 +112,13 @@ impl Reference {
                         if k >= na && catalog.places[k - na].status != 0 {
                             return Err((4, 0.0));
                         }
-                        let h = found[m][k].outcome()?;
-                        let piece = h.piece as usize;
+                        let (piece, frac) = found[m][k].outcome()?;
                         let expert = if m == 0 {
-                            car_expert(&car, &car_experts, piece).expect("servable")
+                            car_expert(&car, &car_experts, piece as usize).expect("servable")
                         } else {
-                            active_expert(&active_pieces, &active_experts, piece).expect("servable")
+                            active_expert(&active_pieces, &active_experts, piece as usize).expect("servable")
                         };
-                        Ok(Entry { expert, piece: h.piece, frac: h.frac })
+                        Ok(Entry { expert, piece, frac })
                     })
                     .collect();
                 Mode { name: names[m], car: m == 0, metric: if m == 0 { 0 } else { m - 1 }, at }
@@ -122,6 +126,13 @@ impl Reference {
             .collect();
         debug_assert_eq!(METRICS, ["bike", "walk"]);
         let points = pts.iter().map(|&k| points[k]).collect();
+        let sorted = |v: Vec<(Id, u32)>| {
+            let mut v = v;
+            v.sort_unstable();
+            v
+        };
+        let sorted_ids = sorted(ids.iter().enumerate().map(|(i, id)| (*id, i as u32)).collect());
+        let sorted_aliases = sorted(aliases.to_vec());
         Ok(Reference {
             car_pieces,
             car,
@@ -138,6 +149,8 @@ impl Reference {
             points,
             sets,
             radius,
+            sorted_ids,
+            sorted_aliases,
         })
     }
 
@@ -151,9 +164,7 @@ impl Reference {
 
     /// FORMAT §7.1 lookup on the reference IDs.
     pub fn lookup(&self, id: &Id) -> Option<u32> {
-        if let Some(i) = self.ids.iter().position(|x| x == id) {
-            return Some(i as u32);
-        }
-        self.aliases.iter().find(|a| &a.0 == id).map(|a| a.1)
+        let find = |v: &[(Id, u32)]| v.binary_search_by(|x| x.0.cmp(id)).ok().map(|k| v[k].1);
+        find(&self.sorted_ids).or_else(|| find(&self.sorted_aliases))
     }
 }

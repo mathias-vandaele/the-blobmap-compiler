@@ -1,11 +1,15 @@
-//! Answers computed from the reference alone (Dijkstra matrices, the inputs' catalog and
+//! Answers computed from the reference alone (Dijkstra columns, the inputs' catalog and
 //! taxonomy), in the golden JSON form of FORMAT §11. Golden answers are these.
+
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use blobmap_format::{INF, NONE16};
 use blobmap_overture::Id;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::dijkstra::Graphs;
 use crate::reference::Reference;
 
 pub fn uuid(id: &Id) -> String {
@@ -25,10 +29,25 @@ pub fn reason_name(code: u8) -> &'static str {
     }
 }
 
-/// The reference with its all-pairs matrices, per mode in `Reference::modes` order.
+/// A column's key: mode, `from`, and its sources with their start times.
+type Key = (usize, bool, Vec<(usize, u16)>);
+
+/// The columns computed so far, the oldest dropped beyond `max`; a column asked for by
+/// several threads at once is computed once.
+struct Memo {
+    cells: BTreeMap<Key, Arc<OnceLock<Arc<Vec<u16>>>>>,
+    order: VecDeque<Key>,
+    max: usize,
+}
+
+/// Bytes of columns kept.
+const MEMO_BYTES: usize = 2 << 30;
+
+/// The reference with its graphs; columns are computed on demand by Dijkstra.
 pub struct Expected<'a> {
     pub r: &'a Reference,
-    pub m: Vec<Vec<Vec<u16>>>,
+    g: Graphs,
+    memo: Mutex<Memo>,
 }
 
 pub enum Cat {
@@ -37,6 +56,11 @@ pub enum Cat {
 }
 
 impl Expected<'_> {
+    pub fn new(r: &Reference) -> Expected<'_> {
+        let max = (MEMO_BYTES / (2 * r.n().max(1))).clamp(8, 4096);
+        Expected { r, g: Graphs::new(r), memo: Mutex::new(Memo { cells: BTreeMap::new(), order: VecDeque::new(), max }) }
+    }
+
     fn mode(&self, name: &str) -> usize {
         self.r.modes.iter().position(|m| m.name == name).expect("mode")
     }
@@ -72,22 +96,36 @@ impl Expected<'_> {
         if self.expert(m, ia) != self.expert(m, ib) {
             return json!({"reason": "DifferentComponent", "id": b});
         }
-        json!({"time": time(self.m[m][ia][ib])})
+        json!({"time": time(self.column(m, &[(ia, 0)], "from")[ib])})
     }
 
-    /// The column of (source, start) pairs in a direction ("from" or "to").
-    pub fn column(&self, m: usize, src: &[(usize, u16)], dir: &str) -> Vec<u16> {
-        (0..self.r.n())
-            .map(|i| {
-                src.iter()
-                    .map(|&(s, st)| {
-                        let t = if dir == "from" { self.m[m][s][i] } else { self.m[m][i][s] };
-                        st.saturating_add(t)
-                    })
-                    .min()
-                    .unwrap_or(INF)
-            })
-            .collect()
+    /// The column of (source, start) pairs in a direction ("from" or "to"): per ID, the
+    /// least start ⊕ time.
+    pub fn column(&self, m: usize, src: &[(usize, u16)], dir: &str) -> Arc<Vec<u16>> {
+        let from = dir == "from";
+        let key: Key = (m, from, src.to_vec());
+        let cell = {
+            let mut memo = self.memo.lock().unwrap();
+            if let Some(c) = memo.cells.get(&key) {
+                c.clone()
+            } else {
+                let c = Arc::new(OnceLock::new());
+                memo.cells.insert(key.clone(), c.clone());
+                memo.order.push_back(key);
+                while memo.order.len() > memo.max {
+                    let old = memo.order.pop_front().unwrap();
+                    memo.cells.remove(&old);
+                }
+                c
+            }
+        };
+        cell.get_or_init(|| Arc::new(self.g.column(self.r, &self.r.modes[m], src, from))).clone()
+    }
+
+    /// The kept places matching a category, by internal index.
+    pub fn matching(&self, c: &Cat) -> Vec<usize> {
+        let na = self.r.place_of.iter().take_while(|p| p.is_none()).count();
+        (na..self.r.n()).filter(|&p| self.matches(p, c)).collect()
     }
 
     fn sources(&self, v: &Value, m: usize) -> Result<Vec<(usize, u16)>, Value> {
@@ -147,7 +185,7 @@ impl Expected<'_> {
                 };
                 let c = self.category(&a["category"]).expect("a known category");
                 let col = self.column(m, &[(i, 0)], a["dir"].as_str().unwrap());
-                let best = (0..self.r.n()).filter(|&p| col[p] != INF && self.matches(p, &c)).map(|p| (col[p], self.r.ids[p])).min();
+                let best = self.matching(&c).into_iter().filter(|&p| col[p] != INF).map(|p| (col[p], self.r.ids[p])).min();
                 match best {
                     Some((t, p)) => json!({"time": t, "place": uuid(&p)}),
                     None => json!({"time": "BEYOND", "place": null}),
@@ -162,7 +200,7 @@ impl Expected<'_> {
                 let col = self.column(m, &src, a["dir"].as_str().unwrap());
                 if op == "column" {
                     let mut h = Sha256::new();
-                    for t in &col {
+                    for t in col.iter() {
                         h.update(t.to_le_bytes());
                     }
                     return json!({"times_sha256": hex::encode(h.finalize()), "beyond": col.iter().filter(|&&t| t == INF).count()});
@@ -177,8 +215,8 @@ impl Expected<'_> {
                     Err(r) => return r,
                 };
                 let t = a["t"].as_u64().unwrap();
-                let cols: Vec<Vec<u16>> = src.iter().map(|s| self.column(m, std::slice::from_ref(s), "from")).collect();
-                let ok = |c: &Vec<u16>, i: usize| c[i] != INF && c[i] as u64 <= t;
+                let cols: Vec<Arc<Vec<u16>>> = src.iter().map(|s| self.column(m, std::slice::from_ref(s), "from")).collect();
+                let ok = |c: &Arc<Vec<u16>>, i: usize| c[i] != INF && c[i] as u64 <= t;
                 let all = op == "reachable_from_all";
                 self.ids_answer((0..self.r.n()).filter(|&i| if all { !cols.is_empty() && cols.iter().all(|c| ok(c, i)) } else { cols.iter().any(|c| ok(c, i)) }))
             }
@@ -188,14 +226,13 @@ impl Expected<'_> {
         }
     }
 
-    /// SPEC §9 chained trips, from the matrices: car(x, p) ⊕ penalty ⊕ walk(p, y).
+    /// SPEC §9 chained trips, from columns: car(x, p) ⊕ penalty ⊕ walk(p, y).
     fn chained(&self, op: &str, a: &Value) -> Value {
         let (car, walk) = (self.mode("car"), self.mode("walk"));
         let c = self.category(&a["transfer_category"]).expect("a known category");
         let pen = a["penalty"].as_u64().unwrap() as u16;
         let transfers: Vec<usize> =
-            (0..self.r.n()).filter(|&p| self.matches(p, &c) && self.r.modes[car].at[p].is_ok() && self.r.modes[walk].at[p].is_ok()).collect();
-        let trip = |x: usize, y: usize, p: usize| self.m[car][x][p].saturating_add(pen).saturating_add(self.m[walk][p][y]);
+            self.matching(&c).into_iter().filter(|&p| self.r.modes[car].at[p].is_ok() && self.r.modes[walk].at[p].is_ok()).collect();
         if op == "chained" {
             let (sa, sb) = (a["a"].as_str().unwrap(), a["b"].as_str().unwrap());
             let x = match self.served(sa, car) {
@@ -206,22 +243,26 @@ impl Expected<'_> {
                 Ok(i) => i,
                 Err(r) => return r,
             };
-            return match transfers.iter().map(|&p| (trip(x, y, p), self.r.ids[p])).filter(|t| t.0 != INF).min() {
+            let (first, second) = (self.column(car, &[(x, 0)], "from"), self.column(walk, &[(y, 0)], "to"));
+            let trip = |p: usize| first[p].saturating_add(pen).saturating_add(second[p]);
+            return match transfers.iter().map(|&p| (trip(p), self.r.ids[p])).filter(|t| t.0 != INF).min() {
                 Some((t, p)) => json!({"time": t, "place": uuid(&p)}),
                 None => json!({"time": "BEYOND", "place": null}),
             };
         }
         let from = a["dir"] == "from";
         let id = a["id"].as_str().unwrap();
-        let i = match self.served(id, if from { car } else { walk }) {
+        let (m1, m2) = if from { (car, walk) } else { (walk, car) };
+        let i = match self.served(id, m1) {
             Ok(i) => i,
             Err(r) => return r,
         };
-        let col: Vec<u16> = (0..self.r.n())
-            .map(|y| transfers.iter().map(|&p| if from { trip(i, y, p) } else { trip(y, i, p) }).min().unwrap_or(INF))
-            .collect();
+        // The first leg, then the second from (or to) every transfer with its start.
+        let first = self.column(m1, &[(i, 0)], a["dir"].as_str().unwrap());
+        let src: Vec<(usize, u16)> = transfers.iter().map(|&p| (p, first[p].saturating_add(pen))).filter(|s| s.1 != INF).collect();
+        let col = if src.is_empty() { Arc::new(vec![INF; self.r.n()]) } else { self.column(m2, &src, a["dir"].as_str().unwrap()) };
         let mut h = Sha256::new();
-        for t in &col {
+        for t in col.iter() {
             h.update(t.to_le_bytes());
         }
         json!({"times_sha256": hex::encode(h.finalize()), "beyond": col.iter().filter(|&&t| t == INF).count()})
@@ -250,7 +291,7 @@ impl Expected<'_> {
                 self.column(m, &src, dir)
             } else {
                 let c = self.category(target).expect("a known category");
-                let places: Vec<(usize, u16)> = (0..self.r.n()).filter(|&p| self.matches(p, &c) && self.r.modes[m].at[p].is_ok()).map(|p| (p, 0)).collect();
+                let places: Vec<(usize, u16)> = self.matching(&c).into_iter().filter(|&p| self.r.modes[m].at[p].is_ok()).map(|p| (p, 0)).collect();
                 self.column(m, &places, if dir == "from" { "to" } else { "from" })
             };
             if !modes.contains(&m) {
@@ -296,7 +337,7 @@ fn collect<'a>(e: &'a Value, out: &mut Vec<&'a Value>) {
     }
 }
 
-fn eval(e: &Value, next: &mut usize, times: &[Vec<u16>], i: usize) -> bool {
+fn eval(e: &Value, next: &mut usize, times: &[Arc<Vec<u16>>], i: usize) -> bool {
     if let Some(t) = e.get("term") {
         let c = times[*next][i];
         *next += 1;

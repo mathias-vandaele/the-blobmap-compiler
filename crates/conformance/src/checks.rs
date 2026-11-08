@@ -12,9 +12,11 @@ use blobmap_runtime::recustomize::{RoadRef, customize};
 use blobmap_runtime::{Dir, Expert, Fam, Runtime};
 use blobmap_snap::parts;
 use rand::{Rng, SeedableRng};
+use rayon::prelude::*;
 use serde_json::{Value, json};
 
 use crate::expected::{Expected, reason_name, uuid};
+use crate::Samples;
 use crate::reference::Reference;
 use crate::report::Report;
 
@@ -71,16 +73,22 @@ pub fn snapping_brute(r: &Reference, max: usize, rep: &mut Report) {
     let step = r.n().div_ceil(max.max(1)).max(1);
     for (m, mode) in r.modes.iter().enumerate() {
         let p = if mode.car { &r.car_pieces } else { &r.active_pieces };
-        for i in (0..r.n()).step_by(step) {
-            if matches!(mode.at[i], Err((4, _))) {
-                continue;
-            }
+        let picked: Vec<usize> = (0..r.n()).step_by(step).filter(|&i| !matches!(mode.at[i], Err((4, _)))).collect();
+        let results: Vec<Option<String>> = picked
+            .par_iter()
+            .map(|&i| {
+                let (lat, lon) = r.points[i];
+                let want = blobmap_snap::find_brute(p, lat, lon, r.radius[m], &r.sets[m]).outcome();
+                let got = mode.at[i].map(|e| (e.piece, e.frac.to_bits())).map_err(|(c, d)| (c, d.to_bits()));
+                let want = want.map(|h| (h.piece, h.frac.to_bits())).map_err(|(c, d)| (c, d.to_bits()));
+                (got != want).then(|| format!("{} {}: grid {got:?}, every segment {want:?}", mode.name, uuid(&r.ids[i])))
+            })
+            .collect();
+        for f in results {
             o.count();
-            let (lat, lon) = r.points[i];
-            let want = blobmap_snap::find_brute(p, lat, lon, r.radius[m], &r.sets[m]).outcome();
-            let got = mode.at[i].map(|e| (e.piece, e.frac.to_bits())).map_err(|(c, d)| (c, d.to_bits()));
-            let want = want.map(|h| (h.piece, h.frac.to_bits())).map_err(|(c, d)| (c, d.to_bits()));
-            o.expect(got == want, || format!("{} {}: grid {got:?}, every segment {want:?}", mode.name, uuid(&r.ids[i])));
+            if let Some(f) = f {
+                o.fail(f);
+            }
         }
     }
 }
@@ -230,43 +238,66 @@ pub fn recustomization(rt: &Runtime, rep: &mut Report) -> Result<()> {
     Ok(())
 }
 
-/// Columns from and to sampled sources, multi-source columns with start times, and
-/// point-to-point answers with reasons, against the reference Dijkstra.
-pub fn distances(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()> {
+/// Columns from and to `n.columns` sampled sources, multi-source columns with start times,
+/// and point-to-point answers with reasons between `n.pairs` sampled IDs, against the
+/// reference Dijkstra. The reference columns are computed in parallel.
+pub fn distances(rt: &Runtime, ex: &Expected, n: &Samples, rep: &mut Report) -> Result<()> {
     let r = ex.r;
     for (m, mode) in r.modes.iter().enumerate() {
         let k = rt.mode(mode.name)?;
         let o = rep.check(&format!("{}: columns against Dijkstra (from, to, starts)", mode.name));
         let served: Vec<usize> = (0..r.n()).filter(|&i| mode.at[i].is_ok()).collect();
-        let step = served.len().div_ceil(48).max(1);
+        let step = served.len().div_ceil(n.columns).max(1);
+        let mut cases: Vec<(Vec<(usize, u16)>, Dir, &str)> = Vec::new();
         for &s in served.iter().step_by(step) {
-            for (dir, name) in [(Dir::From, "from"), (Dir::To, "to")] {
-                o.count();
-                let got = rt.column(&[Source { id: s as u32, start: 0 }], k, dir)?;
-                let want = ex.column(m, &[(s, 0)], name);
-                if got != want {
-                    let i = (0..got.len()).find(|&i| got[i] != want[i]).unwrap();
-                    o.fail(format!("{name} {} to {}: {} != {}", uuid(&r.ids[s]), uuid(&r.ids[i]), got[i], want[i]));
-                }
-            }
+            cases.push((vec![(s, 0)], Dir::From, "from"));
+            cases.push((vec![(s, 0)], Dir::To, "to"));
         }
         for w in served.chunks(3).step_by(step.max(1)).take(6) {
             let src: Vec<(usize, u16)> = w.iter().enumerate().map(|(j, &s)| (s, [0u16, 45, 700][j])).collect();
-            for (dir, name) in [(Dir::From, "from"), (Dir::To, "to")] {
-                o.count();
-                let got = rt.column(&src.iter().map(|&(s, st)| Source { id: s as u32, start: st }).collect::<Vec<_>>(), k, dir)?;
-                o.expect(got == ex.column(m, &src, name), || format!("multi-source {name} from {:?}", src.iter().map(|x| uuid(&r.ids[x.0])).collect::<Vec<_>>()));
+            cases.push((src.clone(), Dir::From, "from"));
+            cases.push((src, Dir::To, "to"));
+        }
+        let results: Vec<Result<Option<String>>> = cases
+            .par_iter()
+            .map(|(src, dir, name)| {
+                let got = rt.column(&src.iter().map(|&(s, st)| Source { id: s as u32, start: st }).collect::<Vec<_>>(), k, *dir)?;
+                let want = ex.column(m, src, name);
+                Ok((got != *want).then(|| {
+                    let i = (0..got.len()).find(|&i| got[i] != want[i]).unwrap();
+                    let from: Vec<String> = src.iter().map(|x| format!("{}+{}", uuid(&r.ids[x.0]), x.1)).collect();
+                    format!("{name} {from:?} to {}: {} != {}", uuid(&r.ids[i]), got[i], want[i])
+                }))
+            })
+            .collect();
+        for res in results {
+            o.count();
+            if let Some(f) = res? {
+                o.fail(f);
             }
         }
         let o = rep.check(&format!("{}: travel_time and reasons", mode.name));
-        let sample: Vec<usize> = (0..r.n()).step_by(r.n().div_ceil(20).max(1)).collect();
-        for &a in &sample {
-            for &b in &sample {
+        let sample: Vec<usize> = (0..r.n()).step_by(r.n().div_ceil(n.pairs).max(1)).collect();
+        let results: Vec<Result<Vec<Option<String>>>> = sample
+            .par_iter()
+            .map(|&a| {
+                sample
+                    .iter()
+                    .map(|&b| {
+                        let (sa, sb) = (uuid(&r.ids[a]), uuid(&r.ids[b]));
+                        let got = rt.travel_time(&sa, &sb, k)?;
+                        let want = ex.travel_time(&sa, &sb, mode.name);
+                        Ok((got != want).then(|| format!("{sa} -> {sb}: {got} != {want}")))
+                    })
+                    .collect()
+            })
+            .collect();
+        for res in results {
+            for f in res? {
                 o.count();
-                let (sa, sb) = (uuid(&r.ids[a]), uuid(&r.ids[b]));
-                let got = rt.travel_time(&sa, &sb, k)?;
-                let want = ex.travel_time(&sa, &sb, mode.name);
-                o.expect(got == want, || format!("{sa} -> {sb}: {got} != {want}"));
+                if let Some(f) = f {
+                    o.fail(f);
+                }
             }
         }
     }

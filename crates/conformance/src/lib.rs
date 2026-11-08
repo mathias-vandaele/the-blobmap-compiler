@@ -64,6 +64,31 @@ fn named(checks: &[Check]) -> Vec<String> {
     out
 }
 
+/// How much of a tier the sampled checks and golden queries cover: the tiny tier is
+/// checked whole, larger tiers on even samples.
+#[derive(Clone, Debug)]
+pub struct Samples {
+    /// Sources of single-source columns, per mode.
+    pub columns: usize,
+    /// IDs whose every pair is asked for `travel_time`, per mode.
+    pub pairs: usize,
+    /// IDs re-snapped without the grid, per mode.
+    pub brute: usize,
+    /// Aliases and category keys in the golden queries.
+    pub aliases: usize,
+    pub categories: usize,
+}
+
+impl Samples {
+    pub fn for_tier(tier: &str) -> Samples {
+        if tier == "tiny" {
+            Samples { columns: 48, pairs: 20, brute: 5000, aliases: usize::MAX, categories: usize::MAX }
+        } else {
+            Samples { columns: 12, pairs: 12, brute: 200, aliases: 16, categories: 8 }
+        }
+    }
+}
+
 /// A tiny-tier scenario's facts, and whether this model is its cells variant.
 struct Facts {
     checks: Vec<Check>,
@@ -71,16 +96,16 @@ struct Facts {
 }
 
 /// Every check except golden replay and mutants.
-fn run(rt: &Runtime, ex: &Expected, s: &Facts, hashes: bool, rep: &mut Report) -> Result<()> {
+fn run(rt: &Runtime, ex: &Expected, s: &Facts, n: &Samples, hashes: bool, rep: &mut Report) -> Result<()> {
     invariants::structure(rt, rep)?;
     if hashes {
         invariants::hashes(rt, rep)?;
     }
     checks::experts(rt, ex.r, rep);
     checks::snapping(rt, ex.r, rep)?;
-    checks::snapping_brute(ex.r, 5000, rep);
+    checks::snapping_brute(ex.r, n.brute, rep);
     checks::recustomization(rt, rep)?;
-    checks::distances(rt, ex, rep)?;
+    checks::distances(rt, ex, n, rep)?;
     checks::scenario(rt, ex, &s.checks, s.cells, rep)?;
     Ok(())
 }
@@ -106,16 +131,16 @@ pub fn verify(model: &Path, o: &Options) -> Result<Verified> {
         checks: scenario.map(|s| s.checks).unwrap_or_default(),
     };
     let r = Reference::build(&inputs)?;
-    let m = r.modes.iter().map(|mode| dijkstra::matrix(&r, mode)).collect();
-    let ex = Expected { r: &r, m };
+    let ex = Expected::new(&r);
+    let n = Samples::for_tier(&o.tier);
     let mut report = Report::default();
-    guarded(&mut report, "checks", |rep| run(&rt, &ex, &scenario, true, rep));
+    guarded(&mut report, "checks", |rep| run(&rt, &ex, &scenario, &n, true, rep));
     let mut golden_written = None;
     let mut golden_dir = None;
     if let Some(root) = &o.golden {
         let dir = root.join(&o.tier).join(&set.name);
         if !dir.join(golden::HEADER).exists() {
-            golden::write(&dir, &o.tier, &rt.manifest.inputs_hash, &golden::queries(&ex, &named(&scenario.checks)))?;
+            golden::write(&dir, &o.tier, &rt.manifest.inputs_hash, &golden::queries(&ex, &named(&scenario.checks), &n))?;
             golden_written = Some(dir.clone());
         }
         guarded(&mut report, "golden replay", |rep| golden::replay(&rt, &dir, rep));
@@ -128,7 +153,7 @@ pub fn verify(model: &Path, o: &Options) -> Result<Verified> {
             broken.faults = *faults;
             let mut rep = Report::default();
             guarded(&mut rep, "checks", |rep| {
-                checks::distances(&broken, &ex, rep)?;
+                checks::distances(&broken, &ex, &n, rep)?;
                 checks::scenario(&broken, &ex, &scenario.checks, false, rep)
             });
             if let Some(d) = &golden_dir {
@@ -145,7 +170,7 @@ pub fn verify(model: &Path, o: &Options) -> Result<Verified> {
                 Err(_) => true,
                 Ok(b) => {
                     let mut rep = Report::default();
-                    guarded(&mut rep, "checks", |rep| run(&b, &ex, &scenario, false, rep));
+                    guarded(&mut rep, "checks", |rep| run(&b, &ex, &scenario, &n, false, rep));
                     if let Some(d) = &golden_dir {
                         guarded(&mut rep, "golden replay", |rep| golden::replay(&b, d, rep));
                     }
