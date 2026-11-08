@@ -2,7 +2,10 @@
 //! ordered by nested dissection, and the coarse elimination tree is cut where subtrees fit
 //! the budget. The subtrees below the cut become cells; the coarse nodes above it, lifted
 //! to the fine graph, are the top block. Different subtrees of an elimination tree share no
-//! arc, so no fine arc joins two cells. Each block is then ordered on its own.
+//! arc, so no fine arc joins two cells. Each cell is then ordered on its own. The top block
+//! follows the coarse order, which is the separator hierarchy: ordering its induced graph
+//! alone ignores the cliques the cells hand up, and on the tiny cells grid gave 253 car
+//! levels where the coarse order gives 187.
 
 use crate::elim::eliminate;
 use crate::{Graph, InertialFlow, Orderer, ranks};
@@ -237,7 +240,15 @@ pub fn plan(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
     if top_nodes.is_empty() || size.len() < 2 {
         return vec![Block { kind: Kind::Whole, nodes: orderer.order(g) }];
     }
-    let mut out = vec![Block { kind: Kind::Top, nodes: order_induced(g, &fine, &top_nodes, orderer) }];
+    // The top block by the coarse rank of its clusters, then the orderer inside a cluster.
+    let induced = order_induced(g, &fine, &top_nodes, orderer);
+    let mut within = vec![0u32; g.n];
+    for (i, &v) in induced.iter().enumerate() {
+        within[v as usize] = i as u32;
+    }
+    let mut top_order = top_nodes;
+    top_order.sort_by_key(|&v| (rank[map[v as usize] as usize], within[v as usize]));
+    let mut out = vec![Block { kind: Kind::Top, nodes: top_order }];
     for c in 0..size.len() as u32 {
         let nodes: Vec<u32> = (0..g.n as u32).filter(|&v| block[v as usize] == c).collect();
         if !nodes.is_empty() {
