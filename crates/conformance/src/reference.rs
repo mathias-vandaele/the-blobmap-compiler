@@ -79,6 +79,7 @@ impl Reference {
             None => None,
         };
         let catalog = ReadCatalog.run((&release, &config, polygon.as_ref()))?;
+        blobmap_build::mem::trim();
         let points: Vec<(f64, f64)> =
             catalog.addresses.iter().map(|a| (a.lat, a.lon)).chain(catalog.places.iter().map(|p| (p.lat, p.lon))).collect();
         let (cg, ag) = (Grid::new(&car_pieces), Grid::new(&active_pieces));
@@ -126,6 +127,8 @@ impl Reference {
             .collect();
         debug_assert_eq!(METRICS, ["bike", "walk"]);
         let points = pts.iter().map(|&k| points[k]).collect();
+        drop(found);
+        blobmap_build::mem::trim();
         let sorted = |v: Vec<(Id, u32)>| {
             let mut v = v;
             v.sort_unstable();
