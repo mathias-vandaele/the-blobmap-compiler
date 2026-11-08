@@ -10,11 +10,9 @@ anyhow.workspace = true
 arrow-array.workspace = true
 arrow-schema.workspace = true
 flate2.workspace = true
+osmpbf.workspace = true
 parquet.workspace = true
 serde_json.workspace = true
-
-[dev-dependencies]
-osmpbf.workspace = true
 
 [lints]
 workspace = true

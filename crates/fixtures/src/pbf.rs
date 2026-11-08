@@ -1,6 +1,7 @@
 //! A minimal `.osm.pbf` writer: protobuf encoded by hand, blobs zlib-compressed. It writes
-//! a header block, then one data block with dense nodes, ways and relations, which is
-//! all a fixture needs. Coordinates use the default granularity (100 nanodegrees).
+//! a header block, then data blocks of at most `BLOCK` entities: nodes, then ways, then
+//! relations, each block with one group per kind it holds (a fixture fits in one block).
+//! Coordinates use the default granularity (100 nanodegrees).
 
 use std::io::Write;
 use std::path::Path;
@@ -151,6 +152,9 @@ fn blob(kind: &str, payload: &[u8], out: &mut Vec<u8>) -> Result<()> {
     Ok(())
 }
 
+/// Entities per data block, as osmium writes them.
+pub const BLOCK: usize = 8000;
+
 impl OsmData {
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let mut out = Vec::new();
@@ -171,13 +175,26 @@ impl OsmData {
             header.uint(32, t as u64);
         }
         blob("OSMHeader", &header.0, &mut out)?;
+        let (nn, nw, nr) = (self.nodes.len(), self.ways.len(), self.relations.len());
+        let mut at = 0;
+        while at < nn + nw + nr {
+            let end = (at + BLOCK).min(nn + nw + nr);
+            let part = |len: usize, start: usize| at.max(start).min(start + len)..end.max(start).min(start + len);
+            let (n, w, r) = (part(nn, 0), part(nw, nn), part(nr, nn + nw));
+            let shift = |x: std::ops::Range<usize>, by: usize| x.start - by..x.end - by;
+            self.block(&self.nodes[n], &self.ways[shift(w, nn)], &self.relations[shift(r, nn + nw)], &mut out)?;
+            at = end;
+        }
+        Ok(out)
+    }
 
+    fn block(&self, nodes: &[Node], ways: &[Way], relations: &[Relation], out: &mut Vec<u8>) -> Result<()> {
         let mut st = Strings::default();
         st.id("");
         let mut groups: Vec<Vec<u8>> = Vec::new();
-        if !self.nodes.is_empty() {
+        if !nodes.is_empty() {
             let mut kv = Vec::new();
-            for n in &self.nodes {
+            for n in nodes {
                 for (k, v) in &n.tags {
                     kv.push(st.id(k));
                     kv.push(st.id(v));
@@ -186,17 +203,17 @@ impl OsmData {
             }
             let mut dense = Msg::default();
             dense
-                .packed_sint(1, delta(self.nodes.iter().map(|n| n.id)))
-                .packed_sint(8, delta(self.nodes.iter().map(|n| units(n.lat))))
-                .packed_sint(9, delta(self.nodes.iter().map(|n| units(n.lon))))
+                .packed_sint(1, delta(nodes.iter().map(|n| n.id)))
+                .packed_sint(8, delta(nodes.iter().map(|n| units(n.lat))))
+                .packed_sint(9, delta(nodes.iter().map(|n| units(n.lon))))
                 .packed_uint(10, kv);
             let mut g = Msg::default();
             g.bytes(2, &dense.0);
             groups.push(g.0);
         }
-        if !self.ways.is_empty() {
+        if !ways.is_empty() {
             let mut g = Msg::default();
-            for w in &self.ways {
+            for w in ways {
                 let mut m = Msg::default();
                 m.uint(1, w.id as u64);
                 let keys: Vec<u64> = w.tags.iter().map(|(k, _)| st.id(k)).collect();
@@ -206,9 +223,9 @@ impl OsmData {
             }
             groups.push(g.0);
         }
-        if !self.relations.is_empty() {
+        if !relations.is_empty() {
             let mut g = Msg::default();
-            for r in &self.relations {
+            for r in relations {
                 let mut m = Msg::default();
                 m.uint(1, r.id as u64);
                 let keys: Vec<u64> = r.tags.iter().map(|(k, _)| st.id(k)).collect();
@@ -232,8 +249,7 @@ impl OsmData {
         for g in &groups {
             block.bytes(2, g);
         }
-        blob("OSMData", &block.0, &mut out)?;
-        Ok(out)
+        blob("OSMData", &block.0, out)
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {
