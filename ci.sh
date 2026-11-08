@@ -30,7 +30,7 @@ for dir in "$work"/in/*/; do
         v="$(basename "$cfg")"
         out="$work/m/$s-$v"
         build_scenario "$work/in" "$s" "$cfg" "$out"
-        if "$BLOBC" verify "$out" --tier tiny --golden "$root/golden" --mutants >"$work/log" 2>&1; then
+        if "$BLOBC" verify "$out" --tier tiny --data "$work/in" --golden "$root/golden" --mutants >"$work/log" 2>&1; then
             echo "ok   $s $v: $(grep -c . "$work/log") lines, $(tail -1 "$work/log")"
         else
             echo "FAIL $s $v"

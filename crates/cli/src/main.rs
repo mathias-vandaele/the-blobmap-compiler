@@ -34,9 +34,15 @@ enum Cmd {
     /// Checks a model with the conformance suite (SPEC §11).
     Verify {
         model: PathBuf,
-        #[arg(long, default_value = "tiny")]
+        #[arg(long)]
         tier: String,
-        /// Golden root (`<root>/<tier>/<scenario>/`): replayed, or written when absent.
+        /// The directory holding the tier's inputs, as its tier file lists them.
+        #[arg(long)]
+        data: PathBuf,
+        /// The directory of tier files, `<tier>.toml` each.
+        #[arg(long, default_value = "tiers")]
+        tiers: PathBuf,
+        /// Golden root (`<root>/<tier>/<inputs>/`): replayed, or written when absent.
         #[arg(long)]
         golden: Option<PathBuf>,
         /// Also run the broken models and runtimes, which must fail.
@@ -70,13 +76,14 @@ fn run() -> Result<bool> {
             println!("inputs_hash {}", r.manifest.inputs_hash);
             Ok(true)
         }
-        Cmd::Verify { model, tier, golden, mutants } => {
+        Cmd::Verify { model, tier, data, tiers, golden, mutants } => {
             let work = std::env::temp_dir().join(format!("blobc-verify-{}", std::process::id()));
-            let o = blobmap_conformance::Options { tier, golden, mutants, work: work.clone() };
+            let tier_file = tiers.join(format!("{tier}.toml"));
+            let o = blobmap_conformance::Options { tier, tier_file, data, golden, mutants, work: work.clone() };
             let v = blobmap_conformance::verify(&model, &o);
             let _ = std::fs::remove_dir_all(&work);
             let v = v?;
-            println!("scenario {}", v.scenario);
+            println!("inputs {}", v.scenario);
             print!("{}", v.report);
             if let Some(d) = &v.golden_written {
                 println!("golden written to {}", d.display());

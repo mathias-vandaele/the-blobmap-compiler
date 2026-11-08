@@ -11,11 +11,12 @@ pub mod invariants;
 pub mod mutants;
 pub mod reference;
 pub mod report;
+pub mod tier;
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
-use blobmap_fixtures::{Check, Scenario};
+use anyhow::Result;
+use blobmap_fixtures::Check;
 use blobmap_runtime::Runtime;
 
 use crate::expected::Expected;
@@ -25,10 +26,14 @@ pub use crate::report::Report;
 #[derive(Clone, Debug)]
 pub struct Options {
     pub tier: String,
-    /// The golden root: files live in `<root>/<tier>/<scenario>/`. Written when absent.
+    /// The tier file (SPEC §10, verify).
+    pub tier_file: PathBuf,
+    /// The directory holding the tier's inputs.
+    pub data: PathBuf,
+    /// The golden root: files live in `<root>/<tier>/<inputs>/`. Written when absent.
     pub golden: Option<PathBuf>,
     pub mutants: bool,
-    /// Scratch space for regenerated inputs and mutant models.
+    /// Scratch space for mutant models.
     pub work: PathBuf,
 }
 
@@ -59,8 +64,14 @@ fn named(checks: &[Check]) -> Vec<String> {
     out
 }
 
+/// A tiny-tier scenario's facts, and whether this model is its cells variant.
+struct Facts {
+    checks: Vec<Check>,
+    cells: bool,
+}
+
 /// Every check except golden replay and mutants.
-fn run(rt: &Runtime, ex: &Expected, s: &Scenario, hashes: bool, rep: &mut Report) -> Result<()> {
+fn run(rt: &Runtime, ex: &Expected, s: &Facts, hashes: bool, rep: &mut Report) -> Result<()> {
     invariants::structure(rt, rep)?;
     if hashes {
         invariants::hashes(rt, rep)?;
@@ -70,9 +81,7 @@ fn run(rt: &Runtime, ex: &Expected, s: &Scenario, hashes: bool, rep: &mut Report
     checks::snapping_brute(ex.r, 5000, rep);
     checks::recustomization(rt, rep)?;
     checks::distances(rt, ex, rep)?;
-    let budget = format!("memory_budget_bytes = {}\n", rt.manifest.build.memory_budget_bytes);
-    let cells = s.variants.iter().any(|v| v.name == "cells" && v.build_toml.contains(&budget));
-    checks::scenario(rt, ex, &s.checks, cells, rep)?;
+    checks::scenario(rt, ex, &s.checks, s.cells, rep)?;
     Ok(())
 }
 
@@ -85,12 +94,17 @@ fn guarded(rep: &mut Report, name: &str, f: impl FnOnce(&mut Report) -> Result<(
 
 pub fn verify(model: &Path, o: &Options) -> Result<Verified> {
     let rt = Runtime::open(model)?;
-    if o.tier != "tiny" {
-        bail!("tier {}: its inputs are not part of milestone 2 (only the tiny tier regenerates its inputs)", o.tier);
-    }
-    let sha = &rt.manifest.inputs.pbf.sha256;
-    let inputs_dir = o.work.join("inputs");
-    let (scenario, inputs) = reference::tiny_inputs(sha, &inputs_dir)?.with_context(|| format!("no tiny scenario has a .pbf with SHA-256 {sha}"))?;
+    let tf = tier::TierFile::read(&o.tier_file)?;
+    anyhow::ensure!(tf.tier == o.tier, "{}: a tier file for {}, not {}", o.tier_file.display(), tf.tier, o.tier);
+    let set = tf.find(&rt.manifest)?;
+    let inputs = set.check(&o.data, &rt.manifest)?;
+    // The tiny tier's sets are fixture scenarios, with facts of their own.
+    let scenario = if o.tier == "tiny" { blobmap_fixtures::by_name(&set.name) } else { None };
+    let budget = format!("memory_budget_bytes = {}\n", rt.manifest.build.memory_budget_bytes);
+    let scenario = Facts {
+        cells: scenario.as_ref().is_some_and(|s| s.variants.iter().any(|v| v.name == "cells" && v.build_toml.contains(&budget))),
+        checks: scenario.map(|s| s.checks).unwrap_or_default(),
+    };
     let r = Reference::build(&inputs)?;
     let m = r.modes.iter().map(|mode| dijkstra::matrix(&r, mode)).collect();
     let ex = Expected { r: &r, m };
@@ -99,7 +113,7 @@ pub fn verify(model: &Path, o: &Options) -> Result<Verified> {
     let mut golden_written = None;
     let mut golden_dir = None;
     if let Some(root) = &o.golden {
-        let dir = root.join(&o.tier).join(scenario.name);
+        let dir = root.join(&o.tier).join(&set.name);
         if !dir.join(golden::HEADER).exists() {
             golden::write(&dir, &o.tier, &rt.manifest.inputs_hash, &golden::queries(&ex, &named(&scenario.checks)))?;
             golden_written = Some(dir.clone());
@@ -141,5 +155,5 @@ pub fn verify(model: &Path, o: &Options) -> Result<Verified> {
             mutants.push((mu.name.to_string(), Some(caught)));
         }
     }
-    Ok(Verified { scenario: scenario.name.to_string(), report, mutants, golden_written })
+    Ok(Verified { scenario: set.name.clone(), report, mutants, golden_written })
 }

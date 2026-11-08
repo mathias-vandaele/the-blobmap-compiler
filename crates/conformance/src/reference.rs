@@ -2,7 +2,7 @@
 //! and every ID snapped per mode (SPEC §6), computed with the compiler's input crates but
 //! never from the model.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use blobmap_build::{ActiveNetwork, CarNetwork, ReadCatalog, Stage};
@@ -156,19 +156,4 @@ impl Reference {
         }
         self.aliases.iter().find(|a| &a.0 == id).map(|a| a.1)
     }
-}
-
-/// The inputs of a tiny-tier model: the fixture scenario whose `.pbf` has the model's
-/// SHA-256, written under `dir`, with its default config and its extent.
-pub fn tiny_inputs(pbf_sha256: &str, dir: &Path) -> Result<Option<(blobmap_fixtures::Scenario, Inputs)>> {
-    use sha2::Digest;
-    for s in blobmap_fixtures::scenarios::all() {
-        if hex::encode(sha2::Sha256::digest(s.pbf_bytes()?)) != pbf_sha256 {
-            continue;
-        }
-        let w = s.write(dir)?;
-        let i = Inputs { pbf: w.pbf, overture: w.overture, config: w.configs[0].1.clone(), extent: w.extent };
-        return Ok(Some((s, i)));
-    }
-    Ok(None)
 }

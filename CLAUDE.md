@@ -60,4 +60,6 @@ Build order (PLAN.md), each crate under `crates/`:
   mutants. `cli`: `blobc build | verify | inspect`.
 
 `ci.sh` runs the milestone 2 gate; `tools/determinism.sh` the thread-count check. Golden
-files live in `golden/<tier>/<scenario>/`.
+files live in `golden/<tier>/<inputs>/`. `tiers/<tier>.toml` lists each tier's inputs by
+path and SHA-256 (`blobc verify --data <dir>`); the `tier` binary of `conformance` writes
+them (`tier tiny <dir> tiers/tiny.toml`, `tier add …`).
