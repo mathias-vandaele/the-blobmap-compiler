@@ -253,8 +253,11 @@ impl Expert {
 
     /// A CAR segment and its copies in this expert (FORMAT §8 `arr`).
     pub fn arrivals(&self, s: u32, faults: &Faults) -> impl Iterator<Item = u32> + '_ {
-        let copies: &[u32] =
-            if self.fam == Fam::Car && !faults.no_copies { &self.copies[self.copy_first[s as usize] as usize..self.copy_first[s as usize + 1] as usize] } else { &[] };
+        let copies: &[u32] = if self.fam == Fam::Car && !faults.no_copies {
+            &self.copies[self.copy_first[s as usize] as usize..self.copy_first[s as usize + 1] as usize]
+        } else {
+            &[]
+        };
         std::iter::once(s).chain(copies.iter().copied())
     }
 }
@@ -266,6 +269,8 @@ pub struct Runtime {
     pub vocab: Vocab,
     pub faults: Faults,
     cache: Mutex<BTreeMap<(Fam, u32), Arc<Expert>>>,
+    /// Held while an expert loads, so that concurrent queries load it once.
+    loading: Mutex<()>,
 }
 
 fn strings(m: &Model, name: &str) -> Result<Vec<String>> {
@@ -323,13 +328,21 @@ impl Runtime {
                 let (s, k) = model.get_rows::<u32>(&format!("{p}seg"), &[2])?;
                 let (o, k2) = model.get_rows::<u16>(&format!("{p}off"), &[2, 2])?;
                 ensure!(k == n && k2 == n, "{p}: entries do not cover every ID");
-                ((0..n).map(|i| [s[2 * i], s[2 * i + 1]]).collect(), vec![NONE; n], (0..n).map(|i| o[4 * i..4 * i + 4].try_into().unwrap()).collect())
+                (
+                    (0..n).map(|i| [s[2 * i], s[2 * i + 1]]).collect(),
+                    vec![NONE; n],
+                    (0..n).map(|i| o[4 * i..4 * i + 4].try_into().unwrap()).collect(),
+                )
             } else {
                 let (s, k) = model.get_rows::<u32>(&format!("{p}node"), &[2])?;
                 let (o, k2) = model.get_rows::<u16>(&format!("{p}off"), &[4])?;
                 ensure!(k == n && k2 == n, "{p}: entries do not cover every ID");
                 let road = model.get_len::<u32>(&format!("{p}road"), n)?.into_owned();
-                ((0..n).map(|i| [s[2 * i], s[2 * i + 1]]).collect(), road, (0..n).map(|i| o[4 * i..4 * i + 4].try_into().unwrap()).collect())
+                (
+                    (0..n).map(|i| [s[2 * i], s[2 * i + 1]]).collect(),
+                    road,
+                    (0..n).map(|i| o[4 * i..4 * i + 4].try_into().unwrap()).collect(),
+                )
             };
             let rid = model.get::<u32>(&format!("{p}reason_id"))?;
             let rcode = model.get_len::<u8>(&format!("{p}reason_code"), rid.len())?;
@@ -357,7 +370,15 @@ impl Runtime {
             place,
         };
         ensure!(hex::encode(&vocab.road_hash) == *road_hash, "vocab/road_hash differs from the manifest (FORMAT §9)");
-        Ok(Runtime { model, manifest, tables, vocab, faults: Faults::default(), cache: Mutex::new(BTreeMap::new()) })
+        Ok(Runtime {
+            model,
+            manifest,
+            tables,
+            vocab,
+            faults: Faults::default(),
+            cache: Mutex::new(BTreeMap::new()),
+            loading: Mutex::new(()),
+        })
     }
 
     pub fn mode(&self, name: &str) -> Result<usize> {
@@ -370,6 +391,10 @@ impl Runtime {
 
     /// Expert x of a family, loaded from its packs.
     pub fn expert(&self, fam: Fam, x: u32) -> Result<Arc<Expert>> {
+        if let Some(e) = self.cache.lock().unwrap().get(&(fam, x)) {
+            return Ok(e.clone());
+        }
+        let _one = self.loading.lock().unwrap();
         if let Some(e) = self.cache.lock().unwrap().get(&(fam, x)) {
             return Ok(e.clone());
         }
