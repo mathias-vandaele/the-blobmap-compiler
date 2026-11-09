@@ -67,9 +67,11 @@ fn main() -> Result<()> {
             }
         }
         println!("{mode}: {} pairs served in different experts", apart.values().sum::<u64>());
-        println!("  {:>7} {:>9}  {:>7} {:>9}  {:>6}", "origin", "nodes", "dest", "nodes", "pairs");
+        // One OSM way of each expert but the largest, which would take long to load.
+        let way = |x: u32| -> Result<String> { Ok(if x == 0 { "–".into() } else { rt.expert(mv.info.fam, x)?.way[0].to_string() }) };
+        println!("  {:>7} {:>9} {:>11}  {:>7} {:>9} {:>11}  {:>6}", "origin", "nodes", "OSM way", "dest", "nodes", "OSM way", "pairs");
         for ((x, y), k) in apart {
-            println!("  {x:>7} {:>9}  {y:>7} {:>9}  {k:>6}", nodes[x as usize], nodes[y as usize]);
+            println!("  {x:>7} {:>9} {:>11}  {y:>7} {:>9} {:>11}  {k:>6}", nodes[x as usize], way(x)?, nodes[y as usize], way(y)?);
         }
         return Ok(());
     }
