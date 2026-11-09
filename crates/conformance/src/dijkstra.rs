@@ -332,3 +332,55 @@ impl Graphs {
         }
     }
 }
+
+impl Graphs {
+    /// The CAR time from the ID at o to the ID at d (SPEC §9), by a Dijkstra that stops once
+    /// no label can improve the arrival.
+    pub fn car_pair(&self, r: &Reference, m: &Mode, o: usize, d: usize) -> u16 {
+        let (Ok(eo), Ok(ed)) = (m.at[o], m.at[d]) else { return INF };
+        if o == d {
+            return 0;
+        }
+        if eo.expert != ed.expert {
+            return INF;
+        }
+        let (g, cs) = (&r.car, &self.car);
+        let targets: Vec<(u32, u32)> = sides(r, m, &ed).iter().flatten().filter_map(|s| split(s.w, s.g).map(|(before, _)| (s.tail, before))).collect();
+        let mut best = direct(r, m, &eo, &ed);
+        let mut dist: HashMap<u32, u32> = HashMap::new();
+        let mut heap = BinaryHeap::new();
+        for side in sides(r, m, &eo).iter().flatten() {
+            let Some((_, after)) = split(side.w, side.g) else { continue };
+            for (k, c) in cs.fwd.arcs(side.tail) {
+                let t = after + c as u32;
+                if t < *dist.get(&k).unwrap_or(&u32::MAX) {
+                    dist.insert(k, t);
+                    heap.push(Reverse((t, k)));
+                }
+            }
+        }
+        while let Some(Reverse((t, k))) = heap.pop() {
+            if t >= best {
+                break;
+            }
+            if t > dist[&k] {
+                continue;
+            }
+            let a = cs.last[k as usize];
+            for &(ts, before) in &targets {
+                if ts == a {
+                    best = best.min(t.saturating_add(before));
+                }
+            }
+            let base = t.saturating_add(g.w[a as usize] as u32);
+            for (h, c) in cs.fwd.arcs(k) {
+                let x = base.saturating_add(c as u32);
+                if x < *dist.get(&h).unwrap_or(&u32::MAX) {
+                    dist.insert(h, x);
+                    heap.push(Reverse((x, h)));
+                }
+            }
+        }
+        cap(best)
+    }
+}

@@ -1,6 +1,7 @@
 //! The data report (SPEC §3), written next to the model directory: place counts per country
 //! and basic category, compared with `--previous-report`; served counts and reasons per mode;
-//! every trapped component; places without a category.
+//! every trapped component; restrictions whose prefix copy has no exit; places without a
+//! category.
 
 use std::collections::BTreeMap;
 
@@ -57,6 +58,16 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
             json!({"file": p.file_name().map(|n| n.to_string_lossy().into_owned()), "flagged": compare(&prev["places"], &places)})
         }
     };
+    // Restrictions whose prefix copy has no turn out (SPEC §5): likely mis-tagged.
+    let g = f.car.g;
+    let dead_ends: Vec<Value> = g
+        .dead_ends
+        .iter()
+        .map(|&(rel, c)| {
+            let c = c as usize;
+            json!({"relation": rel, "way": g.way[c], "way_seq": g.seq[c], "way_dir": g.dir[c]})
+        })
+        .collect();
     let s = &c.stats;
     Ok(json!({
         "inputs": {"pbf": a.pbf.file_name().map(|n| n.to_string_lossy().into_owned()), "overture": c.release},
@@ -77,6 +88,7 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
         "places": places,
         "served": served,
         "trapped": trapped,
+        "dead_end_restrictions": dead_ends,
         "previous": previous,
     }))
 }

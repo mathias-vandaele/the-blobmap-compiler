@@ -57,6 +57,7 @@ Place rules (defaults, kept in versioned config; the config hash goes into the m
 Each build writes a data report, outside the model directory (§8): `<model dir>.data-report.json`, next to the model directory.
 - **Place counts** per country and basic category, compared with the previous build's data report and flagging any change above 20 %. The previous report is passed as `--previous-report <file>` (§10); without it there is no comparison.
 - **Trapped components** (§5), which usually point at OSM errors: every one, sorted by size, with its node count, the number of IDs whose nearest eligible piece lies in it, and one OSM way id, so the large ones can be fixed in OSM. Provider score distributions drift between releases, so the rules are reviewed against this report every month.
+- **Dead-end restrictions** (§5): every via-way restriction whose prefix copy has no turn out, with its relation id and the copied segment's way, usually a mis-tagged restriction.
 
 ## 4. Modes and profiles
 
@@ -84,6 +85,7 @@ The compiler splits the network into experts by connectivity and splits large ex
 
 1. **Build each mode family's graph** over the whole `.pbf` (CAR: the turn graph; ACTIVE: the bike and walk union).
 2. **Compute strongly connected components.** Each component is an expert: Eurasia plus Africa is one CAR expert; Britain is its own while ferries and shuttles are excluded; every island is its own. CAR and ACTIVE components are computed separately and need not line up.
+   - **CAR via-way copies** (§4, FORMAT §5.3): experts are determined by the original segments only: the components are those of the originals, a turn into or out of a copy counting as one into or out of its original. Every copy belongs to its original's expert, whatever its own strong connectivity. A copy is an arrival state and no trip starts from one, so this stays exact; a turn from a copy into another expert is dropped like any cross-expert turn. A restriction whose prefix copy has no turn out is likely mis-tagged and is listed in the data report (§3).
 3. **Keep every component.** Small ones are packed into expert groups by size, to keep shard counts reasonable. A component attached to a larger one only by one-way roads (a one-way street into a dead end, a mis-tagged junction) is a trapped component, usually a data error: it stays in the model, but no ID snaps to it (§6). A component with no road at all to the rest is an island, served whatever its size.
    - **Precisely:** group the components that roads join, ignoring road direction. In each group, the largest component is served and every other one is trapped, with ties to the smaller expert index. A group of one component is an island.
 4. **ACTIVE reachability per metric.** An ACTIVE expert is a component of the union graph. Inside it, a pair one mode cannot connect gets ∞ for that metric, which is exact.

@@ -122,6 +122,11 @@ impl Expected<'_> {
         cell.get_or_init(|| Arc::new(self.g.column(self.r, &self.r.modes[m], src, from))).clone()
     }
 
+    /// The CAR time from the ID at o to the ID at d, point to point.
+    pub fn car_pair(&self, o: usize, d: usize) -> u16 {
+        self.g.car_pair(self.r, &self.r.modes[self.mode("car")], o, d)
+    }
+
     /// The kept places matching a category, by internal index.
     pub fn matching(&self, c: &Cat) -> Vec<usize> {
         let na = self.r.place_of.iter().take_while(|p| p.is_none()).count();

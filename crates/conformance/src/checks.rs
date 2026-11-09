@@ -304,6 +304,92 @@ pub fn distances(rt: &Runtime, ex: &Expected, n: &Samples, rep: &mut Report) -> 
     Ok(())
 }
 
+/// Every via-way copy (SPEC §11): for every proper prefix of every forbidden sequence, an
+/// ID on its last segment, reached from an ID on its first segment (or, when that has none,
+/// the nearest segment within three turns before it), in both directions, against a
+/// point-to-point reference Dijkstra. Prefixes whose last segment carries no ID are counted.
+pub fn via_copies(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()> {
+    let r = ex.r;
+    let (g, mode) = (&r.car, r.mode("car"));
+    let k = rt.mode("car")?;
+    let mut prefixes: Vec<&[u32]> = g.forbidden.iter().flat_map(|f| (2..f.len()).map(move |j| &f[..j])).collect();
+    prefixes.sort_unstable();
+    prefixes.dedup();
+    // IDs by the segment of each slot, in the ID's expert.
+    let mut on: Vec<(u32, u32)> = Vec::new();
+    for (i, at) in mode.at.iter().enumerate() {
+        if let Ok(e) = at {
+            for s in g.seg_of_piece[e.piece as usize] {
+                if s != NONE && r.car_experts.of[s as usize] == e.expert {
+                    on.push((s, i as u32));
+                }
+            }
+        }
+    }
+    on.sort_unstable();
+    let first_on = |s: u32| -> Option<usize> {
+        let k = on.partition_point(|x| x.0 < s);
+        (k < on.len() && on[k].0 == s).then(|| on[k].1 as usize)
+    };
+    let mut into: Vec<(u32, u32)> = (0..g.base.len()).flat_map(|a| g.base[a].iter().map(move |&(b, _)| (b, a as u32))).collect();
+    into.sort_unstable();
+    // The nearest ID upstream of s, breadth first over turns in segment order.
+    let upstream = |s: u32| -> Option<usize> {
+        let mut level = vec![s];
+        let mut seen = vec![s];
+        for _ in 0..=3 {
+            if let Some(i) = level.iter().find_map(|&x| first_on(x)) {
+                return Some(i);
+            }
+            let mut next = Vec::new();
+            for &x in &level {
+                let lo = into.partition_point(|y| y.0 < x);
+                for &(_, a) in into[lo..].iter().take_while(|y| y.0 == x) {
+                    if !seen.contains(&a) {
+                        seen.push(a);
+                        next.push(a);
+                    }
+                }
+            }
+            next.sort_unstable();
+            level = next;
+        }
+        None
+    };
+    let mut cases: Vec<(usize, usize)> = Vec::new();
+    let (mut no_target, mut no_source) = (0, 0);
+    for p in &prefixes {
+        let Some(t) = first_on(*p.last().unwrap()) else {
+            no_target += 1;
+            continue;
+        };
+        match upstream(p[0]) {
+            Some(s) if s != t => cases.push((s, t)),
+            _ => no_source += 1,
+        }
+    }
+    let results: Vec<Result<Option<String>>> = cases
+        .par_iter()
+        .map(|&(s, t)| {
+            let want = ex.car_pair(s, t);
+            let from = rt.column(&[Source { id: s as u32, start: 0 }], k, Dir::From)?[t];
+            let to = rt.column(&[Source { id: t as u32, start: 0 }], k, Dir::To)?[s];
+            Ok((from != want || to != want).then(|| format!("{} -> {}: from {from}, to {to}, reference {want}", uuid(&r.ids[s]), uuid(&r.ids[t]))))
+        })
+        .collect();
+    let o = rep.check(&format!(
+        "car: every via-way prefix, both directions ({} prefixes; {no_target} with no ID on the copied segment, {no_source} with no ID before it)",
+        prefixes.len()
+    ));
+    for res in results {
+        o.count();
+        if let Some(f) = res? {
+            o.fail(f);
+        }
+    }
+    Ok(())
+}
+
 fn tt(rt: &Runtime, a: &str, b: &str, mode: &str) -> Value {
     rt.mode(mode).and_then(|m| rt.travel_time(a, b, m)).unwrap_or_else(|e| json!({"error": e.to_string()}))
 }
@@ -403,6 +489,10 @@ pub fn scenario(rt: &Runtime, ex: &Expected, checks: &[Check], cells_variant: bo
             Check::Restrictions { at_least } => {
                 let n = ex.r.car.stats.way_via_applied;
                 o.expect(n >= *at_least, || format!("{n} via-way restrictions applied"));
+            }
+            Check::DeadEnds { at_least } => {
+                let n = ex.r.car.dead_ends.len();
+                o.expect(n >= *at_least, || format!("{n} restrictions with a dead-end prefix copy"));
             }
             Check::OnVia { id } => {
                 let m = rt.mode("car")?;

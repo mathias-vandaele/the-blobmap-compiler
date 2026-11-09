@@ -1,21 +1,29 @@
 //! Every component served (PLAN, milestone 3): `experts <model> <tier file> <data dir>`.
 //!
-//! From the model's inputs (found in the tier file, as `verify` does), per family: the
-//! experts that are served (not trapped), each with its nodes, its IDs per mode and the
-//! centroid of those IDs; and the served experts that no ID uses. The model's expert sizes
-//! must equal the reference's.
+//! From the model's inputs (found in the tier file, as `verify` does), per family: the IDs
+//! per reason code and mode; the largest served (not trapped) experts, each with its nodes,
+//! its IDs per mode and the centroid of those IDs; the largest served experts that no ID
+//! uses, and their count by size. `--all` lists every served expert. The model's expert
+//! sizes must equal the reference's.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Result, bail, ensure};
+use blobmap_conformance::expected::reason_name;
 use blobmap_conformance::reference::Reference;
 use blobmap_conformance::tier::TierFile;
 use blobmap_runtime::{Fam, Runtime};
 
+/// Experts listed in each table.
+const TOP: usize = 25;
+
 fn main() -> Result<()> {
     let a: Vec<String> = std::env::args().skip(1).collect();
-    let [model, tier_file, data] = &a[..] else {
-        bail!("usage: experts <model> <tier file> <data dir>");
+    let all = a.iter().any(|x| x == "--all");
+    let a: Vec<&String> = a.iter().filter(|x| *x != "--all").collect();
+    let [model, tier_file, data] = a[..] else {
+        bail!("usage: experts <model> <tier file> <data dir> [--all]");
     };
     let rt = Runtime::open(Path::new(model))?;
     let tf = TierFile::read(Path::new(tier_file))?;
@@ -53,12 +61,38 @@ fn main() -> Result<()> {
             served.len(),
             unused.len()
         );
-        println!("  {:>6} {:>10} {:>28}  centroid of its IDs", "expert", "nodes", format!("IDs ({})", names.join(", ")));
-        for &x in &served {
+        for &m in &modes {
+            let mut reasons: BTreeMap<&str, u64> = BTreeMap::new();
+            for at in &r.modes[m].at {
+                *reasons.entry(match at {
+                    Ok(_) => "served",
+                    Err((c, _)) => reason_name(*c),
+                }).or_default() += 1;
+            }
+            println!("  {}: {reasons:?}", r.modes[m].name);
+        }
+        let row = |x: usize| {
             let s = sum[x];
             let at = if s.2 > 0 { format!("{:.4}, {:.4}", s.0 / s.2 as f64, s.1 / s.2 as f64) } else { "–".into() };
             let c: Vec<String> = ids[x].iter().map(u64::to_string).collect();
             println!("  {x:>6} {:>10} {:>28}  {at}", e.nodes[x], c.join(", "));
+        };
+        let head = format!("  {:>6} {:>10} {:>28}  centroid of its IDs", "expert", "nodes", format!("IDs ({})", names.join(", ")));
+        println!("  the {} largest served experts:\n{head}", TOP.min(served.len()));
+        served.iter().take(TOP).for_each(|&x| row(x));
+        println!("  the {} largest served experts with no ID:\n{head}", TOP.min(unused.len()));
+        unused.iter().take(TOP).for_each(|&x| row(x));
+        let sizes: BTreeMap<u32, u64> = unused.iter().fold(BTreeMap::new(), |mut m, &x| {
+            *m.entry(e.nodes[x]).or_default() += 1;
+            m
+        });
+        println!("  served experts with no ID, by node count: {sizes:?}");
+        if !all {
+            continue;
+        }
+        println!("  every served expert:\n{head}");
+        for &x in &served {
+            row(x);
         }
     }
     Ok(())

@@ -109,6 +109,10 @@ pub enum Check {
     Restrictions {
         at_least: usize,
     },
+    /// At least this many via-way restrictions have a prefix copy with no exit (SPEC §5).
+    DeadEnds {
+        at_least: usize,
+    },
     /// The ID stands on a segment that has via-way copies.
     OnVia {
         id: String,

@@ -12,7 +12,7 @@ const WALK: f64 = 5.0 / 3.6;
 const RESIDENTIAL: f64 = 25.0 / 3.6;
 
 pub fn all() -> Vec<Scenario> {
-    vec![toy(), town(), cap(), viaway(), cells()]
+    vec![toy(), town(), cap(), viaway(), deadend(), cells()]
 }
 
 fn build_toml(target: u64, budget: u64, group: u64, order: Option<&[i64]>) -> String {
@@ -400,6 +400,50 @@ fn viaway() -> Scenario {
         extent: Some(extent),
         variants: vec![Variant { name: "default", build_toml: build_toml(1 << 20, 1 << 30, 0, None) }],
         checks,
+    }
+}
+
+/// A via-way restriction whose prefix copy has no exit (SPEC §5), as found in Lyon: A enters
+/// V1, V1 enters V2, and V2's only exit X is forbidden after A, V1, V2. V1 is entered only
+/// from A, so its original is reached by no turn; V2 is also entered from B. An address on
+/// V2 is reached fastest through the restricted prefix, and must get that exact time.
+fn deadend() -> Scenario {
+    let mut b = Builder::new(Frame::new(46.0, 4.0), 6);
+    let res = [("highway", "residential")];
+    let one = [("highway", "residential"), ("oneway", "yes")];
+    let a0 = b.node(0.0, 0.0);
+    let n1 = b.node(100.0, 0.0);
+    let n2 = b.node(200.0, 0.0);
+    let n3 = b.node(300.0, 0.0);
+    let n4 = b.node(300.0, 100.0);
+    let m2 = b.node(200.0, 100.0);
+    let m1 = b.node(100.0, 100.0);
+    let m0 = b.node(0.0, 100.0);
+    let a = b.way(&[a0, n1], &one);
+    let v1 = b.way(&[n1, n2], &one);
+    let v2 = b.way(&[n2, n3], &one);
+    let x = b.way(&[n3, n4], &one);
+    b.way(&[n2, m2], &res);
+    b.way(&[n4, m2, m1, m0, a0], &res);
+    b.restriction("no_straight_on", a, Via::Ways(vec![v1, v2]), x);
+    taxonomy(&mut b);
+    let src = b.address(50.0, 5.0);
+    let on_v2 = b.address(280.0, 5.0);
+    for k in 0..4 {
+        b.address(20.0 + 80.0 * k as f64, 105.0);
+    }
+    Scenario {
+        name: "deadend",
+        osm: b.osm,
+        release: b.release,
+        extent: None,
+        variants: vec![Variant { name: "default", build_toml: build_toml(1 << 20, 1 << 30, 0, None) }],
+        checks: vec![
+            Check::Restrictions { at_least: 1 },
+            Check::DeadEnds { at_least: 1 },
+            Check::OnVia { id: on_v2.clone() },
+            Check::Reachable { mode: "car", a: src, b: on_v2 },
+        ],
     }
 }
 

@@ -58,6 +58,8 @@ pub struct CarStats {
     /// one-way already makes impossible.
     pub unresolved: usize,
     pub forbidden_sequences: usize,
+    /// Via-way copies with no turn out (SPEC §5): every exit completes a forbidden sequence.
+    pub dead_end_copies: usize,
 }
 
 /// The turn graph. Nodes `0 .. originals` are the road segments in (way, seq, dir) order;
@@ -87,6 +89,9 @@ pub struct CarGraph {
     /// turn-aware Dijkstra needs (SPEC §11).
     pub base: Vec<Vec<(u32, u16)>>,
     pub forbidden: Vec<Vec<u32>>,
+    /// Restrictions with a prefix copy that has no turn out, likely mis-tagged (data
+    /// report): (relation id, the copy), sorted.
+    pub dead_ends: Vec<(i64, u32)>,
     pub stats: CarStats,
 }
 
@@ -228,7 +233,7 @@ impl CarGraph {
             }
         }
 
-        let seqs = g.forbidden_sequences(p, &base, restrictions);
+        let (seqs, of_relation) = g.forbidden_sequences(p, &base, restrictions);
         g.stats.forbidden_sequences = seqs.len();
         let auto = Automaton::new(&seqs);
 
@@ -296,6 +301,24 @@ impl CarGraph {
         g.stats.copies = copy_keys.len();
         let mut trans: Vec<(u32, u32, u16)> = trans.into_iter().map(|(a, b, c)| (map(a), map(b), c)).collect();
         trans.sort_unstable();
+        // Copies with no turn out, and the restrictions whose sequences begin with their prefix.
+        let mut exits = vec![false; s + copy_keys.len()];
+        for &(a, _, _) in &trans {
+            exits[a as usize] = true;
+        }
+        for (k, key) in copy_keys.iter().enumerate() {
+            let c = renum[k];
+            if exits[c as usize] {
+                continue;
+            }
+            g.stats.dead_end_copies += 1;
+            let lo = of_relation.partition_point(|x| x.0.as_slice() < key.as_slice());
+            for (_, rel) in of_relation[lo..].iter().take_while(|x| x.0.starts_with(key)) {
+                g.dead_ends.push((*rel, c));
+            }
+        }
+        g.dead_ends.sort_unstable();
+        g.dead_ends.dedup();
         g.stats.turns = trans.len();
         for (a, b, c) in trans {
             g.turn_from.push(a);
@@ -317,13 +340,15 @@ impl CarGraph {
 
     /// The restrictions as forbidden sequences of original segments (FORMAT §5.3): length 2
     /// for a via node, at least 3 for via ways; `only_*` rewritten as every other exit.
-    fn forbidden_sequences(&mut self, p: &Pieces, base: &[Vec<(u32, u16)>], restrictions: &[Restriction]) -> Vec<Vec<u32>> {
+    /// The forbidden sequences, sorted, and every (sequence, relation id), sorted.
+    fn forbidden_sequences(&mut self, p: &Pieces, base: &[Vec<(u32, u16)>], restrictions: &[Restriction]) -> (Vec<Vec<u32>>, Vec<(Vec<u32>, i64)>) {
         let mut by_way: HashMap<i64, Vec<usize>> = HashMap::new();
         for i in 0..p.len() {
             by_way.entry(p.way[i]).or_default().push(i);
         }
         let node = |osm: i64| p.osm_node(osm);
         let mut out: Vec<Vec<u32>> = Vec::new();
+        let mut of_relation: Vec<(Vec<u32>, i64)> = Vec::new();
         for r in restrictions {
             let mut seqs: Vec<Vec<u32>> = Vec::new();
             // (prefix, allowed last segments) per from way: the sequences end with one turn.
@@ -373,11 +398,14 @@ impl CarGraph {
                 Via::Node(_) => self.stats.node_via_applied += 1,
                 Via::Ways(_) => self.stats.way_via_applied += 1,
             }
+            of_relation.extend(seqs.iter().map(|q| (q.clone(), r.id)));
             out.extend(seqs);
         }
         out.sort();
         out.dedup();
-        out
+        of_relation.sort();
+        of_relation.dedup();
+        (out, of_relation)
     }
 
     fn segments_of(&self, by_way: &HashMap<i64, Vec<usize>>, way: i64) -> Vec<u32> {
@@ -440,11 +468,18 @@ impl CarGraph {
         None
     }
 
-    /// The experts of the turn graph (SPEC §5). Ties go to the smallest (way, way_seq,
-    /// way_dir), then originals before copies.
+    /// The experts of the turn graph (SPEC §5), determined by the original segments only:
+    /// the strongly connected components of the originals, a turn into or out of a copy
+    /// counting as one into or out of its original; each copy is in its original's expert,
+    /// whatever its own connectivity. Ties go to the smallest (way, way_seq, way_dir), then
+    /// originals before copies.
     pub fn experts(&self) -> Experts {
-        let g = Csr::new(self.len(), self.turn_from.iter().copied().zip(self.turn_to.iter().copied()));
-        let comp = scc(&g);
+        let orig = |v: u32| if (v as usize) < self.originals { v } else { self.copy_of[v as usize] };
+        let arcs = self.turn_from.iter().zip(&self.turn_to).map(|(&a, &b)| (orig(a), orig(b)));
+        let g = Csr::new(self.originals, arcs);
+        let mut comp = scc(&g);
+        let of_copies: Vec<u32> = (self.originals..self.len()).map(|c| comp[self.copy_of[c] as usize]).collect();
+        comp.extend(of_copies);
         let joined = self
             .turn_from
             .iter()

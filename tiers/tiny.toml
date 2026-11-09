@@ -76,6 +76,24 @@ extent = "viaway/viaway.poly"
 "viaway/viaway.poly" = "9b87fa9795cfd28e420c0103f02d6772299fedb6a298789939cfe2f87fe02dcd"
 
 [[inputs]]
+name = "deadend"
+pbf = "deadend/deadend.osm.pbf"
+overture = "deadend/overture/tiny-2026-11"
+config = "deadend/config"
+
+[inputs.files]
+"deadend/config/active.toml" = "63861f425a92bbf3161d3fd9b6cd60f152635e4db2b6246273cae83025e77589"
+"deadend/config/build.toml" = "3781e7f0bef2e7f2ea0f5da61192bbdfb578851a9190db65a81373ee4b80b6de"
+"deadend/config/car.toml" = "287c586e2c24f6047c14d95be95a603450ec540f0f1712f207ed068bf830db50"
+"deadend/config/places.toml" = "c37fcad0881de6bf6d43ae60198a3e31704937a5afefacdbd7889407c1ced449"
+"deadend/deadend.osm.pbf" = "1d4482bf8df16fd70b838f2f424cd54efcf0fa5031dd01ab57f2e91a48b86a4d"
+"deadend/overture/tiny-2026-11/raw/address.parquet" = "8c2d6868969f2f2912b5cc0fc20adec3aaf8dfdde7856acb3860645428d4b823"
+"deadend/overture/tiny-2026-11/raw/place.parquet" = "48d44f17afa51b6ed1fdcb30d3fbd60569785a992b3b59a2aeb49e739a51b8c9"
+"deadend/overture/tiny-2026-11/taxonomy/basic_categories.csv" = "52bff7f5d1d8980f6975e3a2d485ab6b117604275b7a8377f79a40b276b81d0f"
+"deadend/overture/tiny-2026-11/taxonomy/mapping_sheet.csv" = "35c9de341882d8ae7d7e18cc8794718ef7f1d797895d87dc83525970aefac537"
+"deadend/overture/tiny-2026-11/taxonomy/taxonomy.csv" = "0a2ca652286c11e557e0230676bde41c8090eefb4b89b038caef06f6dd6ad806"
+
+[[inputs]]
 name = "cells"
 pbf = "cells/cells.osm.pbf"
 overture = "cells/overture/tiny-2026-11"

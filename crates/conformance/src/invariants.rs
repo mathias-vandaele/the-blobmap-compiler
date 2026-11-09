@@ -98,6 +98,8 @@ pub fn structure(rt: &Runtime, rep: &mut Report) -> Result<()> {
                         );
                     }
                     o.expect(e.kind[v] == 2 || e.copy_of[v] == NONE, || format!("expert {x}: original {v} has copy_of"));
+                    // A copy is always in its original's expert (SPEC §5, FORMAT §5.3).
+                    o.expect(e.kind[v] != 2 || e.copy_of[v] != NONE, || format!("expert {x}: copy {v} has no original in its expert"));
                 }
             }
             // Road weights (FORMAT §1, §6.1): a finite master time is at most 65534 and its

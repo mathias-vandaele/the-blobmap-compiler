@@ -318,9 +318,9 @@ CAR layout nodes are directed road segments (SPEC §4); its roads are the segmen
 | `way_dir` | U8 | [n] | 0 along the way's node order, 1 against it |
 | `way_seq` | U32 | [n] | position of the piece on the way, 0-based in node order; each part of a cut piece (SPEC §7, long pieces) counts as a piece |
 | `kind` | U8 | [n] | 0 road; 1 ferry: reserved, never written in 2.0 (SPEC §4); 2 via-way copy (below) |
-| `copy_of` | U32 | [n] | for a copy: layout id of its original, if that is in the same expert; else `NONE`. `NONE` for every original |
+| `copy_of` | U32 | [n] | for a copy: layout id of its original, which is always in the same expert (SPEC §5); `NONE` for every original |
 | `copy_first` | U32 | [n + 1] | CSR by row into `copies` |
-| `copies` | U32 | [C] | for an original: layout ids of its copies in the same expert, ascending; empty for a copy |
+| `copies` | U32 | [C] | for an original: layout ids of all its copies, ascending; empty for a copy |
 
 Turns, by the row of the segment they leave (T turns):
 
@@ -352,6 +352,9 @@ graph:
 - **Rows of a copy:** a copy has its original's `way`, `way_dir`, `way_seq`, `car.time_s`
   and `car.w`.
   - A copy is a layout node like any other, with links and turns of its own.
+  - **Expert of a copy:** its original's (SPEC §5), even when the copy cannot reach the
+    original's component again; a copy may have no turn at all. Its turns into another
+    expert are not stored, like every cross-expert turn.
   - It is not a road of its own: it is not a member of any rounding group (§6.1), and no ID
     snaps to it (§7.2).
   - Heads and seeds take copies into account as §8 says.
@@ -408,9 +411,7 @@ SPEC §7 defines the rounding groups and the rule. In bytes:
   - CAR rows with `kind = 2` (via-way copies, §5.3) are not members.
   - A road whose new time is `+∞` leaves its group; one whose time becomes finite joins it.
 - **Copies:** after rounding, each CAR copy takes the `car.time_s` and `car.w` of its
-  original. The original is the member with the same (`way`, `way_dir`, `way_seq`). When
-  `copy_of = NONE`, the original is in another expert, and re-rounding finds it by this
-  way key, since rounding groups span the family.
+  original, the row `copy_of` names in the same expert.
 - **Travel order:** `way_seq` ascending if `way_dir = 0`, descending if 1.
 
 For each group, the exact integer computation:
