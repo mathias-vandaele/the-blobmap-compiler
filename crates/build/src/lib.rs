@@ -224,19 +224,34 @@ impl Stage<(&Path, &Config)> for ActiveNetwork {
     }
 }
 
+/// Every expert's order and blocks (SPEC §5), a stage of its own so that the build report
+/// shows the memory of nested dissection.
+pub struct Orders(pub &'static str);
+
+impl Stage<(&dyn Family, &Config, Option<&FixedRanks>)> for Orders {
+    type Output = hier::Ordered;
+    fn name(&self) -> &'static str {
+        self.0
+    }
+    fn run(&self, (f, c, fixed): (&dyn Family, &Config, Option<&FixedRanks>)) -> Result<hier::Ordered> {
+        let budget = c.build.build.memory_budget_bytes;
+        let max_cell = (budget / hier::BYTES_PER_NODE).max(1) as usize;
+        let nd_max = (hier::MEMORY_LIMIT_BYTES / hier::ND_BYTES_PER_NODE) as usize;
+        hier::order(f, max_cell, nd_max, fixed)
+    }
+}
+
 /// Every expert's hierarchy, then the entries and packs.
 pub struct Hierarchies(pub &'static str);
 
-impl Stage<(&dyn Family, &Config, Option<&FixedRanks>)> for Hierarchies {
+impl Stage<(&dyn Family, &Config, hier::Ordered)> for Hierarchies {
     type Output = (Built, Layout);
     fn name(&self) -> &'static str {
         self.0
     }
-    fn run(&self, (f, c, fixed): (&dyn Family, &Config, Option<&FixedRanks>)) -> Result<(Built, Layout)> {
-        let o = &c.build.build;
-        let max_cell = (o.memory_budget_bytes / hier::BYTES_PER_NODE).max(1) as usize;
-        let b = hier::build(f, max_cell, fixed)?;
-        let l = layout::plan(f, &b, o.group_max_nodes)?;
+    fn run(&self, (f, c, o): (&dyn Family, &Config, hier::Ordered)) -> Result<(Built, Layout)> {
+        let b = hier::build(f, o)?;
+        let l = layout::plan(f, &b, c.build.build.group_max_nodes)?;
         Ok((b, l))
     }
 }
@@ -505,11 +520,13 @@ pub fn build(a: &Args) -> Result<BuildResult> {
     let c = &inputs.config;
     let (cp, cg) = run.run(&CarNetwork, (a.pbf.as_path(), c))?;
     let car = Car::new(&cp, &cg);
-    let (cb, cl) = run.run(&Hierarchies("car-hierarchy"), (&car as &dyn Family, c, None))?;
+    let co = run.run(&Orders("car-order"), (&car as &dyn Family, c, None))?;
+    let (cb, cl) = run.run(&Hierarchies("car-hierarchy"), (&car as &dyn Family, c, co))?;
     let (ap, ag) = run.run(&ActiveNetwork, (a.pbf.as_path(), c))?;
     let act = Active::new(&ap, &ag);
     let fixed = fixed_ranks(&ap, &c.build.order.active)?;
-    let (ab, al) = run.run(&Hierarchies("active-hierarchy"), (&act as &dyn Family, c, fixed.as_ref()))?;
+    let ao = run.run(&Orders("active-order"), (&act as &dyn Family, c, fixed.as_ref()))?;
+    let (ab, al) = run.run(&Hierarchies("active-hierarchy"), (&act as &dyn Family, c, ao))?;
     let catalog = run.run(&ReadCatalog, (&inputs.release, c, inputs.polygon.as_ref()))?;
     let families = Families {
         car: &car,

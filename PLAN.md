@@ -56,10 +56,11 @@ Each crate gets unit tests as it lands. "Old" is `~/Work/blobmap/blobmap-compile
      patch, whose order is bit-identical across thread counts (old `order`).
    - **New:**
      - an `Orderer` trait, with nested dissection and a fixed order for the toy town;
-     - cells: coarsen, take the top separators from the coarse ordering, lift them to the
-       fine graph so that no fine arc joins two cells, then split into cells that fit
-       `memory_budget_bytes`. Each cell and the top block are ordered on their own
-       (SPEC §5).
+     - cells: order the fine graph as in one piece, cut the elimination tree of that
+       order where subtrees fit `memory_budget_bytes`, keep the order in every block
+       (SPEC §5). Fallback when the fine graph is too large to order: coarsen, take the top
+       separators from the coarse ordering, lift them to the fine graph so that no fine arc
+       joins two cells; each cell and the top block are then ordered on their own.
 7. **`cch`**: the hierarchy.
    - **Ports:** old `contract` (chordal completion, elimination tree, levels),
      `customize`, `layout`.

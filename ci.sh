@@ -5,7 +5,7 @@
 #      mutant caught;
 #   3. byte-identical builds with 1, 2, 8 and 24 threads;
 #   4. the cells scenario built as cells and in one piece: different model_id, same
-#      inputs_hash, same golden replay;
+#      inputs_hash, same links, same golden replay;
 #   5. with BLOBC_DATA set to a data directory holding the small tier's inputs
 #      (tiers/small.toml), every small-tier set built and verified against golden/small.
 set -euo pipefail
@@ -59,10 +59,13 @@ echo "== 4. cells"
 field() { sed -nE "s/^  \"$1\": \"([0-9a-f]+)\",?\$/\1/p" "$2/manifest.json"; }
 a="$work/m/cells-config"
 b="$work/m/cells-config-cells"
-if [ "$(field model_id "$a")" != "$(field model_id "$b")" ] && [ "$(field inputs_hash "$a")" = "$(field inputs_hash "$b")" ]; then
-    echo "cells: model_id $(field model_id "$a" | cut -c1-12) vs $(field model_id "$b" | cut -c1-12), inputs_hash $(field inputs_hash "$a" | cut -c1-12) for both; both replayed golden/tiny/cells above"
+# Cut from the fine order, the cells keep the one-piece hierarchy: the same links (SPEC §5).
+links() { "$BLOBC" inspect "$1" | sed -nE 's/^ *([a-z]+) +expert +experts .* links +([0-9]+) .*/\1 \2/p' | tr '\n' ' '; }
+if [ "$(field model_id "$a")" != "$(field model_id "$b")" ] && [ "$(field inputs_hash "$a")" = "$(field inputs_hash "$b")" ] \
+    && [ "$(links "$a")" = "$(links "$b")" ]; then
+    echo "cells: model_id $(field model_id "$a" | cut -c1-12) vs $(field model_id "$b" | cut -c1-12), inputs_hash $(field inputs_hash "$a" | cut -c1-12) for both; links $(links "$b")for both; both replayed golden/tiny/cells above"
 else
-    echo "FAIL cells: model_id or inputs_hash"
+    echo "FAIL cells: model_id, inputs_hash or links ($(links "$a")vs $(links "$b"))"
     fail=1
 fi
 echo "== 5. small tier"

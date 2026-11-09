@@ -1,14 +1,21 @@
-//! Cells (SPEC §5): an expert too large to build at once is coarsened, its coarse graph is
-//! ordered by nested dissection, and the coarse elimination tree is cut where subtrees fit
-//! the budget. The subtrees below the cut become cells; the coarse nodes above it, lifted
-//! to the fine graph, are the top block. Different subtrees of an elimination tree share no
-//! arc, so no fine arc joins two cells. Each cell is then ordered on its own. The top block
-//! follows the coarse order, which is the separator hierarchy: ordering its induced graph
-//! alone ignores the cliques the cells hand up, and on the tiny cells grid gave 253 car
-//! levels where the coarse order gives 187.
+//! Cells (SPEC §5): an expert too large to build at once is ordered by the same nested
+//! dissection as in one piece, on its fine graph, and the elimination tree of that order is
+//! cut where subtrees fit the budget. The subtrees below the cut, packed together, are the
+//! cells; the nodes above it are the top block. Different subtrees of an elimination tree
+//! share no arc, and each block keeps the order's ranks, so the contraction order is a
+//! reordering of the same elimination tree and the hierarchy is the one-piece hierarchy (its
+//! links, its fill).
+//!
+//! When the fine graph is too large to order within the budget, the expert is coarsened
+//! instead: the coarse graph is ordered and its elimination tree cut the same way, the
+//! coarse nodes above the cut, lifted to the fine graph, are the top block, and each block
+//! is ordered on its own (the top block by the coarse order, which is the separator
+//! hierarchy).
 
-use crate::elim::eliminate;
+use crate::elim::{eliminate, etree};
 use crate::{Graph, InertialFlow, Orderer, ranks};
+
+const NONE: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -79,7 +86,6 @@ fn order_induced(g: &Graph, adj: &Adj, nodes: &[u32], orderer: &dyn Orderer) -> 
 
 /// One round of heavy-edge matching: the cluster of each node, and the cluster count.
 fn matching(adj: &Adj, w: &[u64], cap: u64) -> (Vec<u32>, usize) {
-    const NONE: u32 = u32::MAX;
     let n = w.len();
     let mut cluster = vec![NONE; n];
     let mut k = 0u32;
@@ -109,11 +115,75 @@ fn matching(adj: &Adj, w: &[u64], cap: u64) -> (Vec<u32>, usize) {
 }
 
 /// The blocks of an expert: one whole block if it has at most `max_cell` nodes, else a top
-/// block and cells of at most `max_cell` nodes each.
-pub fn plan(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
+/// block and cells of at most `max_cell` nodes each: from the fine graph's order when the
+/// expert has at most `nd_max` nodes, else from a coarsened graph.
+pub fn plan(g: &Graph, orderer: &dyn Orderer, max_cell: usize, nd_max: usize) -> Vec<Block> {
     if g.n <= max_cell.max(1) {
         return vec![Block { kind: Kind::Whole, nodes: orderer.order(g) }];
     }
+    if g.n <= nd_max { fine(g, orderer, max_cell) } else { coarse(g, orderer, max_cell) }
+}
+
+/// The cut of an elimination tree over ranks, with `sub[r]` the weight of r's subtree: the
+/// ranks whose subtree weighs more than `max_cell` are the top (`NONE`); the subtrees below
+/// them are packed into cells in root order. Returns each rank's cell and the cell count.
+fn cut(parent: &[Option<u32>], sub: &[u64], max_cell: usize) -> (Vec<u32>, usize) {
+    let n = parent.len();
+    let top: Vec<bool> = sub.iter().map(|&s| s > max_cell as u64).collect();
+    // Units: subtrees hanging below the top, by their root.
+    let mut unit = vec![NONE; n];
+    for r in (0..n).rev() {
+        if !top[r] {
+            unit[r] = match parent[r] {
+                Some(p) if !top[p as usize] => unit[p as usize],
+                _ => r as u32,
+            };
+        }
+    }
+    let mut cell_of_unit = vec![NONE; n];
+    let mut size: Vec<u64> = Vec::new();
+    for r in 0..n {
+        if !top[r] && unit[r] == r as u32 {
+            match size.last_mut() {
+                Some(s) if *s + sub[r] <= max_cell as u64 => *s += sub[r],
+                _ => size.push(sub[r]),
+            }
+            cell_of_unit[r] = (size.len() - 1) as u32;
+        }
+    }
+    ((0..n).map(|r| if top[r] { NONE } else { cell_of_unit[unit[r] as usize] }).collect(), size.len())
+}
+
+/// Cells cut from the fine graph's own order.
+fn fine(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
+    let order = orderer.order(g);
+    let rank = ranks(&order);
+    let parent = etree(g.n, g.tail.iter().zip(g.head).map(|(&a, &b)| (rank[a as usize], rank[b as usize])));
+    let mut sub = vec![1u64; g.n];
+    for r in 0..g.n {
+        if let Some(p) = parent[r] {
+            sub[p as usize] += sub[r];
+        }
+    }
+    let (cell, k) = cut(&parent, &sub, max_cell);
+    let mut top = Vec::new();
+    let mut cells: Vec<Vec<u32>> = vec![Vec::new(); k];
+    for (r, &v) in order.iter().enumerate() {
+        match cell[r] {
+            NONE => top.push(v),
+            c => cells[c as usize].push(v),
+        }
+    }
+    if top.is_empty() || k < 2 {
+        return vec![Block { kind: Kind::Whole, nodes: order }];
+    }
+    let mut out = vec![Block { kind: Kind::Top, nodes: top }];
+    out.extend(cells.into_iter().map(|nodes| Block { kind: Kind::Cell, nodes }));
+    out
+}
+
+/// Cells from a coarsened graph, for an expert too large to order at once.
+fn coarse(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
     let fine = Adj::new(g.n, g.tail.iter().zip(g.head).map(|(&a, &b)| (a, b, 1)));
     // Coarsen to clusters of at most a quarter cell, until about 16 fine nodes per cluster.
     let target = (g.n / 16).max(1024);
@@ -172,37 +242,10 @@ pub fn plan(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
             sub[p as usize] += sub[r];
         }
     }
-    let top: Vec<bool> = sub.iter().map(|&s| s > max_cell as u64).collect();
-    // Units: subtrees hanging below the top, by their root; packed into cells in root order.
-    const NONE: u32 = u32::MAX;
-    let mut unit = vec![NONE; nc];
-    for r in (0..nc).rev() {
-        if !top[r] {
-            unit[r] = match parent[r] {
-                Some(p) if !top[p as usize] => unit[p as usize],
-                _ => r as u32,
-            };
-        }
-    }
-    let mut cell_of_unit = vec![NONE; nc];
-    let mut size: Vec<u64> = Vec::new();
-    for r in 0..nc {
-        if !top[r] && unit[r] == r as u32 {
-            match size.last_mut() {
-                Some(s) if *s + sub[r] <= max_cell as u64 => *s += sub[r],
-                _ => size.push(sub[r]),
-            }
-            cell_of_unit[r] = (size.len() - 1) as u32;
-        }
-    }
+    let (cell_of_rank, cells) = cut(&parent, &sub, max_cell);
     // Lift to the fine graph, then let top nodes whose arcs all stay in one cell join it.
-    let mut block: Vec<u32> = (0..g.n)
-        .map(|v| {
-            let r = rank[map[v] as usize] as usize;
-            if top[r] { NONE } else { cell_of_unit[unit[r] as usize] }
-        })
-        .collect();
-    let mut count: Vec<u64> = vec![0; size.len()];
+    let mut block: Vec<u32> = (0..g.n).map(|v| cell_of_rank[rank[map[v] as usize] as usize]).collect();
+    let mut count: Vec<u64> = vec![0; cells];
     for &b in &block {
         if b != NONE {
             count[b as usize] += 1;
@@ -237,7 +280,7 @@ pub fn plan(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
         }
     }
     let top_nodes: Vec<u32> = (0..g.n as u32).filter(|&v| block[v as usize] == NONE).collect();
-    if top_nodes.is_empty() || size.len() < 2 {
+    if top_nodes.is_empty() || cells < 2 {
         return vec![Block { kind: Kind::Whole, nodes: orderer.order(g) }];
     }
     // The top block by the coarse rank of its clusters, then the orderer inside a cluster.
@@ -249,7 +292,7 @@ pub fn plan(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
     let mut top_order = top_nodes;
     top_order.sort_by_key(|&v| (rank[map[v as usize] as usize], within[v as usize]));
     let mut out = vec![Block { kind: Kind::Top, nodes: top_order }];
-    for c in 0..size.len() as u32 {
+    for c in 0..cells as u32 {
         let nodes: Vec<u32> = (0..g.n as u32).filter(|&v| block[v as usize] == c).collect();
         if !nodes.is_empty() {
             out.push(Block { kind: Kind::Cell, nodes: order_induced(g, &fine, &nodes, orderer) });
@@ -286,24 +329,38 @@ mod tests {
     fn cells_partition_and_separate() {
         let (tail, head, lat, lon) = grid(40);
         let g = Graph { n: 1600, tail: &tail, head: &head, lat: &lat, lon: &lon };
-        let blocks = plan(&g, &InertialFlow, 300);
-        assert_eq!(blocks[0].kind, Kind::Top);
-        assert!(blocks.len() > 3);
-        let mut of = vec![usize::MAX; 1600];
-        for (b, bl) in blocks.iter().enumerate() {
-            for &v in &bl.nodes {
-                assert_eq!(of[v as usize], usize::MAX);
-                of[v as usize] = b;
+        // From the fine order, then from a coarsened graph.
+        for nd_max in [usize::MAX, 0] {
+            let blocks = plan(&g, &InertialFlow, 300, nd_max);
+            assert_eq!(blocks[0].kind, Kind::Top);
+            assert!(blocks.len() > 3);
+            let mut of = vec![usize::MAX; 1600];
+            for (b, bl) in blocks.iter().enumerate() {
+                for &v in &bl.nodes {
+                    assert_eq!(of[v as usize], usize::MAX);
+                    of[v as usize] = b;
+                }
+                assert!(bl.kind == Kind::Top || bl.nodes.len() <= 300);
             }
-            assert!(bl.kind == Kind::Top || bl.nodes.len() <= 300);
+            assert!(of.iter().all(|&b| b != usize::MAX));
+            for (&a, &b) in tail.iter().zip(&head) {
+                let (x, y) = (of[a as usize], of[b as usize]);
+                assert!(x == y || x == 0 || y == 0, "arc {a}-{b} joins cells {x} and {y}");
+            }
+            assert!(blocks[0].nodes.len() < 400, "top block of {}", blocks[0].nodes.len());
+            assert_eq!(blocks, plan(&g, &InertialFlow, 300, nd_max));
         }
-        assert!(of.iter().all(|&b| b != usize::MAX));
-        for (&a, &b) in tail.iter().zip(&head) {
-            let (x, y) = (of[a as usize], of[b as usize]);
-            assert!(x == y || x == 0 || y == 0, "arc {a}-{b} joins cells {x} and {y}");
+        assert_eq!(plan(&g, &InertialFlow, 2000, 0)[0].kind, Kind::Whole);
+    }
+
+    #[test]
+    fn fine_cells_keep_the_order() {
+        // Each block lists its nodes in the one-piece order.
+        let (tail, head, lat, lon) = grid(40);
+        let g = Graph { n: 1600, tail: &tail, head: &head, lat: &lat, lon: &lon };
+        let rank = ranks(&InertialFlow.order(&g));
+        for b in plan(&g, &InertialFlow, 300, usize::MAX) {
+            assert!(b.nodes.windows(2).all(|w| rank[w[0] as usize] < rank[w[1] as usize]));
         }
-        assert!(blocks[0].nodes.len() < 400, "top block of {}", blocks[0].nodes.len());
-        assert_eq!(blocks, plan(&g, &InertialFlow, 300));
-        assert_eq!(plan(&g, &InertialFlow, 2000)[0].kind, Kind::Whole);
     }
 }

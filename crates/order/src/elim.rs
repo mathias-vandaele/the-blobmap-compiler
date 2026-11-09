@@ -76,9 +76,68 @@ pub fn eliminate(k: usize, edges: impl Iterator<Item = (u32, u32)>) -> Eliminate
     Eliminated { up, fill }
 }
 
+/// The parent of each rank in the elimination tree, without the fill (Liu's algorithm with
+/// path compression): O(n + m) memory, for a graph too large to eliminate at once.
+/// `edges` are rank pairs in any direction and multiplicity.
+pub fn etree(n: usize, edges: impl Iterator<Item = (u32, u32)>) -> Vec<Option<u32>> {
+    const NONE: u32 = u32::MAX;
+    // The lower neighbours of each rank, CSR.
+    let pairs: Vec<(u32, u32)> = edges.filter(|(a, b)| a != b).map(|(a, b)| (a.max(b), a.min(b))).collect();
+    let mut first = vec![0u32; n + 1];
+    for &(hi, _) in &pairs {
+        first[hi as usize + 1] += 1;
+    }
+    for i in 0..n {
+        first[i + 1] += first[i];
+    }
+    let mut at = first.clone();
+    let mut lower = vec![0u32; pairs.len()];
+    for (hi, lo) in pairs {
+        lower[at[hi as usize] as usize] = lo;
+        at[hi as usize] += 1;
+    }
+    let (mut parent, mut anc) = (vec![NONE; n], vec![NONE; n]);
+    for i in 0..n as u32 {
+        for &k in &lower[first[i as usize] as usize..first[i as usize + 1] as usize] {
+            // Up from k to the root of its current subtree, pointing the path at i.
+            let mut r = k;
+            while anc[r as usize] != NONE && anc[r as usize] != i {
+                let t = anc[r as usize];
+                anc[r as usize] = i;
+                r = t;
+            }
+            if anc[r as usize] == NONE {
+                anc[r as usize] = i;
+                parent[r as usize] = i;
+            }
+        }
+    }
+    parent.into_iter().map(|p| (p != NONE).then_some(p)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn etree_matches_elimination() {
+        // A 12 × 12 grid in a scrambled order: the parent is the lowest upper neighbour.
+        let k = 12u32;
+        let n = (k * k) as usize;
+        let rank: Vec<u32> = (0..n as u32).map(|v| (v * 37) % n as u32).collect();
+        let mut edges = Vec::new();
+        for v in 0..k * k {
+            if v % k + 1 < k {
+                edges.push((rank[v as usize], rank[v as usize + 1]));
+            }
+            if v + k < k * k {
+                edges.push((rank[v as usize], rank[(v + k) as usize]));
+            }
+        }
+        let e = eliminate(n, edges.iter().copied());
+        let want: Vec<Option<u32>> = e.up.iter().map(|u| u.first().copied()).collect();
+        assert_eq!(etree(n, edges.iter().copied()), want);
+    }
 
     #[test]
     fn path_and_star() {

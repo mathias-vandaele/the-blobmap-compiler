@@ -280,9 +280,21 @@ mod tests {
         let lat: Vec<f32> = (0..k * k).map(|v| (v / k) as f32 * 0.001).collect();
         let lon: Vec<f32> = (0..k * k).map(|v| (v % k) as f32 * 0.001).collect();
         let g = blobmap_order::Graph { n: (k * k) as usize, tail: &tail, head: &head, lat: &lat, lon: &lon };
-        let plan = blobmap_order::plan(&g, &blobmap_order::InertialFlow, 200);
+        // From the fine order (the one-piece hierarchy), then from a coarsened graph.
+        let whole = Hierarchy::build(g.n, &edges, &blobmap_order::plan(&g, &blobmap_order::InertialFlow, usize::MAX, 0));
+        let pairs = |h: &Hierarchy| {
+            let mut p: Vec<(u32, u32)> =
+                (0..h.len() as u32).flat_map(|v| h.row(v).map(move |kk| (v, kk))).map(|(v, kk)| (h.node_of[v as usize], h.node_of[h.up_head[kk] as usize])).collect();
+            p.sort_unstable();
+            p
+        };
+        for nd_max in [usize::MAX, 0] {
+        let plan = blobmap_order::plan(&g, &blobmap_order::InertialFlow, 200, nd_max);
         let h = Hierarchy::build(g.n, &edges, &plan);
         assert!(h.cells() >= 3);
+        if nd_max == usize::MAX {
+            assert_eq!(pairs(&h), pairs(&whole), "the links of the one-piece hierarchy");
+        }
         for v in 0..h.len() as u32 {
             let bv = h.block_of(v);
             for kk in h.row(v) {
@@ -301,6 +313,7 @@ mod tests {
                     assert!(h.link(h.up_head[i], h.up_head[j]).is_some());
                 }
             }
+        }
         }
     }
 }

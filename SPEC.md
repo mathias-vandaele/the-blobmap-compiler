@@ -89,10 +89,11 @@ The compiler splits the network into experts by connectivity and splits large ex
 3. **Keep every component.** Small ones are packed into expert groups by size, to keep shard counts reasonable. A component attached to a larger one only by one-way roads (a one-way street into a dead end, a mis-tagged junction) is a trapped component, usually a data error: it stays in the model, but no ID snaps to it (§6). A component with no road at all to the rest is an island, served whatever its size.
    - **Precisely:** group the components that roads join, ignoring road direction. In each group, the largest component is served and every other one is trapped, with ties to the smaller expert index. A group of one component is an island.
 4. **ACTIVE reachability per metric.** An ACTIVE expert is a component of the union graph. Inside it, a pair one mode cannot connect gets ∞ for that metric, which is exact.
-5. **Cells, when an expert is too large to build at once.** The compiler coarsens the expert, finds its top nested-dissection separators on the coarse graph, and splits it into cells that fit the memory budget. Each cell is ordered and contracted on its own; the separators are ordered above all cells and contracted last.
+5. **Cells, when an expert is too large to build at once.** The compiler orders the expert's fine graph by the same nested dissection as in one piece, and cuts the elimination tree of that order where subtrees fit the memory budget: the subtrees below the cut, packed together, are the cells; the nodes above it, the top separators, are the top block. Every block keeps that order. Each cell is contracted on its own; the separators are ordered above all cells and contracted last.
+   - **Fallback:** only an expert whose fine graph is too large to order within the build's memory (§10) is coarsened first. Its top separators then come from the coarse graph's order, and each block is ordered on its own.
 6. **One hierarchy per expert.** Contracting a cell's interior only creates shortcuts among that cell's own nodes and its separator nodes, so the assembled hierarchy is exact. Its shards follow the cells.
 
-The assembly must give the same answers as building the expert in one piece. Its only acceptable cost is a slightly worse ordering (more levels or shortcuts), which is measured and reported (§13, milestone 4).
+The assembly must give the same answers as building the expert in one piece. Cut from the fine order, it is the one-piece hierarchy: a reordering of the same elimination tree, with the same links. Only the coarse fallback may cost a slightly worse ordering (more levels or shortcuts), which is measured and reported (§13, milestone 4).
 
 &#91;embedded content: model anatomy · experts by connectivity, cells by memory\]
 
@@ -283,7 +284,7 @@ Each milestone ends at a gate, and the next starts only once the gate passes. Th
 1. **Spec and FORMAT.md.** This spec approved; FORMAT.md written (every tensor, invariant and version rule) and approved. Gate: both signed off, before any compiler code.
 2. **Toy and synthetic.** The compiler, reference runtime and suite on the toy town and synthetic graphs (islands, one-way traps, the cap, ties, cells). Gate: tiny tier green, byte-identical builds across thread counts.
 3. **France.** A full build from the France `.pbf` within 62 GB. Gate: country tier green; accuracy against OSRM at least as good as the research engine (car MAE about 19 s over France); every component served, Corsica and islands included.
-4. **Cells.** France built with a memory budget small enough to force cells, against France built in one piece. Gate: identical answers; levels, shortcuts and build time compared and reported.
+4. **Cells.** France built with a memory budget small enough to force cells, against France built in one piece. Gate: identical answers; cut from the fine order, identical link and level counts; levels, shortcuts and build time compared and reported.
 5. **France and its neighbours.** A `.pbf` covering France, Belgium, Luxembourg, Switzerland and Germany. Gate: exact cross-border trips and isochrones; Overture data quality reported per country.
 6. **Europe.** Gate: built within 62 GB; measured bytes per link, per address and per column, and the extrapolation to each continent.
 7. **World.** Gate: built; experts per continent listed; the hardware choice for serving made from the measured sizes.
