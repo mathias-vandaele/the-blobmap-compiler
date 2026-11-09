@@ -3,17 +3,21 @@
 //! From the model's inputs (found in the tier file, as `verify` does), per family: the IDs
 //! per reason code and mode; the largest served (not trapped) experts, each with its nodes,
 //! its IDs per mode and the centroid of those IDs; the largest served experts that no ID
-//! uses, and their count by size. `--all` lists every served expert. The model's expert
-//! sizes must equal the reference's.
+//! uses, and their count by size; every ID unserved because of its expert (TrappedComponent)
+//! with the trapped component it would snap to. `--all` lists every served expert. The
+//! model's expert sizes must equal the reference's.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{Result, bail, ensure};
-use blobmap_conformance::expected::reason_name;
+use anyhow::{Context, Result, bail, ensure};
+use blobmap_conformance::expected::{reason_name, uuid};
+use blobmap_format::NONE;
+use blobmap_snap::{TRAPPED_COMPONENT, find_brute};
 use blobmap_conformance::reference::Reference;
 use blobmap_conformance::tier::TierFile;
 use blobmap_runtime::{Fam, Runtime};
+use rayon::prelude::*;
 
 /// Experts listed in each table.
 const TOP: usize = 25;
@@ -70,6 +74,31 @@ fn main() -> Result<()> {
                 }).or_default() += 1;
             }
             println!("  {}: {reasons:?}", r.modes[m].name);
+        }
+        for &m in &modes {
+            let mode = &r.modes[m];
+            let at: Vec<usize> = (0..r.n()).filter(|&i| matches!(mode.at[i], Err((TRAPPED_COMPONENT, _)))).collect();
+            if at.is_empty() {
+                continue;
+            }
+            // The nearest eligible piece, every piece searched: its expert is the trapped one.
+            let p = if mode.car { &r.car_pieces } else { &r.active_pieces };
+            let hits: Vec<_> = at.par_iter().map(|&i| find_brute(p, r.points[i].0, r.points[i].1, r.radius[m], &r.sets[m]).eligible).collect();
+            println!("  {}: {} IDs unserved because of their expert (TrappedComponent)", mode.name, at.len());
+            println!("  {:>36} {:>21} {:>7} {:>7} {:>6} {:>11}", "ID", "point", "metres", "expert", "nodes", "OSM way");
+            for (&i, h) in at.iter().zip(hits) {
+                let h = h.context("a trapped ID has an eligible piece")?;
+                let k = h.piece as usize;
+                let (x, way) = if mode.car {
+                    let s = r.car.seg_of_piece[k].into_iter().find(|&s| s != NONE && e.trapped[e.of[s as usize] as usize]).context("a trapped segment")?;
+                    (e.of[s as usize], r.car.way[s as usize])
+                } else {
+                    let road = r.active.road_of_piece[k].into_iter().find(|&d| d != NONE).context("a road")?;
+                    (e.of[r.active.tail[road as usize] as usize], r.active.way[road as usize])
+                };
+                let (lat, lon) = r.points[i];
+                println!("  {:>36} {lat:>10.5},{lon:>10.5} {:>7.1} {x:>7} {:>6} {way:>11}", uuid(&r.ids[i]), h.dist_m, e.nodes[x as usize]);
+            }
         }
         let row = |x: usize| {
             let s = sum[x];
