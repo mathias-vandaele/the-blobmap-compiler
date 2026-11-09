@@ -7,13 +7,13 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result};
 use blobmap_format::{INF, NONE, rnd};
 
-use crate::model::{Expert, Fam, Runtime};
+use crate::model::{Component, Fam, Runtime};
 
-/// A road of a family: (expert, index) — a CAR node or an ACTIVE arc — or an ACTIVE cross
-/// road (`expert = NONE`).
+/// A road of a family: (component, index) — a CAR node or an ACTIVE arc — or an ACTIVE cross
+/// road (`component = NONE`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RoadRef {
-    pub expert: u32,
+    pub component: u32,
     pub index: u32,
 }
 
@@ -58,9 +58,9 @@ pub fn round(roads: &[(i64, u8, u32, bool, f32)]) -> Vec<u16> {
     w
 }
 
-/// Link weights of one expert from its road weights (FORMAT §6.2, §6.3). `w` is per node for
+/// Link weights of one component from its road weights (FORMAT §6.2, §6.3). `w` is per node for
 /// CAR and per arc for ACTIVE.
-pub fn customize(e: &Expert, w: &[u16]) -> Result<(Vec<u16>, Vec<u16>)> {
+pub fn customize(e: &Component, w: &[u16]) -> Result<(Vec<u16>, Vec<u16>)> {
     let links = e.up_head.len();
     let (mut up, mut down) = (vec![INF; links], vec![INF; links]);
     for v in 0..e.n as u32 {
@@ -103,7 +103,7 @@ pub fn customize(e: &Expert, w: &[u16]) -> Result<(Vec<u16>, Vec<u16>)> {
 }
 
 pub struct FamilyWeights {
-    /// Per metric, per expert, the road weights (CAR per node, ACTIVE per arc).
+    /// Per metric, per component, the road weights (CAR per node, ACTIVE per arc).
     pub w: Vec<Vec<Vec<u16>>>,
     /// Per metric, the cross roads' weights.
     pub cross: Vec<Vec<u16>>,
@@ -115,13 +115,13 @@ impl Runtime {
         let metrics = self.tables[&fam].metrics.len();
         let mut refs: Vec<RoadRef> = Vec::new();
         let mut keys: Vec<(i64, u8, u32, bool)> = Vec::new();
-        let ne = self.experts(fam) as u32;
+        let ne = self.components(fam) as u32;
         let mut sizes = Vec::new();
         for x in 0..ne {
-            let e = self.expert(fam, x)?;
+            let e = self.component(fam, x)?;
             sizes.push(e.way.len());
             for k in 0..e.way.len() {
-                refs.push(RoadRef { expert: x, index: k as u32 });
+                refs.push(RoadRef { component: x, index: k as u32 });
                 keys.push((e.way[k], e.way_dir[k], e.way_seq[k], e.kind[k] != 2));
             }
         }
@@ -133,7 +133,7 @@ impl Runtime {
             let seq = self.model.get::<u32>(&format!("{p}way_seq"))?;
             cross_n = way.len();
             for k in 0..way.len() {
-                refs.push(RoadRef { expert: NONE, index: k as u32 });
+                refs.push(RoadRef { component: NONE, index: k as u32 });
                 keys.push((way[k], dir[k], seq[k], true));
             }
         }
@@ -155,10 +155,10 @@ impl Runtime {
 
     /// The stored master time of a road.
     pub fn stored_time(&self, fam: Fam, r: RoadRef, m: usize) -> f32 {
-        if r.expert == NONE {
+        if r.component == NONE {
             let name = &self.tables[&fam].metrics[m];
             return self.model.get::<f32>(&format!("road/active/cross/{name}.time_s")).map(|v| v[r.index as usize]).unwrap_or(f32::NAN);
         }
-        self.expert(fam, r.expert).map(|e| e.time_s[m][r.index as usize]).unwrap_or(f32::NAN)
+        self.component(fam, r.component).map(|e| e.time_s[m][r.index as usize]).unwrap_or(f32::NAN)
     }
 }

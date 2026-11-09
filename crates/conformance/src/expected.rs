@@ -76,8 +76,8 @@ impl Expected<'_> {
         }
     }
 
-    fn expert(&self, m: usize, i: usize) -> u32 {
-        self.r.modes[m].at[i].as_ref().map(|e| e.expert).unwrap_or(u32::MAX)
+    fn component(&self, m: usize, i: usize) -> u32 {
+        self.r.modes[m].at[i].as_ref().map(|e| e.component).unwrap_or(u32::MAX)
     }
 
     pub fn travel_time(&self, a: &str, b: &str, mode: &str) -> Value {
@@ -93,7 +93,7 @@ impl Expected<'_> {
         if ia == ib {
             return json!({"time": 0});
         }
-        if self.expert(m, ia) != self.expert(m, ib) {
+        if self.component(m, ia) != self.component(m, ib) {
             return json!({"reason": "DifferentComponent", "id": b});
         }
         json!({"time": time(self.column(m, &[(ia, 0)], "from")[ib])})

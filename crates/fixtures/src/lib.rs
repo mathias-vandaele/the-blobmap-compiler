@@ -28,10 +28,10 @@ pub struct Variant {
 /// A fact about a scenario's model, beyond the suite's general checks (SPEC §11).
 #[derive(Clone, Debug)]
 pub enum Check {
-    /// Expert `expert` of `family` has these links and levels (the toy town).
+    /// Component `component` of `family` has these links and levels (the toy town).
     Hierarchy {
         family: &'static str,
-        expert: u32,
+        component: u32,
         links: u64,
         levels: u32,
     },
@@ -69,7 +69,7 @@ pub enum Check {
         a: String,
         b: String,
     },
-    /// Same expert, but no route for the mode.
+    /// Same component, but no route for the mode.
     Beyond {
         mode: &'static str,
         a: String,
@@ -117,7 +117,7 @@ pub enum Check {
     OnVia {
         id: String,
     },
-    /// Built with the `cells` variant, the family's expert 0 is built as cells.
+    /// Built with the `cells` variant, the family's component 0 is built as cells.
     Cells {
         family: &'static str,
     },

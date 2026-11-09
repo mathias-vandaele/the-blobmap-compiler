@@ -1,11 +1,11 @@
-//! Every component served (PLAN, milestone 3): `experts <model> <tier file> <data dir>`.
+//! Every component served (PLAN, milestone 3): `components <model> <tier file> <data dir>`.
 //!
 //! From the model's inputs (found in the tier file, as `verify` does), per family: the IDs
-//! per reason code and mode; the largest served (not trapped) experts, each with its nodes,
-//! its IDs per mode and the centroid of those IDs; the largest served experts that no ID
-//! uses, and their count by size; every ID unserved because of its expert (TrappedComponent)
-//! with the trapped component it would snap to. `--all` lists every served expert. The
-//! model's expert sizes must equal the reference's.
+//! per reason code and mode; the largest served (not trapped) components, each with its nodes,
+//! its IDs per mode and the centroid of those IDs; the largest served components that no ID
+//! uses, and their count by size; every ID unserved because of its component (TrappedComponent)
+//! with the trapped component it would snap to. `--all` lists every served component. The
+//! model's component sizes must equal the reference's.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -19,7 +19,7 @@ use blobmap_conformance::tier::TierFile;
 use blobmap_runtime::{Fam, Runtime};
 use rayon::prelude::*;
 
-/// Experts listed in each table.
+/// Components listed in each table.
 const TOP: usize = 25;
 
 fn main() -> Result<()> {
@@ -27,24 +27,25 @@ fn main() -> Result<()> {
     let all = a.iter().any(|x| x == "--all");
     let a: Vec<&String> = a.iter().filter(|x| *x != "--all").collect();
     let [model, tier_file, data] = a[..] else {
-        bail!("usage: experts <model> <tier file> <data dir> [--all]");
+        bail!("usage: components <model> <tier file> <data dir> [--all]");
     };
     let rt = Runtime::open(Path::new(model))?;
     let tf = TierFile::read(Path::new(tier_file))?;
     let inputs = tf.find(&rt.manifest)?.check(Path::new(data), &rt.manifest)?;
     let r = Reference::build(&inputs)?;
-    for (fam, e) in [(Fam::Car, &r.car_experts), (Fam::Active, &r.active_experts)] {
-        ensure!(rt.tables[&fam].nodes == e.nodes, "{}: the model's experts differ from the reference's", fam.name());
+    for (fam, e) in [(Fam::Car, &r.car_components), (Fam::Active, &r.active_components)] {
+        let t = &rt.tables[&fam];
+        ensure!((0..t.components() as u32).map(|x| t.nodes(x)).eq(e.nodes.iter().copied()), "{}: the model's components differ from the reference's", fam.name());
         let modes: Vec<usize> = (0..r.modes.len()).filter(|&m| r.modes[m].car == (fam == Fam::Car)).collect();
-        // Per expert: IDs per mode, and the sums of their points.
+        // Per component: IDs per mode, and the sums of their points.
         let mut ids = vec![vec![0u64; modes.len()]; e.len()];
         let mut sum = vec![(0.0f64, 0.0f64, 0u64); e.len()];
         for i in 0..r.n() {
             let mut seen = None;
             for (k, &m) in modes.iter().enumerate() {
                 if let Ok(en) = r.modes[m].at[i] {
-                    ids[en.expert as usize][k] += 1;
-                    seen = Some(en.expert);
+                    ids[en.component as usize][k] += 1;
+                    seen = Some(en.component);
                 }
             }
             if let Some(x) = seen {
@@ -58,7 +59,7 @@ fn main() -> Result<()> {
         let unused: Vec<usize> = served.iter().copied().filter(|&x| ids[x].iter().all(|&c| c == 0)).collect();
         let names: Vec<&str> = modes.iter().map(|&m| r.modes[m].name).collect();
         println!(
-            "{}: {} experts, {} trapped, {} served, {} served with no ID",
+            "{}: {} components, {} trapped, {} served, {} served with no ID",
             fam.name(),
             e.len(),
             e.len() - served.len(),
@@ -81,11 +82,11 @@ fn main() -> Result<()> {
             if at.is_empty() {
                 continue;
             }
-            // The nearest eligible piece, every piece searched: its expert is the trapped one.
+            // The nearest eligible piece, every piece searched: its component is the trapped one.
             let p = if mode.car { &r.car_pieces } else { &r.active_pieces };
             let hits: Vec<_> = at.par_iter().map(|&i| find_brute(p, r.points[i].0, r.points[i].1, r.radius[m], r.small_max[m], &r.sets[m]).eligible).collect();
-            println!("  {}: {} IDs unserved because of their expert (TrappedComponent)", mode.name, at.len());
-            println!("  {:>36} {:>21} {:>7} {:>7} {:>6} {:>11}", "ID", "point", "metres", "expert", "nodes", "OSM way");
+            println!("  {}: {} IDs unserved because of their component (TrappedComponent)", mode.name, at.len());
+            println!("  {:>36} {:>21} {:>7} {:>7} {:>6} {:>11}", "ID", "point", "metres", "component", "nodes", "OSM way");
             for (&i, h) in at.iter().zip(hits) {
                 let h = h.context("a trapped ID has an eligible piece")?;
                 let k = h.piece as usize;
@@ -106,20 +107,20 @@ fn main() -> Result<()> {
             let c: Vec<String> = ids[x].iter().map(u64::to_string).collect();
             println!("  {x:>6} {:>10} {:>28}  {at}", e.nodes[x], c.join(", "));
         };
-        let head = format!("  {:>6} {:>10} {:>28}  centroid of its IDs", "expert", "nodes", format!("IDs ({})", names.join(", ")));
-        println!("  the {} largest served experts:\n{head}", TOP.min(served.len()));
+        let head = format!("  {:>6} {:>10} {:>28}  centroid of its IDs", "component", "nodes", format!("IDs ({})", names.join(", ")));
+        println!("  the {} largest served components:\n{head}", TOP.min(served.len()));
         served.iter().take(TOP).for_each(|&x| row(x));
-        println!("  the {} largest served experts with no ID:\n{head}", TOP.min(unused.len()));
+        println!("  the {} largest served components with no ID:\n{head}", TOP.min(unused.len()));
         unused.iter().take(TOP).for_each(|&x| row(x));
         let sizes: BTreeMap<u32, u64> = unused.iter().fold(BTreeMap::new(), |mut m, &x| {
             *m.entry(e.nodes[x]).or_default() += 1;
             m
         });
-        println!("  served experts with no ID, by node count: {sizes:?}");
+        println!("  served components with no ID, by node count: {sizes:?}");
         if !all {
             continue;
         }
-        println!("  every served expert:\n{head}");
+        println!("  every served component:\n{head}");
         for &x in &served {
             row(x);
         }

@@ -5,7 +5,7 @@
 //! independent of the via-way copies. Times are summed in u32 and capped at the end.
 //!
 //! The states and their turns are built once, forward and backward, so a column in either
-//! direction is one multi-source Dijkstra per expert of its sources.
+//! direction is one multi-source Dijkstra per component of its sources.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
@@ -45,7 +45,7 @@ fn sides(r: &Reference, m: &Mode, e: &Entry) -> Vec<Option<Side>> {
         (0..2)
             .map(|d| {
                 let s = g.seg_of_piece[k][d];
-                (s != NONE && r.car_experts.of[s as usize] == e.expert).then(|| Side {
+                (s != NONE && r.car_components.of[s as usize] == e.component).then(|| Side {
                     w: g.w[s as usize],
                     g: if d == 0 { e.frac } else { 1.0 - e.frac },
                     tail: s,
@@ -69,7 +69,7 @@ fn sides(r: &Reference, m: &Mode, e: &Entry) -> Vec<Option<Side>> {
 
 /// The direct term from o to d on their shared piece (SPEC §9).
 fn direct(r: &Reference, m: &Mode, o: &Entry, d: &Entry) -> u32 {
-    if o.piece != d.piece || o.expert != d.expert {
+    if o.piece != d.piece || o.component != d.component {
         return u32::MAX;
     }
     let (so, sd) = (sides(r, m, o), sides(r, m, d));
@@ -231,23 +231,23 @@ impl Graphs {
     }
 
     /// The column of a mode from (`from`) or to (`to`) the sources with their start times:
-    /// per ID, the least start ⊕ time over the sources in its expert.
+    /// per ID, the least start ⊕ time over the sources in its component.
     pub fn column(&self, r: &Reference, m: &Mode, src: &[(usize, u16)], from: bool) -> Vec<u16> {
         let n = r.n();
         let mut best = vec![u32::MAX; n];
-        let mut by_expert: BTreeMap<u32, Vec<(usize, u32)>> = BTreeMap::new();
+        let mut by_component: BTreeMap<u32, Vec<(usize, u32)>> = BTreeMap::new();
         for &(s, st) in src {
             if let Ok(e) = m.at[s] {
-                by_expert.entry(e.expert).or_default().push((s, st as u32));
+                by_component.entry(e.component).or_default().push((s, st as u32));
             }
         }
-        for (x, srcs) in by_expert {
-            self.expert_column(r, m, x, &srcs, from, &mut best);
+        for (x, srcs) in by_component {
+            self.component_column(r, m, x, &srcs, from, &mut best);
         }
         best.into_iter().map(cap).collect()
     }
 
-    fn expert_column(&self, r: &Reference, m: &Mode, x: u32, srcs: &[(usize, u32)], from: bool, best: &mut [u32]) {
+    fn component_column(&self, r: &Reference, m: &Mode, x: u32, srcs: &[(usize, u32)], from: bool, best: &mut [u32]) {
         // The sources by piece, for the direct terms.
         let mut on_piece: Vec<(u32, usize, u32)> = srcs.iter().map(|&(s, st)| (m.at[s].unwrap().piece, s, st)).collect();
         on_piece.sort_unstable();
@@ -311,7 +311,7 @@ impl Graphs {
         }
     }
 
-    /// Per ID of expert x: the least over its sides of `at(side)`, and the direct terms with
+    /// Per ID of component x: the least over its sides of `at(side)`, and the direct terms with
     /// the sources on its piece.
     #[allow(clippy::too_many_arguments)]
     fn read(
@@ -326,7 +326,7 @@ impl Graphs {
     ) {
         for (i, b) in best.iter_mut().enumerate() {
             let Ok(d) = m.at[i] else { continue };
-            if d.expert != x {
+            if d.component != x {
                 continue;
             }
             for s in sides(r, m, &d).iter().flatten() {
@@ -352,7 +352,7 @@ impl Graphs {
         if o == d {
             return 0;
         }
-        if eo.expert != ed.expert {
+        if eo.component != ed.component {
             return INF;
         }
         let (g, cs) = (&r.car, &self.car);

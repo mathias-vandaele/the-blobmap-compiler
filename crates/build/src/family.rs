@@ -5,7 +5,7 @@
 
 use blobmap_format::{NONE, Tensor, Unit, sat};
 use blobmap_graph::active::METRICS;
-use blobmap_graph::{ActiveGraph, CarGraph, Experts};
+use blobmap_graph::{ActiveGraph, CarGraph, Components};
 use blobmap_osm::Pieces;
 
 pub trait Family: Sync {
@@ -14,7 +14,7 @@ pub trait Family: Sync {
     /// FORMAT §3 `families`: `edge` or `node`.
     fn graph_kind(&self) -> &'static str;
     fn metrics(&self) -> Vec<String>;
-    fn experts(&self) -> &Experts;
+    fn components(&self) -> &Components;
     fn nodes(&self) -> usize;
     /// A coordinate for the node order (SPEC §5); never stored.
     fn coord(&self, v: u32) -> (f32, f32);
@@ -40,7 +40,7 @@ pub trait Family: Sync {
 pub struct Car<'a> {
     pub p: &'a Pieces,
     pub g: &'a CarGraph,
-    pub e: Experts,
+    pub e: Components,
     /// Copies of each original, as nodes, CSR by node.
     copy_first: Vec<u32>,
     copies: Vec<u32>,
@@ -48,7 +48,7 @@ pub struct Car<'a> {
 
 impl<'a> Car<'a> {
     pub fn new(p: &'a Pieces, g: &'a CarGraph) -> Car<'a> {
-        let e = g.experts();
+        let e = g.components();
         let mut pairs: Vec<(u32, u32)> = (g.originals..g.len()).map(|c| (g.copy_of[c], c as u32)).collect();
         pairs.sort_unstable();
         let mut copy_first = vec![0u32; g.len() + 1];
@@ -72,7 +72,7 @@ impl Family for Car<'_> {
     fn metrics(&self) -> Vec<String> {
         vec!["car".into()]
     }
-    fn experts(&self) -> &Experts {
+    fn components(&self) -> &Components {
         &self.e
     }
     fn nodes(&self) -> usize {
@@ -143,13 +143,13 @@ impl Family for Car<'_> {
 pub struct Active<'a> {
     pub p: &'a Pieces,
     pub g: &'a ActiveGraph,
-    pub e: Experts,
+    pub e: Components,
     key: Vec<(i64, u32, u8)>,
 }
 
 impl<'a> Active<'a> {
     pub fn new(p: &'a Pieces, g: &'a ActiveGraph) -> Active<'a> {
-        let e = g.experts();
+        let e = g.components();
         let mut key = vec![(i64::MAX, u32::MAX, u8::MAX); g.nodes];
         for r in 0..g.len() {
             let k = (g.way[r], g.seq[r], g.dir[r]);
@@ -160,7 +160,7 @@ impl<'a> Active<'a> {
         Active { p, g, e, key }
     }
 
-    /// Whether road r has its ends in different experts (FORMAT §5.4).
+    /// Whether road r has its ends in different components (FORMAT §5.4).
     pub fn cross(&self, r: usize) -> bool {
         self.e.of[self.g.tail[r] as usize] != self.e.of[self.g.head[r] as usize]
     }
@@ -176,7 +176,7 @@ impl Family for Active<'_> {
     fn metrics(&self) -> Vec<String> {
         METRICS.iter().map(|m| m.to_string()).collect()
     }
-    fn experts(&self) -> &Experts {
+    fn components(&self) -> &Components {
         &self.e
     }
     fn nodes(&self) -> usize {

@@ -4,7 +4,7 @@
 
 use blobmap_osm::Pieces;
 
-use crate::experts::{Csr, Experts, scc};
+use crate::components::{Csr, Components, scc};
 use crate::round::{Member, round_all};
 
 /// The ACTIVE metrics, in the manifest's order (FORMAT §3 `families`).
@@ -72,10 +72,10 @@ impl ActiveGraph {
         self.piece.is_empty()
     }
 
-    /// The experts of the union graph (SPEC §5). Ties go to the expert with the smallest
+    /// The components of the union graph (SPEC §5). Ties go to the component with the smallest
     /// (way, way_seq, way_dir, end) over the roads at its nodes, `end` 0 for the road's tail
     /// and 1 for its head.
-    pub fn experts(&self) -> Experts {
+    pub fn components(&self) -> Components {
         let g = Csr::new(self.nodes, self.tail.iter().copied().zip(self.head.iter().copied()));
         let comp = scc(&g);
         let mut key = vec![(i64::MAX, u32::MAX, u8::MAX, u8::MAX); self.nodes];
@@ -87,7 +87,7 @@ impl ActiveGraph {
                 }
             }
         }
-        Experts::new(&comp, |v| key[v], self.tail.iter().copied().zip(self.head.iter().copied()))
+        Components::new(&comp, |v| key[v], self.tail.iter().copied().zip(self.head.iter().copied()))
     }
 }
 
@@ -110,7 +110,7 @@ mod tests {
         assert_eq!(row0, [72; 10]);
         // Roads that walk may use and bike may not: the footbridge and the walk trap.
         assert!((0..g.len()).any(|r| g.w[0][r] == blobmap_format::INF && g.w[1][r] != blobmap_format::INF));
-        let e = g.experts();
+        let e = g.components();
         assert!(!e.trapped[0] && e.trapped.iter().any(|&t| t));
     }
 }

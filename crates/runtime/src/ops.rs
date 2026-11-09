@@ -160,7 +160,7 @@ impl Runtime {
             return Ok(json!({"time": 0}));
         }
         let mv = &self.vocab.modes[mode];
-        if mv.expert[ia as usize] != mv.expert[ib as usize] {
+        if mv.component[ia as usize] != mv.component[ib as usize] {
             return Ok(reason_json(Reason::DifferentComponent, b));
         }
         let col = self.column(&[Source { id: ia, start: 0 }], mode, Dir::From)?;

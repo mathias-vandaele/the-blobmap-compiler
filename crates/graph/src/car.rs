@@ -10,7 +10,7 @@ use blobmap_osm::geo::{Local, bearing_deg};
 use blobmap_osm::{Pieces, Restriction, Via, cheap_ruler_m};
 use blobmap_profile::CarTurns;
 
-use crate::experts::{Csr, Experts, scc};
+use crate::components::{Csr, Components, scc};
 use crate::round::{Member, round_all};
 
 /// OSRM looks 10 m along a road for the turn angle (coordinate_extractor
@@ -468,12 +468,12 @@ impl CarGraph {
         None
     }
 
-    /// The experts of the turn graph (SPEC §5), determined by the original segments only:
+    /// The components of the turn graph (SPEC §5), determined by the original segments only:
     /// the strongly connected components of the originals, a turn into or out of a copy
-    /// counting as one into or out of its original; each copy is in its original's expert,
+    /// counting as one into or out of its original; each copy is in its original's component,
     /// whatever its own connectivity. Ties go to the smallest (way, way_seq, way_dir), then
     /// originals before copies.
-    pub fn experts(&self) -> Experts {
+    pub fn components(&self) -> Components {
         let orig = |v: u32| if (v as usize) < self.originals { v } else { self.copy_of[v as usize] };
         let arcs = self.turn_from.iter().zip(&self.turn_to).map(|(&a, &b)| (orig(a), orig(b)));
         let g = Csr::new(self.originals, arcs);
@@ -487,7 +487,7 @@ impl CarGraph {
             .zip(self.turn_to.iter().copied())
             .chain(self.seg_of_piece.iter().filter(|s| s[0] != NONE && s[1] != NONE).map(|s| (s[0], s[1])))
             .chain((self.originals..self.len()).map(|c| (c as u32, self.copy_of[c])));
-        Experts::new(&comp, |v| (self.way[v], self.seq[v], self.dir[v], v), joined)
+        Components::new(&comp, |v| (self.way[v], self.seq[v], self.dir[v], v), joined)
     }
 }
 
@@ -518,12 +518,12 @@ mod tests {
             let o = g.copy_of[c] as usize;
             assert_eq!((g.w[c], g.way[c], g.seq[c], g.dir[c]), (g.w[o], g.way[o], g.seq[o], g.dir[o]));
         }
-        let e = g.experts();
-        assert_eq!(e.nodes[0] as usize, g.len(), "one expert: {:?}", e.nodes);
+        let e = g.components();
+        assert_eq!(e.nodes[0] as usize, g.len(), "one component: {:?}", e.nodes);
     }
 
     #[test]
-    fn town_turns_and_experts() {
+    fn town_turns_and_components() {
         let (p, g) = graph("town");
         assert_eq!(g.stats.node_via_applied, 2);
         assert_eq!(g.stats.copies, 0);
@@ -531,10 +531,10 @@ mod tests {
         let row0: Vec<u16> = (0..g.originals).filter(|&k| g.way[k] == 1 && g.dir[k] == 0).map(|k| g.w[k]).collect();
         assert_eq!((row0.len(), row0.iter().sum::<u16>()), (5, 72));
         assert!(row0.iter().all(|&w| w == 14 || w == 15));
-        let e = g.experts();
+        let e = g.components();
         assert!(e.trapped.iter().filter(|&&t| t).count() >= 2);
         assert!(!e.trapped[0]);
-        // The main grid is expert 0, the island and the east bank are served islands.
+        // The main grid is component 0, the island and the east bank are served islands.
         assert!(e.nodes[0] > 100);
         let _ = p;
     }

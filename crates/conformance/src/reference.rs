@@ -1,4 +1,4 @@
-//! The reference from the inputs: the original family graphs, their experts, the catalog,
+//! The reference from the inputs: the original family graphs, their components, the catalog,
 //! and every ID snapped per mode (SPEC §6), computed with the compiler's input crates but
 //! never from the model.
 
@@ -6,11 +6,11 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use blobmap_build::{ActiveNetwork, CarNetwork, ReadCatalog, Stage};
-use blobmap_graph::{ActiveGraph, CarGraph, Experts, active::METRICS};
+use blobmap_graph::{ActiveGraph, CarGraph, Components, active::METRICS};
 use blobmap_osm::Pieces;
 use blobmap_overture::{Catalog, Id, Polygon, Release};
 use blobmap_profile::config::Config;
-use blobmap_snap::modes::{active_expert, car_expert};
+use blobmap_snap::modes::{active_component, car_component};
 use blobmap_format::NONE;
 use blobmap_snap::{Grid, Membership, Snapped};
 use rayon::prelude::*;
@@ -27,7 +27,7 @@ pub struct Inputs {
 /// Where an ID stands for a mode.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Entry {
-    pub expert: u32,
+    pub component: u32,
     pub piece: u32,
     pub frac: f64,
 }
@@ -45,10 +45,10 @@ pub struct Mode {
 pub struct Reference {
     pub car_pieces: Pieces,
     pub car: CarGraph,
-    pub car_experts: Experts,
+    pub car_components: Components,
     pub active_pieces: Pieces,
     pub active: ActiveGraph,
-    pub active_experts: Experts,
+    pub active_components: Components,
     pub catalog: Catalog,
     /// Every ID of the model in internal-index order: addresses, then places (catalog
     /// index), each with its point.
@@ -74,7 +74,7 @@ impl Reference {
         let config = Config::load(&i.config)?;
         let (car_pieces, car) = CarNetwork.run((i.pbf.as_path(), &config))?;
         let (active_pieces, active) = ActiveNetwork.run((i.pbf.as_path(), &config))?;
-        let (car_experts, active_experts) = (car.experts(), active.experts());
+        let (car_components, active_components) = (car.components(), active.components());
         let release = Release::open(&i.overture)?;
         let polygon = match &i.extent {
             Some(p) => Some(Polygon::parse_poly(&std::fs::read_to_string(p)?)?),
@@ -86,9 +86,9 @@ impl Reference {
             catalog.addresses.iter().map(|a| (a.lat, a.lon)).chain(catalog.places.iter().map(|p| (p.lat, p.lon))).collect();
         let (cg, ag) = (Grid::new(&car_pieces), Grid::new(&active_pieces));
         let sets = [
-            Membership::car(&car_pieces, &car, &car_experts),
-            Membership::active(&active_pieces, &active, &active_experts, 0),
-            Membership::active(&active_pieces, &active, &active_experts, 1),
+            Membership::car(&car_pieces, &car, &car_components),
+            Membership::active(&active_pieces, &active, &active_components, 0),
+            Membership::active(&active_pieces, &active, &active_components, 1),
         ];
         let radius = [config.car.config.snap.radius_m as f64, config.active.config.snap.radius_m as f64, config.active.config.snap.radius_m as f64];
         let (cs, a_s) = (config.car.config.snap.small_component_max_nodes, config.active.config.snap.small_component_max_nodes);
@@ -118,12 +118,12 @@ impl Reference {
                             return Err((4, 0.0));
                         }
                         let (piece, frac) = found[m][k].outcome()?;
-                        let expert = if m == 0 {
-                            car_expert(&car, &car_experts, piece as usize).expect("servable")
+                        let component = if m == 0 {
+                            car_component(&car, &car_components, piece as usize).expect("servable")
                         } else {
-                            active_expert(&active_pieces, &active_experts, piece as usize).expect("servable")
+                            active_component(&active_pieces, &active_components, piece as usize).expect("servable")
                         };
-                        Ok(Entry { expert, piece, frac })
+                        Ok(Entry { component, piece, frac })
                     })
                     .collect();
                 Mode { name: names[m], car: m == 0, metric: if m == 0 { 0 } else { m - 1 }, at }
@@ -143,10 +143,10 @@ impl Reference {
         Ok(Reference {
             car_pieces,
             car,
-            car_experts,
+            car_components,
             active_pieces,
             active,
-            active_experts,
+            active_components,
             catalog,
             ids,
             place_of,

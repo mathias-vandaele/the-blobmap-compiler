@@ -2,7 +2,7 @@
 //!
 //! Every ID of the inputs is snapped per mode with the rule off (the nearest servable piece)
 //! and on (the model's choice). Per mode: the IDs moved and how much farther they stand; the
-//! served IDs on experts other than 0, before and after, on islands and on the mainland;
+//! served IDs on components other than 0, before and after, on islands and on the mainland;
 //! and every component the rule empties that served more than `LISTED` IDs.
 //!
 //! A component is on a real island when the smallest island polygon around one of its
@@ -20,7 +20,7 @@ use anyhow::{Context, Result, bail, ensure};
 use blobmap_conformance::reference::{Inputs, Reference};
 use blobmap_conformance::tier::{TierFile, sha256_file};
 use blobmap_osm::Pieces;
-use blobmap_snap::modes::{active_expert, car_expert};
+use blobmap_snap::modes::{active_component, car_component};
 use blobmap_snap::{Grid, Sets};
 use osmpbf::{BlobDecode, BlobReader, RelMemberType};
 use rayon::prelude::*;
@@ -275,9 +275,9 @@ fn main() -> Result<()> {
     let (cgrid, agrid) = (Grid::new(&r.car_pieces), Grid::new(&r.active_pieces));
     let mut real_emptied = 0;
     for (m, mode) in r.modes.iter().enumerate() {
-        let (p, e, grid) = if mode.car { (&r.car_pieces, &r.car_experts, &cgrid) } else { (&r.active_pieces, &r.active_experts, &agrid) };
+        let (p, e, grid) = if mode.car { (&r.car_pieces, &r.car_components, &cgrid) } else { (&r.active_pieces, &r.active_components, &agrid) };
         let sets: &dyn Sets = &r.sets[m];
-        let expert = |k: u32| if mode.car { car_expert(&r.car, e, k as usize) } else { active_expert(p, e, k as usize) }.expect("servable");
+        let component = |k: u32| if mode.car { car_component(&r.car, e, k as usize) } else { active_component(p, e, k as usize) }.expect("servable");
         // Per served ID: (piece before, piece after, extra metres).
         let moves: Vec<Option<(u32, u32, f64)>> = (0..r.n())
             .into_par_iter()
@@ -290,14 +290,14 @@ fn main() -> Result<()> {
                 Some((b.piece, a.piece, a.dist_m - b.dist_m))
             })
             .collect();
-        // Per expert: IDs before and after, the least piece of each (a point on it), and
+        // Per component: IDs before and after, the least piece of each (a point on it), and
         // where the IDs moved away from it went.
         let mut before: BTreeMap<u32, (u64, u32)> = BTreeMap::new();
         let mut after: BTreeMap<u32, (u64, u32)> = BTreeMap::new();
         let mut went: BTreeMap<u32, (BTreeMap<u32, u64>, Vec<f64>)> = BTreeMap::new();
         let mut extra = Vec::new();
         for &(b, a, d) in moves.iter().flatten() {
-            let (xb, xa) = (expert(b), expert(a));
+            let (xb, xa) = (component(b), component(a));
             for (map, x, k) in [(&mut before, xb, b), (&mut after, xa, a)] {
                 let s = map.entry(x).or_insert((0, k));
                 s.0 += 1;
@@ -310,7 +310,7 @@ fn main() -> Result<()> {
                 w.1.push(d);
             }
         }
-        // The island around each expert serving IDs, and per island the largest component
+        // The island around each component serving IDs, and per island the largest component
         // with a servable piece in it.
         let island_of: BTreeMap<u32, Option<u32>> =
             before.iter().chain(after.iter()).map(|(&x, &(_, k))| (x, islands.smallest(first_point(p, k)))).collect();
@@ -336,15 +336,15 @@ fn main() -> Result<()> {
             map.iter().filter(|(x, _)| **x != 0 && on_island(**x).is_some() == island).map(|(_, s)| s.0).sum()
         };
         println!("{} ({}): {} IDs served, {} moved; extra metres {}", mode.name, if mode.car { "car" } else { "active" }, moves.iter().flatten().count(), extra.len(), quantiles(&mut extra));
-        println!("  served on experts other than 0, mainland: {} before, {} after", sum(&before, false), sum(&after, false));
-        println!("  served on experts other than 0, islands:  {} before, {} after", sum(&before, true), sum(&after, true));
+        println!("  served on components other than 0, mainland: {} before, {} after", sum(&before, false), sum(&after, false));
+        println!("  served on components other than 0, islands:  {} before, {} after", sum(&before, true), sum(&after, true));
         let emptied: Vec<(u32, u64)> = before.iter().filter(|(x, s)| s.0 > LISTED && !after.contains_key(x)).map(|(&x, s)| (x, s.0)).collect();
         let mut rows: Vec<(u32, u64)> = emptied.clone();
         rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         let real: Vec<u32> = rows.iter().map(|r| r.0).filter(|&x| on_island(x).is_some()).collect();
         real_emptied += real.len();
         println!("  {} components emptied that served more than {LISTED} IDs, {} of them on a real island:", rows.len(), real.len());
-        println!("    {:>7} {:>5} {:>6} {:>8} {:>9}  {:>20}  {:>11}  {:<7} island", "expert", "nodes", "IDs", "to", "median m", "point", "OSM way", "verdict");
+        println!("    {:>7} {:>5} {:>6} {:>8} {:>9}  {:>20}  {:>11}  {:<7} island", "component", "nodes", "IDs", "to", "median m", "point", "OSM way", "verdict");
         for (x, n) in rows {
             let (to, mut d) = went.remove(&x).unwrap_or_default();
             let to = to.iter().max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0))).map_or(u32::MAX, |t| *t.0);

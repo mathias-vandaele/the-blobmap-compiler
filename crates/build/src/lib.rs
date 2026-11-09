@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
-use blobmap_format::hash::{ENTRY_TAG, Hasher, ROAD_TAG, VOCAB_TAG, inputs_hash, model_id, of_hashes};
+use blobmap_format::hash::{Hasher, ROAD_TAG, VOCAB_TAG, inputs_hash, model_id, of_hashes};
 use blobmap_format::manifest::{self as mf, Manifest};
 use blobmap_format::{Hash, ModelWriter, NONE, ShardLimits};
 use blobmap_graph::{ActiveGraph, CarGraph};
@@ -224,7 +224,7 @@ impl Stage<(&Path, &Config)> for ActiveNetwork {
     }
 }
 
-/// Every expert's order and blocks (SPEC §5), a stage of its own so that the build report
+/// Every component's order and blocks (SPEC §5), a stage of its own so that the build report
 /// shows the memory of nested dissection.
 pub struct Orders(pub &'static str);
 
@@ -241,7 +241,7 @@ impl Stage<(&dyn Family, &Config, Option<&FixedRanks>)> for Orders {
     }
 }
 
-/// Every expert's hierarchy, then the entries and packs.
+/// The family's hierarchy, one component at a time, then its packs.
 pub struct Hierarchies(pub &'static str);
 
 impl Stage<(&dyn Family, &Config, hier::Ordered)> for Hierarchies {
@@ -251,7 +251,7 @@ impl Stage<(&dyn Family, &Config, hier::Ordered)> for Hierarchies {
     }
     fn run(&self, (f, c, o): (&dyn Family, &Config, hier::Ordered)) -> Result<(Built, Layout)> {
         let b = hier::build(f, o)?;
-        let l = layout::plan(f, &b, c.build.build.group_max_nodes)?;
+        let l = layout::plan(f, &b, c.build.build.pack_max_nodes)?;
         Ok((b, l))
     }
 }
@@ -309,6 +309,7 @@ pub struct WriteOutput {
     pub served: vocab::Served,
     pub largest: BTreeMap<String, PackSize>,
     pub shard_bytes: u64,
+    pub shards: usize,
 }
 
 pub struct WriteModel;
@@ -326,17 +327,13 @@ impl Stage<WriteInput<'_>> for WriteModel {
         let f = w.families;
         let fams: [(&dyn Family, &Built, &Layout); 2] =
             [(f.car, f.car_built, f.car_layout), (f.active, f.active_built, f.active_layout)];
-        let mut tables: BTreeMap<String, Hash> = BTreeMap::new();
-        let mut entry_base = 0;
+        // Every road tensor's hash, by full name (FORMAT §9).
+        let mut road: BTreeMap<String, Hash> = BTreeMap::new();
         for (fam, b, l) in fams {
-            tables.extend(writer.write_unit(&road::tables(fam, b, l, entry_base))?.hashes);
-            entry_base += l.entries.len() as u32;
+            road.extend(writer.write_unit(&road::tables(fam, b, l))?.hashes);
         }
-        // Packs, then entries in manifest order.
-        let mut entries: Vec<(mf::Entry, Vec<usize>)> = Vec::new();
         let mut largest = BTreeMap::new();
         for (fam, b, l) in fams {
-            let mut pack_out = Vec::new();
             let mut big = PackSize::default();
             for k in 0..l.packs.len() {
                 let pk = &l.packs[k];
@@ -344,42 +341,11 @@ impl Stage<WriteInput<'_>> for WriteModel {
                 if (size.rows, size.links) > (big.rows, big.links) {
                     big = size;
                 }
-                pack_out.push(writer.write_unit(&road::pack(fam, b, l, k))?);
+                road.extend(writer.write_unit(&road::pack(fam, b, l, k))?.hashes);
             }
             largest.insert(fam.name().to_string(), big);
-            for en in &l.entries {
-                let xs = &b.experts[en.first as usize..(en.first + en.count) as usize];
-                let mut hashes: BTreeMap<&String, &Hash> = BTreeMap::new();
-                let mut shards = Vec::new();
-                for p in &pack_out[en.pack_first as usize..(en.pack_first + en.packs) as usize] {
-                    hashes.extend(p.hashes.iter());
-                    shards.extend(p.shards.iter().copied());
-                }
-                let cells = if en.group { 0 } else { xs[0].h.cells() as u64 };
-                let e = mf::Entry {
-                    family: fam.name().into(),
-                    kind: if en.group { "group" } else { "expert" }.into(),
-                    experts: [en.first as u64, en.count as u64],
-                    components: en.count as u64,
-                    nodes: xs.iter().map(|x| x.nodes.len() as u64).sum(),
-                    links: xs.iter().map(|x| x.h.links()).sum(),
-                    levels: xs.iter().map(|x| x.h.levels() as u64).max().unwrap_or(0),
-                    cells,
-                    packs: [en.pack_first as u64, en.packs as u64],
-                    shards: Vec::new(),
-                    hash: of_hashes(ENTRY_TAG, hashes.into_values()).hex(),
-                };
-                entries.push((e, shards));
-            }
         }
-        let mut rh = Hasher::tagged(ROAD_TAG);
-        for h in tables.values() {
-            rh.hash(h);
-        }
-        for (e, _) in &entries {
-            rh.hash(&Hash::from_hex(&e.hash).expect("hex"));
-        }
-        let road_hash = rh.finish();
+        let road_hash = of_hashes(ROAD_TAG, road.values());
         let (unit, served) = vocab::unit(f, w.catalog, w.snaps, w.ids, &road_hash.0);
         let vw = writer.write_unit(&unit)?;
         drop(unit);
@@ -396,13 +362,6 @@ impl Stage<WriteInput<'_>> for WriteModel {
         for s in &written.shard_files {
             shard_bytes += std::fs::metadata(out.join(s))?.len();
         }
-        let experts: Vec<mf::Entry> = entries
-            .into_iter()
-            .map(|(mut e, s)| {
-                e.shards = s.into_iter().map(|k| written.shard_files[k].clone()).collect();
-                e
-            })
-            .collect();
         let i = &w.inputs;
         let spec = spec_version();
         let hash_of = |s: &str| Hash::from_hex(s).expect("sha256 hex");
@@ -431,11 +390,21 @@ impl Stage<WriteInput<'_>> for WriteModel {
                 shard_target_bytes: o.shard_target_bytes,
                 shard_max_bytes: o.shard_max_bytes,
                 memory_budget_bytes: o.memory_budget_bytes,
-                group_max_nodes: o.group_max_nodes,
+                pack_max_nodes: o.pack_max_nodes,
             },
-            families: [(f.car as &dyn Family), f.active]
+            families: fams
                 .iter()
-                .map(|fam| (fam.name().to_string(), mf::Family { graph: fam.graph_kind().into(), metrics: fam.metrics() }))
+                .map(|&(fam, b, l)| {
+                    let family = mf::Family {
+                        graph: fam.graph_kind().into(),
+                        metrics: fam.metrics(),
+                        nodes: fam.nodes() as u64,
+                        links: b.components.iter().map(|x| x.h.links()).sum(),
+                        components: b.components.len() as u64,
+                        packs: l.packs.len() as u64,
+                    };
+                    (fam.name().to_string(), family)
+                })
                 .collect(),
             modes: vocab::MODES
                 .iter()
@@ -444,7 +413,6 @@ impl Stage<WriteInput<'_>> for WriteModel {
                     (m.to_string(), mf::Mode { family: fam.into(), metric: m.into(), snap_radius_m: r })
                 })
                 .collect(),
-            experts,
             parts: mf::Parts {
                 road: mf::RoadPart { hash: road_hash.hex() },
                 vocabulary: mf::VocabPart { hash: vocab_hash.hex(), road_hash: road_hash.hex() },
@@ -453,7 +421,7 @@ impl Stage<WriteInput<'_>> for WriteModel {
             licenses_sha256: hex::encode(sha2::Sha256::digest(licenses.as_bytes())),
         };
         manifest.write(&out.join(blobmap_format::MANIFEST_FILE))?;
-        Ok(WriteOutput { manifest, served, largest, shard_bytes })
+        Ok(WriteOutput { manifest, served, largest, shard_bytes, shards: written.shard_files.len() })
     }
 }
 
@@ -544,14 +512,14 @@ pub fn build(a: &Args) -> Result<BuildResult> {
     let wo = run.run(&WriteModel, WriteInput { args: a, inputs: &inputs, families: &families, catalog: &catalog, snaps: &snaps, ids: &ids })?;
     let data = report::data(a, &families, &catalog, &snaps, &ids, &wo.served)?;
     blobmap_format::json::write_file(&a.report_path("data"), &data)?;
-    // Each family's largest expert and every expert built as cells: its links, its sweep
+    // Each family's largest component and every component built as cells: its links, its sweep
     // layers (FORMAT's level count) and its elimination tree's height (SPEC §13, milestone 4).
     let hierarchies: Vec<serde_json::Value> = [("car", &cb), ("active", &ab)]
         .iter()
         .flat_map(|(f, b)| {
-            b.experts.iter().enumerate().filter(|(x, e)| *x == 0 || e.h.cells() > 0).map(move |(x, e)| {
+            b.components.iter().enumerate().filter(|(x, e)| *x == 0 || e.h.cells() > 0).map(move |(x, e)| {
                 json!({
-                    "family": f, "expert": x, "nodes": e.h.len(), "links": e.h.links(), "cells": e.h.cells(),
+                    "family": f, "component": x, "nodes": e.h.len(), "links": e.h.links(), "cells": e.h.cells(),
                     "sweep_layers": e.h.levels(), "tree_levels": e.h.tree_levels(),
                 })
             })
@@ -568,7 +536,9 @@ pub fn build(a: &Args) -> Result<BuildResult> {
         }).collect::<serde_json::Map<_, _>>(),
         "hierarchies": hierarchies,
         "shard_bytes": wo.shard_bytes,
-        "shards": wo.manifest.experts.iter().flat_map(|e| e.shards.iter()).collect::<std::collections::BTreeSet<_>>().len(),
+        "shards": wo.shards,
+        // Layout ids per family against their U32 bound (FORMAT §4).
+        "layout_ids": wo.manifest.families.iter().map(|(f, x)| (f.clone(), json!({"nodes": x.nodes, "bound": NONE as u64}))).collect::<serde_json::Map<_, _>>(),
     });
     blobmap_format::json::write_file(&a.report_path("build"), &build)?;
     Ok(BuildResult { manifest: wo.manifest, stages: run.stages })

@@ -1,5 +1,6 @@
-//! Opening a model: the manifest, the family tables, the vocabulary, and experts loaded on
-//! demand from their packs (FORMAT §5, §7).
+//! Opening a model: the manifest, the family tables, the vocabulary, and components loaded on
+//! demand from their packs (FORMAT §5, §7). A component is a range of the family's layout
+//! ids; loaded, its nodes are numbered from 0, and so are the vocabulary's nodes.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -110,10 +111,11 @@ pub struct ModeInfo {
 
 pub struct Tables {
     pub metrics: Vec<String>,
-    pub nodes: Vec<u32>,
-    pub levels: Vec<u32>,
-    pub trapped: Vec<u8>,
-    pub entry: Vec<u32>,
+    /// The component of each layout id (FORMAT §5.1).
+    pub component: Vec<u32>,
+    /// Derived: per component, its first layout id, and the family's node count at the end.
+    pub first: Vec<u32>,
+    /// Derived: per component, its first block, and the block count at the end.
     pub block_first: Vec<u32>,
     pub b_kind: Vec<u8>,
     pub b_id_first: Vec<u32>,
@@ -124,12 +126,52 @@ pub struct Tables {
     pub b_level_base: Vec<u32>,
 }
 
+impl Tables {
+    pub fn components(&self) -> usize {
+        self.first.len() - 1
+    }
+
+    /// The node count of component x.
+    pub fn nodes(&self, x: u32) -> u32 {
+        self.first[x as usize + 1] - self.first[x as usize]
+    }
+
+    /// The longest top-down chain of levels in component x: its whole block's levels, or the
+    /// top block's plus the deepest cell's (FORMAT §5.2).
+    pub fn levels(&self, x: u32) -> u32 {
+        let bs = self.block_first[x as usize] as usize..self.block_first[x as usize + 1] as usize;
+        let of = |cell: bool| bs.clone().filter(move |&b| (self.b_kind[b] == 2) == cell).map(|b| self.b_levels[b]);
+        of(false).sum::<u32>() + of(true).max().unwrap_or(0)
+    }
+
+    /// Each component's layout ids and blocks, from `component` and the block table: the
+    /// components must be consecutive ranges in index order (FORMAT §4).
+    fn derive(&mut self, f: &str) -> Result<()> {
+        let c = &self.component;
+        ensure!(c.first().is_none_or(|&x| x == 0) && c.windows(2).all(|w| w[1] == w[0] || w[1] == w[0] + 1), "road/{f}/nodes/component: components are not consecutive ranges from 0");
+        let n = c.last().map_or(0, |&x| x as usize + 1);
+        let mut first = vec![0u32; n + 1];
+        for &x in c {
+            first[x as usize + 1] += 1;
+        }
+        for i in 0..n {
+            first[i + 1] += first[i];
+        }
+        ensure!(self.b_id_first.windows(2).all(|w| w[0] < w[1]), "road/{f}/blocks: id_first is not ascending");
+        self.block_first = first[..n].iter().map(|&v| self.b_id_first.partition_point(|&b| b < v) as u32).collect();
+        self.block_first.push(self.b_id_first.len() as u32);
+        self.first = first;
+        Ok(())
+    }
+}
+
 /// One mode's entries (FORMAT §7.2) in a common shape. CAR: `node` = `seg`, `road` = NONE,
 /// `off` = [before₀, after₀, before₁, after₁]. ACTIVE: `node` = [U, V], `off` = [U → ID,
-/// ID → U, V → ID, ID → V].
+/// ID → U, V → ID, ID → V]. `component` is derived from the nodes, `NONE` when unserved,
+/// and `node` is numbered within that component.
 pub struct ModeVocab {
     pub info: ModeInfo,
-    pub expert: Vec<u32>,
+    pub component: Vec<u32>,
     pub node: Vec<[u32; 2]>,
     pub road: Vec<u32>,
     pub off: Vec<[u16; 4]>,
@@ -188,7 +230,7 @@ impl Vocab {
     }
 }
 
-/// A block of an expert and where it is stored.
+/// A block of a component and where it is stored.
 #[derive(Clone, Copy, Debug)]
 pub struct BlockAt {
     pub kind: u8,
@@ -200,9 +242,9 @@ pub struct BlockAt {
     pub pack_link_first: u64,
 }
 
-/// One expert, with its rows concatenated in layout-id order. Link indices here are
-/// expert-local: positions in `up_head`.
-pub struct Expert {
+/// One component, with its rows concatenated in layout-id order. Link indices here are
+/// component-local: positions in `up_head`.
+pub struct Component {
     pub fam: Fam,
     pub n: usize,
     pub blocks: Vec<BlockAt>,
@@ -214,7 +256,7 @@ pub struct Expert {
     /// Turns (CAR) or roads (ACTIVE), CSR by tail.
     pub arc_first: Vec<u64>,
     pub arc_head: Vec<u32>,
-    /// Expert-local link of each arc, `NONE` when tail = head.
+    /// Component-local link of each arc, `NONE` when tail = head.
     pub arc_link: Vec<u32>,
     /// The pack-local index of each arc (ACTIVE `road`).
     pub arc_local: Vec<u32>,
@@ -231,7 +273,7 @@ pub struct Expert {
     pub copies: Vec<u32>,
 }
 
-impl Expert {
+impl Component {
     pub fn row(&self, v: u32) -> std::ops::Range<usize> {
         self.up_first[v as usize] as usize..self.up_first[v as usize + 1] as usize
     }
@@ -240,7 +282,7 @@ impl Expert {
         self.arc_first[v as usize] as usize..self.arc_first[v as usize + 1] as usize
     }
 
-    /// The expert-local link between a and b.
+    /// The component-local link between a and b.
     pub fn link(&self, a: u32, b: u32) -> Option<usize> {
         let (lo, hi) = (a.max(b), a.min(b));
         let r = self.row(lo);
@@ -251,7 +293,7 @@ impl Expert {
         self.blocks.partition_point(|b| b.id_first <= v) - 1
     }
 
-    /// A CAR segment and its copies in this expert (FORMAT §8 `arr`).
+    /// A CAR segment and its copies in this component (FORMAT §8 `arr`).
     pub fn arrivals(&self, s: u32, faults: &Faults) -> impl Iterator<Item = u32> + '_ {
         let copies: &[u32] = if self.fam == Fam::Car && !faults.no_copies {
             &self.copies[self.copy_first[s as usize] as usize..self.copy_first[s as usize + 1] as usize]
@@ -268,8 +310,8 @@ pub struct Runtime {
     pub tables: BTreeMap<Fam, Tables>,
     pub vocab: Vocab,
     pub faults: Faults,
-    cache: Mutex<BTreeMap<(Fam, u32), Arc<Expert>>>,
-    /// Held while an expert loads, so that concurrent queries load it once.
+    cache: Mutex<BTreeMap<(Fam, u32), Arc<Component>>>,
+    /// Held while a component loads, so that concurrent queries load it once.
     loading: Mutex<()>,
 }
 
@@ -296,24 +338,21 @@ impl Runtime {
             let f = fam.name();
             let metrics = manifest.families.get(f).with_context(|| format!("no family {f}"))?.metrics.clone();
             let g = |t: &str, n: &str| -> Result<Vec<u32>> { Ok(model.get::<u32>(&format!("road/{f}/{t}/{n}"))?.into_owned()) };
-            tables.insert(
-                fam,
-                Tables {
-                    metrics,
-                    nodes: g("experts", "nodes")?,
-                    levels: g("experts", "levels")?,
-                    trapped: model.get::<u8>(&format!("road/{f}/experts/trapped"))?.into_owned(),
-                    entry: g("experts", "entry")?,
-                    block_first: g("experts", "block_first")?,
-                    b_kind: model.get::<u8>(&format!("road/{f}/blocks/kind"))?.into_owned(),
-                    b_id_first: g("blocks", "id_first")?,
-                    b_nodes: g("blocks", "nodes")?,
-                    b_pack: g("blocks", "pack")?,
-                    b_row_first: g("blocks", "row_first")?,
-                    b_levels: g("blocks", "levels")?,
-                    b_level_base: g("blocks", "level_base")?,
-                },
-            );
+            let mut t = Tables {
+                metrics,
+                component: g("nodes", "component")?,
+                first: Vec::new(),
+                block_first: Vec::new(),
+                b_kind: model.get::<u8>(&format!("road/{f}/blocks/kind"))?.into_owned(),
+                b_id_first: g("blocks", "id_first")?,
+                b_nodes: g("blocks", "nodes")?,
+                b_pack: g("blocks", "pack")?,
+                b_row_first: g("blocks", "row_first")?,
+                b_levels: g("blocks", "levels")?,
+                b_level_base: g("blocks", "level_base")?,
+            };
+            t.derive(f)?;
+            tables.insert(fam, t);
         }
         let address = ids(&model, "vocab/ids/address")?;
         let place = ids(&model, "vocab/ids/place")?;
@@ -323,8 +362,7 @@ impl Runtime {
             let fam = if mode.family == "car" { Fam::Car } else { Fam::Active };
             let metric = tables[&fam].metrics.iter().position(|m| m == &mode.metric).context("mode metric")?;
             let p = format!("vocab/{}/{name}.", mode.family);
-            let expert = model.get_len::<u32>(&format!("{p}expert"), n)?.into_owned();
-            let (node, road, off) = if fam == Fam::Car {
+            let (mut node, road, off): (Vec<[u32; 2]>, Vec<u32>, Vec<[u16; 4]>) = if fam == Fam::Car {
                 let (s, k) = model.get_rows::<u32>(&format!("{p}seg"), &[2])?;
                 let (o, k2) = model.get_rows::<u16>(&format!("{p}off"), &[2, 2])?;
                 ensure!(k == n && k2 == n, "{p}: entries do not cover every ID");
@@ -344,11 +382,23 @@ impl Runtime {
                     (0..n).map(|i| o[4 * i..4 * i + 4].try_into().unwrap()).collect(),
                 )
             };
+            // Each served ID's component, from its first node; its nodes made local to it.
+            let t = &tables[&fam];
+            let mut component = vec![NONE; n];
+            for (i, nd) in node.iter_mut().enumerate() {
+                let Some(&v) = nd.iter().find(|&&v| v != NONE) else { continue };
+                let x = *t.component.get(v as usize).with_context(|| format!("{p}: ID {i} names layout id {v}, out of range"))?;
+                component[i] = x;
+                for v in nd.iter_mut().filter(|v| **v != NONE) {
+                    ensure!(t.component.get(*v as usize) == Some(&x), "{p}: ID {i} has nodes in two components");
+                    *v -= t.first[x as usize];
+                }
+            }
             let rid = model.get::<u32>(&format!("{p}reason_id"))?;
             let rcode = model.get_len::<u8>(&format!("{p}reason_code"), rid.len())?;
             let rm = model.get_len::<f32>(&format!("{p}reason_m"), rid.len())?;
             let reasons = (0..rid.len()).map(|k| (rid[k], rcode[k], rm[k])).collect();
-            modes.push(ModeVocab { info: ModeInfo { name: name.clone(), fam, metric }, expert, node, road, off, reasons });
+            modes.push(ModeVocab { info: ModeInfo { name: name.clone(), fam, metric }, component, node, road, off, reasons });
         }
         let vocab = Vocab {
             alias: ids(&model, "vocab/ids/alias")?,
@@ -385,12 +435,12 @@ impl Runtime {
         self.vocab.modes.iter().position(|m| m.info.name == name).with_context(|| format!("unknown mode {name:?}"))
     }
 
-    pub fn experts(&self, fam: Fam) -> usize {
-        self.tables[&fam].nodes.len()
+    pub fn components(&self, fam: Fam) -> usize {
+        self.tables[&fam].components()
     }
 
-    /// Expert x of a family, loaded from its packs.
-    pub fn expert(&self, fam: Fam, x: u32) -> Result<Arc<Expert>> {
+    /// Component x of a family, loaded from its packs.
+    pub fn component(&self, fam: Fam, x: u32) -> Result<Arc<Component>> {
         if let Some(e) = self.cache.lock().unwrap().get(&(fam, x)) {
             return Ok(e.clone());
         }
@@ -403,15 +453,21 @@ impl Runtime {
         Ok(e)
     }
 
-    fn load(&self, fam: Fam, x: u32) -> Result<Expert> {
+    fn load(&self, fam: Fam, x: u32) -> Result<Component> {
         let t = &self.tables[&fam];
         let f = fam.name();
         let m = &self.model;
-        ensure!((x as usize) < t.nodes.len(), "{f} expert {x} does not exist");
+        ensure!((x as usize) < t.components(), "{f} component {x} does not exist");
         let metrics = &t.metrics;
         let word = if fam == Fam::Car { "turn" } else { "road" };
-        let n = t.nodes[x as usize] as usize;
-        let mut e = Expert {
+        let n = t.nodes(x) as usize;
+        let base = t.first[x as usize];
+        // A layout id of this component, numbered from 0.
+        let local = |v: u32, what: &str| -> Result<u32> {
+            ensure!(v >= base && v - base < n as u32, "{f} component {x}: {what} {v} is outside its layout ids");
+            Ok(v - base)
+        };
+        let mut e = Component {
             fam,
             n,
             blocks: Vec::new(),
@@ -437,7 +493,8 @@ impl Runtime {
         let mut raw_links: Vec<u32> = Vec::new();
         for b in t.block_first[x as usize] as usize..t.block_first[x as usize + 1] as usize {
             let (pack, row_first, id_first, nodes) = (t.b_pack[b], t.b_row_first[b], t.b_id_first[b], t.b_nodes[b]);
-            ensure!(id_first as usize == e.up_first.len() - 1, "{f} expert {x}: blocks do not follow layout ids");
+            ensure!(id_first == base + e.up_first.len() as u32 - 1, "{f} component {x}: blocks do not follow layout ids");
+            let id_first = id_first - base;
             let p = format!("road/{f}/p{pack}/");
             let u32s = |name: &str| m.get::<u32>(&format!("{p}{name}"));
             let up_first = u32s("up_first")?;
@@ -454,12 +511,16 @@ impl Runtime {
                 e.up_first.push(e.up_first.last().unwrap() + (up_first[r + 1] - up_first[r]) as u64);
                 e.arc_first.push(e.arc_first.last().unwrap() + (arc_first[r + 1] - arc_first[r]) as u64);
             }
-            e.up_head.extend_from_slice(&up_head[links.clone()]);
+            for &h in &up_head[links.clone()] {
+                e.up_head.push(local(h, "upper neighbour")?);
+            }
             for (k, name) in metrics.iter().enumerate() {
                 e.up[k].extend_from_slice(&m.get::<u16>(&format!("{p}{name}.up"))?[links.clone()]);
                 e.down[k].extend_from_slice(&m.get::<u16>(&format!("{p}{name}.down"))?[links.clone()]);
             }
-            e.arc_head.extend_from_slice(&arc_head[arcs.clone()]);
+            for &h in &arc_head[arcs.clone()] {
+                e.arc_head.push(local(h, "head")?);
+            }
             raw_links.extend_from_slice(&arc_link[arcs.clone()]);
             e.arc_local.extend(arcs.clone().map(|a| a as u32));
             let range = if fam == Fam::Car { rows.clone() } else { arcs.clone() };
@@ -473,17 +534,21 @@ impl Runtime {
             }
             if fam == Fam::Car {
                 e.turn_cost.extend_from_slice(&m.get::<u16>(&format!("{p}car.turn_cost"))?[arcs.clone()]);
-                e.copy_of.extend_from_slice(&u32s("copy_of")?[rows.clone()]);
+                for &o in &u32s("copy_of")?[rows.clone()] {
+                    e.copy_of.push(if o == NONE { NONE } else { local(o, "copy_of")? });
+                }
                 let cf = u32s("copy_first")?;
                 let cs = u32s("copies")?;
                 for r in rows.clone() {
-                    e.copies.extend_from_slice(&cs[cf[r] as usize..cf[r + 1] as usize]);
+                    for &c in &cs[cf[r] as usize..cf[r + 1] as usize] {
+                        e.copies.push(local(c, "copy")?);
+                    }
                     e.copy_first.push(e.copies.len() as u32);
                 }
             }
         }
-        ensure!(e.up_first.len() == n + 1, "{f} expert {x}: blocks cover {} of {n} nodes", e.up_first.len() - 1);
-        // Arc links: pack-local in the pack of the lower node → expert-local.
+        ensure!(e.up_first.len() == n + 1, "{f} component {x}: blocks cover {} of {n} nodes", e.up_first.len() - 1);
+        // Arc links: pack-local in the pack of the lower node → component-local.
         let mut tail = 0u32;
         for a in 0..e.arc_head.len() {
             while e.arc_first[tail as usize + 1] as usize <= a {
@@ -492,15 +557,15 @@ impl Runtime {
             let raw = raw_links[a];
             let h = e.arc_head[a];
             if raw == NONE {
-                ensure!(h == tail, "{f} expert {x}: a NONE link on an arc {tail} -> {h}");
+                ensure!(h == tail, "{f} component {x}: a NONE link on an arc {tail} -> {h}");
                 e.arc_link.push(NONE);
                 continue;
             }
             let lo = tail.max(h);
             let bl = e.blocks[e.block_of(lo)];
             let local = e.up_first[bl.id_first as usize] + (raw as u64 - bl.pack_link_first);
-            let expect = e.link(tail, h).with_context(|| format!("{f} expert {x}: arc {tail} -> {h} has no link"))?;
-            ensure!(local as usize == expect, "{f} expert {x}: arc {tail} -> {h} names link {local}, not {expect}");
+            let expect = e.link(tail, h).with_context(|| format!("{f} component {x}: arc {tail} -> {h} has no link"))?;
+            ensure!(local as usize == expect, "{f} component {x}: arc {tail} -> {h} names link {local}, not {expect}");
             e.arc_link.push(local as u32);
         }
         Ok(e)

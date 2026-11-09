@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::Args;
 use crate::family::Family;
-use blobmap_snap::modes::{active_expert, car_expert};
+use blobmap_snap::modes::{active_component, car_component};
 
 use crate::vocab::{Families, Ids, MODES, ModeSnap, Served};
 
@@ -30,7 +30,7 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
     }
     let mut trapped = serde_json::Map::new();
     for fam in [f.car as &dyn Family, f.active] {
-        let e = fam.experts();
+        let e = fam.components();
         let b = if fam.name() == "car" { f.car_built } else { f.active_built };
         let mut ids_in: BTreeMap<u32, BTreeMap<&str, u64>> = BTreeMap::new();
         for (m, (mode, family)) in MODES.iter().enumerate() {
@@ -48,8 +48,8 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
         let list: Vec<Value> = (0..e.len() as u32)
             .filter(|&x| e.trapped[x as usize])
             .map(|x| {
-                let way = b.experts[x as usize].nodes.iter().map(|&v| fam.road_key(v)).min().map(|k| k.0);
-                json!({"expert": x, "nodes": e.nodes[x as usize], "ids": ids_in.get(&x).cloned().unwrap_or_default(), "way": way})
+                let way = b.components[x as usize].nodes.iter().map(|&v| fam.road_key(v)).min().map(|k| k.0);
+                json!({"component": x, "nodes": e.nodes[x as usize], "ids": ids_in.get(&x).cloned().unwrap_or_default(), "way": way})
             })
             .collect();
         trapped.insert(fam.name().into(), Value::Array(list));
@@ -62,8 +62,8 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
     for (m, (mode, family)) in MODES.iter().enumerate() {
         let car = *family == "car";
         let (p, e) = if car { (f.car.p, &f.car.e) } else { (f.active.p, &f.active.e) };
-        let expert = |k: u32| if car { car_expert(f.car.g, e, k as usize) } else { active_expert(p, e, k as usize) };
-        // Per expert: IDs moved away, IDs served, and the least way of the pieces involved.
+        let component = |k: u32| if car { car_component(f.car.g, e, k as usize) } else { active_component(p, e, k as usize) };
+        // Per component: IDs moved away, IDs served, and the least way of the pieces involved.
         let mut from: BTreeMap<u32, (u64, i64)> = BTreeMap::new();
         let mut on: BTreeMap<u32, (u64, i64)> = BTreeMap::new();
         let count = |by: &mut BTreeMap<u32, (u64, i64)>, x: u32, k: u32| {
@@ -75,10 +75,10 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
         for i in kept {
             let s = &snaps[m].at[i];
             if s.moved_from != blobmap_format::NONE {
-                count(&mut from, expert(s.moved_from).context("a moved-from piece is servable")?, s.moved_from);
+                count(&mut from, component(s.moved_from).context("a moved-from piece is servable")?, s.moved_from);
             }
             if let Ok((k, _)) = s.outcome() {
-                count(&mut on, expert(k).context("a served piece is servable")?, k);
+                count(&mut on, component(k).context("a served piece is servable")?, k);
             }
         }
         let sorted = |by: &BTreeMap<u32, (u64, i64)>| {
@@ -87,9 +87,9 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
             v
         };
         let ids_on = |x: u32| on.get(&x).map_or(0, |b| b.0);
-        let rows = sorted(&from).into_iter().map(|(x, n, w)| json!({"expert": x, "nodes": e.nodes[x as usize], "ids_moved": n, "ids_left": ids_on(x), "way": w}));
+        let rows = sorted(&from).into_iter().map(|(x, n, w)| json!({"component": x, "nodes": e.nodes[x as usize], "ids_moved": n, "ids_left": ids_on(x), "way": w}));
         moved.insert(mode.to_string(), Value::Array(rows.collect()));
-        let rows = sorted(&on).into_iter().filter(|r| r.0 != 0).map(|(x, n, w)| json!({"expert": x, "nodes": e.nodes[x as usize], "ids": n, "way": w}));
+        let rows = sorted(&on).into_iter().filter(|r| r.0 != 0).map(|(x, n, w)| json!({"component": x, "nodes": e.nodes[x as usize], "ids": n, "way": w}));
         left.insert(mode.to_string(), Value::Array(rows.collect()));
     }
     let previous = match &a.previous_report {

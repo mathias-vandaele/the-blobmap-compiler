@@ -1,10 +1,11 @@
 //! The invariants of FORMAT §3–§9 on a model's bytes: tables, blocks, levels, links,
-//! chordality, turns, roads, copies, entries, vocabulary, and every hash.
+//! chordality, turns, roads, copies, the manifest's family counts, vocabulary, and every
+//! hash.
 
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use blobmap_format::hash::{ENTRY_TAG, Hasher, ROAD_TAG, VOCAB_TAG, inputs_hash, model_id, of_hashes};
+use blobmap_format::hash::{Hasher, ROAD_TAG, VOCAB_TAG, inputs_hash, model_id, of_hashes};
 use blobmap_format::{Hash, INF, NONE, NONE16};
 use blobmap_runtime::{Fam, Runtime};
 
@@ -15,38 +16,41 @@ pub fn structure(rt: &Runtime, rep: &mut Report) -> Result<()> {
         let t = &rt.tables[&fam];
         let f = fam.name();
         let o = rep.check(&format!("{f}: tables, blocks, levels, links"));
-        let ne = t.nodes.len();
-        o.expect(t.block_first.len() == ne + 1 && t.block_first[0] == 0, || "block_first is not a CSR over the experts".into());
-        o.expect(t.nodes.windows(2).all(|w| w[0] >= w[1]), || "experts are not numbered by node count descending".into());
+        let ne = t.components();
+        o.expect((1..ne as u32).all(|x| t.nodes(x - 1) >= t.nodes(x)), || "components are not numbered by node count descending".into());
+        o.expect(t.block_first.windows(2).all(|w| w[0] < w[1]), || "a component without a block".into());
+        let mut links = 0u64;
         for x in 0..ne as u32 {
-            let e = match rt.expert(fam, x) {
+            let e = match rt.component(fam, x) {
                 Ok(e) => e,
                 Err(err) => {
-                    o.fail(format!("expert {x}: {err:#}"));
+                    o.fail(format!("component {x}: {err:#}"));
                     continue;
                 }
             };
             o.count();
+            links += e.up_head.len() as u64;
+            let id0 = t.first[x as usize];
             let bs = t.block_first[x as usize] as usize..t.block_first[x as usize + 1] as usize;
             let kinds: Vec<u8> = t.b_kind[bs.clone()].to_vec();
-            o.expect(kinds == [0] || (kinds.len() >= 3 && kinds[0] == 1 && kinds[1..].iter().all(|&k| k == 2)), || format!("expert {x}: block kinds {kinds:?}"));
-            o.expect(t.b_id_first[bs.start] == 0, || format!("expert {x}: the first block does not start at 0"));
+            o.expect(kinds == [0] || (kinds.len() >= 3 && kinds[0] == 1 && kinds[1..].iter().all(|&k| k == 2)), || format!("component {x}: block kinds {kinds:?}"));
+            o.expect(t.b_id_first[bs.start] == id0, || format!("component {x}: the first block does not start at its first layout id"));
             // Levels of each block cover its ids, top first.
             let mut level_of = vec![u32::MAX; e.n];
             for b in bs.clone() {
                 let (pack, base, l) = (t.b_pack[b], t.b_level_base[b] as usize, t.b_levels[b] as usize);
                 let lf = rt.model.get::<u32>(&format!("road/{f}/p{pack}/level_first")).map(|v| v.into_owned()).unwrap_or_default();
                 if base + l >= lf.len() {
-                    o.fail(format!("expert {x} block {b}: level bounds out of range"));
+                    o.fail(format!("component {x} block {b}: level bounds out of range"));
                     continue;
                 }
                 let bounds = &lf[base..=base + l];
                 let (a, z) = (t.b_id_first[b], t.b_id_first[b] + t.b_nodes[b]);
-                o.expect(bounds[0] == a && bounds[l] == z && bounds.windows(2).all(|w| w[0] < w[1]), || format!("expert {x} block {b}: level bounds {bounds:?}"));
+                o.expect(bounds[0] == a && bounds[l] == z && bounds.windows(2).all(|w| w[0] < w[1]), || format!("component {x} block {b}: level bounds {bounds:?}"));
                 for lv in 0..l {
                     for v in bounds[lv]..bounds[lv + 1] {
-                        if (v as usize) < e.n {
-                            level_of[v as usize] = lv as u32;
+                        if v >= id0 && ((v - id0) as usize) < e.n {
+                            level_of[(v - id0) as usize] = lv as u32;
                         }
                     }
                 }
@@ -54,52 +58,52 @@ pub fn structure(rt: &Runtime, rep: &mut Report) -> Result<()> {
             for v in 0..e.n as u32 {
                 let r = e.row(v);
                 let row = &e.up_head[r.clone()];
-                o.expect(row.windows(2).all(|w| w[0] < w[1]) && row.last().is_none_or(|&u| u < v), || format!("expert {x} node {v}: row {row:?}"));
+                o.expect(row.windows(2).all(|w| w[0] < w[1]) && row.last().is_none_or(|&u| u < v), || format!("component {x} node {v}: row {row:?}"));
                 let bv = e.block_of(v);
                 for &u in row {
                     let bu = e.block_of(u);
                     if bu == bv {
-                        o.expect(level_of[u as usize] < level_of[v as usize], || format!("expert {x}: link {v}-{u} not upward in levels"));
+                        o.expect(level_of[u as usize] < level_of[v as usize], || format!("component {x}: link {v}-{u} not upward in levels"));
                     } else {
-                        o.expect(e.blocks[bu].kind == 1, || format!("expert {x}: link {v}-{u} joins two cells"));
+                        o.expect(e.blocks[bu].kind == 1, || format!("component {x}: link {v}-{u} joins two cells"));
                     }
                 }
                 for i in 0..row.len() {
                     for j in 0..i {
-                        o.expect(e.link(row[i], row[j]).is_some(), || format!("expert {x}: not chordal at {v}"));
+                        o.expect(e.link(row[i], row[j]).is_some(), || format!("component {x}: not chordal at {v}"));
                     }
                 }
                 // Arcs: sorted by head (CAR: strictly), heads in range.
                 let ar = e.arcs(v);
                 let heads = &e.arc_head[ar.clone()];
-                o.expect(heads.iter().all(|&h| (h as usize) < e.n), || format!("expert {x} node {v}: arc head out of range"));
+                o.expect(heads.iter().all(|&h| (h as usize) < e.n), || format!("component {x} node {v}: arc head out of range"));
                 if fam == Fam::Car {
-                    o.expect(heads.windows(2).all(|w| w[0] < w[1]), || format!("expert {x} node {v}: turns not ascending"));
-                    o.expect(e.turn_cost[ar.clone()].iter().all(|&c| c != INF), || format!("expert {x} node {v}: an INF turn cost"));
+                    o.expect(heads.windows(2).all(|w| w[0] < w[1]), || format!("component {x} node {v}: turns not ascending"));
+                    o.expect(e.turn_cost[ar.clone()].iter().all(|&c| c != INF), || format!("component {x} node {v}: an INF turn cost"));
                 } else {
                     let keys: Vec<(u32, i64, u32)> = ar.clone().map(|a| (e.arc_head[a], e.way[a], e.way_seq[a])).collect();
-                    o.expect(keys.windows(2).all(|w| w[0] <= w[1]), || format!("expert {x} node {v}: roads not ordered"));
+                    o.expect(keys.windows(2).all(|w| w[0] <= w[1]), || format!("component {x} node {v}: roads not ordered"));
                 }
             }
             if fam == Fam::Car {
                 for v in 0..e.n {
                     let cs = &e.copies[e.copy_first[v] as usize..e.copy_first[v + 1] as usize];
-                    o.expect(cs.windows(2).all(|w| w[0] < w[1]), || format!("expert {x} node {v}: copies not ascending"));
+                    o.expect(cs.windows(2).all(|w| w[0] < w[1]), || format!("component {x} node {v}: copies not ascending"));
                     for &c in cs {
                         let c = c as usize;
                         o.expect(
                             e.kind[c] == 2 && e.copy_of[c] == v as u32 && e.kind[v] != 2,
-                            || format!("expert {x}: copy {c} of {v} is not marked as one"),
+                            || format!("component {x}: copy {c} of {v} is not marked as one"),
                         );
                         o.expect(
                             (e.way[c], e.way_dir[c], e.way_seq[c], e.w[0][c], e.time_s[0][c].to_bits())
                                 == (e.way[v], e.way_dir[v], e.way_seq[v], e.w[0][v], e.time_s[0][v].to_bits()),
-                            || format!("expert {x}: copy {c} differs from its original {v}"),
+                            || format!("component {x}: copy {c} differs from its original {v}"),
                         );
                     }
-                    o.expect(e.kind[v] == 2 || e.copy_of[v] == NONE, || format!("expert {x}: original {v} has copy_of"));
-                    // A copy is always in its original's expert (SPEC §5, FORMAT §5.3).
-                    o.expect(e.kind[v] != 2 || e.copy_of[v] != NONE, || format!("expert {x}: copy {v} has no original in its expert"));
+                    o.expect(e.kind[v] == 2 || e.copy_of[v] == NONE, || format!("component {x}: original {v} has copy_of"));
+                    // A copy is always in its original's component (SPEC §5, FORMAT §5.3).
+                    o.expect(e.kind[v] != 2 || e.copy_of[v] != NONE, || format!("component {x}: copy {v} has no original in its component"));
                 }
             }
             // Road weights (FORMAT §1, §6.1): a finite master time is at most 65534 and its
@@ -107,30 +111,24 @@ pub fn structure(rt: &Runtime, rep: &mut Report) -> Result<()> {
             for (m, (ts, ws)) in e.time_s.iter().zip(&e.w).enumerate() {
                 for (r, (&ti, &wi)) in ts.iter().zip(ws).enumerate() {
                     let ok = if ti.is_finite() { ti <= blobmap_osm::MAX_PIECE_S && wi < INF } else { wi == INF };
-                    o.expect(ok, || format!("expert {x} road {r} metric {m}: time {ti}, weight {wi}"));
+                    o.expect(ok, || format!("component {x} road {r} metric {m}: time {ti}, weight {wi}"));
                 }
             }
-            o.expect(t.levels[x as usize] == expert_levels(&t.b_kind[bs.clone()], &t.b_levels[bs.clone()]), || format!("expert {x}: levels"));
         }
-        // Manifest entries.
-        let (mut next, mut pack) = (0u64, 0u64);
-        for (gi, en) in rt.manifest.experts.iter().enumerate().filter(|(_, e)| e.family == f) {
-            o.expect(en.experts[0] == next && en.packs[0] == pack, || format!("entry {gi}: experts or packs not consecutive"));
-            for xx in en.experts[0]..en.experts[0] + en.experts[1] {
-                o.expect(t.entry.get(xx as usize) == Some(&(gi as u32)), || format!("expert {xx}: entry index"));
-            }
-            next += en.experts[1];
-            pack += en.packs[1];
+        // The manifest's counts (FORMAT §3); every pack holds some block.
+        let packs = t.b_pack.iter().max().map_or(0, |&p| p as u64 + 1);
+        let mut used = vec![false; packs as usize];
+        t.b_pack.iter().for_each(|&p| used[p as usize] = true);
+        match rt.manifest.families.get(f) {
+            Some(mf) => o.expect(
+                mf.nodes == t.component.len() as u64 && mf.components == ne as u64 && mf.links == links && mf.packs == packs && used.iter().all(|&u| u),
+                || format!("manifest families.{f}: {mf:?}, the tables give {} nodes, {ne} components, {links} links, {packs} packs", t.component.len()),
+            ),
+            None => o.fail(format!("manifest: no family {f}")),
         }
-        o.expect(next == ne as u64, || "entries do not cover the experts".into());
     }
     vocab(rt, rep);
     Ok(())
-}
-
-fn expert_levels(kinds: &[u8], levels: &[u32]) -> u32 {
-    let top: u32 = kinds.iter().zip(levels).filter(|(k, _)| **k != 2).map(|(_, l)| l).sum();
-    top + kinds.iter().zip(levels).filter(|(k, _)| **k == 2).map(|(_, l)| *l).max().unwrap_or(0)
 }
 
 fn vocab(rt: &Runtime, rep: &mut Report) {
@@ -152,7 +150,7 @@ fn vocab(rt: &Runtime, rep: &mut Report) {
             let has_reason = reasons.peek().is_some_and(|r| r.0 as usize == i);
             let reason = if has_reason { reasons.next() } else { None };
             let filtered = v.status_of(i as u32) == 4;
-            let x = mv.expert[i];
+            let x = mv.component[i];
             if x == NONE {
                 o.expect(mv.node[i] == [NONE, NONE] && mv.off[i] == [INF; 4], || format!("{mode} id {i}: unserved with entries"));
                 o.expect(filtered != reason.is_some(), || format!("{mode} id {i}: unserved needs exactly one reason unless filtered"));
@@ -162,10 +160,8 @@ fn vocab(rt: &Runtime, rep: &mut Report) {
                 continue;
             }
             o.expect(!filtered && reason.is_none(), || format!("{mode} id {i}: served and filtered or with a reason"));
-            let t = &rt.tables[&mv.info.fam];
-            o.expect(t.trapped.get(x as usize) == Some(&0), || format!("{mode} id {i}: served in a trapped expert"));
-            let Ok(e) = rt.expert(mv.info.fam, x) else {
-                o.fail(format!("{mode} id {i}: expert {x} does not load"));
+            let Ok(e) = rt.component(mv.info.fam, x) else {
+                o.fail(format!("{mode} id {i}: component {x} does not load"));
                 continue;
             };
             let (nd, off) = (mv.node[i], mv.off[i]);
@@ -234,30 +230,11 @@ pub fn hashes(rt: &Runtime, rep: &mut Report) -> Result<()> {
     let m = &rt.model;
     let mf = &rt.manifest;
     let o = rep.check("hashes (FORMAT §9)");
-    let mut tables: BTreeMap<String, Hash> = BTreeMap::new();
-    for name in m.names() {
-        if name.starts_with("road/car/experts/") || name.starts_with("road/car/blocks/") || name.starts_with("road/active/experts/")
-            || name.starts_with("road/active/blocks/") || name.starts_with("road/active/cross/")
-        {
-            tables.insert(name.to_string(), m.tensor_hash(name)?);
-        }
+    let mut road: BTreeMap<String, Hash> = BTreeMap::new();
+    for name in m.names_in("road") {
+        road.insert(name.to_string(), m.tensor_hash(name)?);
     }
-    let mut rh = Hasher::tagged(ROAD_TAG);
-    for h in tables.values() {
-        rh.hash(h);
-    }
-    for en in &mf.experts {
-        let mut hs: BTreeMap<String, Hash> = BTreeMap::new();
-        for k in en.packs[0]..en.packs[0] + en.packs[1] {
-            for name in m.names_in(&format!("road/{}/p{k}", en.family)) {
-                hs.insert(name.to_string(), m.tensor_hash(name)?);
-            }
-        }
-        let h = of_hashes(ENTRY_TAG, hs.values());
-        o.expect(h.hex() == en.hash, || format!("{} entry {:?}: hash", en.family, en.experts));
-        rh.hash(&h);
-    }
-    let road = rh.finish();
+    let road = of_hashes(ROAD_TAG, road.values());
     o.expect(road.hex() == mf.parts.road.hash, || "road part hash".into());
     let mut vh = Hasher::tagged(VOCAB_TAG);
     for name in m.names_in("vocab") {

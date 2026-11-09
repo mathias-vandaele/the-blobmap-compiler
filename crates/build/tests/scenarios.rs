@@ -23,7 +23,7 @@ fn every_scenario_builds() {
             assert!(a.report_path("data").exists() && a.report_path("build").exists());
             let names: Vec<&str> = m.names().collect();
             assert!(names.iter().any(|n| n.starts_with("vocab/")), "{}", s.name);
-            eprintln!("{} {variant}: {} entries, model {}", s.name, r.manifest.experts.len(), r.manifest.model_id);
+            eprintln!("{} {variant}: {} car packs, model {}", s.name, r.manifest.families["car"].packs, r.manifest.model_id);
         }
     }
 }

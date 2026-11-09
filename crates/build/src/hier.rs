@@ -1,5 +1,6 @@
-//! One hierarchy per expert (SPEC §5): the expert's induced graph, its plan (whole or
-//! cells), contraction, link initialisation (FORMAT §6.2) and customization (§6.3).
+//! The family's hierarchy (SPEC §5), built one component at a time: each component's induced
+//! graph, its plan (whole or cells), contraction, link initialisation (FORMAT §6.2) and
+//! customization (§6.3). Each component is one tree of the family's elimination forest.
 
 use anyhow::{Result, ensure};
 use blobmap_cch::Hierarchy;
@@ -13,17 +14,17 @@ use crate::family::Family;
 /// `memory_budget_bytes / BYTES_PER_NODE` nodes.
 pub const BYTES_PER_NODE: u64 = 1024;
 
-/// The memory per node of nested dissection on an expert's whole fine graph, at the order
+/// The memory per node of nested dissection on a component's whole fine graph, at the order
 /// stage's peak (measured on France: 10.9 GB for 20.5 M CAR nodes, about 535 bytes): an
-/// expert of at most `MEMORY_LIMIT_BYTES / ND_BYTES_PER_NODE` nodes is cut into cells from
+/// component of at most `MEMORY_LIMIT_BYTES / ND_BYTES_PER_NODE` nodes is cut into cells from
 /// its own order, a larger one from a coarsened graph (SPEC §5).
 pub const ND_BYTES_PER_NODE: u64 = 535;
 
 /// The peak RSS of a build (SPEC §10).
 pub const MEMORY_LIMIT_BYTES: u64 = 62_000_000_000;
 
-pub struct ExpertBuilt {
-    /// The expert's nodes, ascending; a node's position here is its index in `h`.
+pub struct ComponentBuilt {
+    /// The component's nodes, ascending; a node's position here is its index in `h`.
     pub nodes: Vec<u32>,
     pub h: Hierarchy,
     /// Per metric, the link weights.
@@ -31,7 +32,7 @@ pub struct ExpertBuilt {
     pub down: Vec<Vec<u16>>,
 }
 
-impl ExpertBuilt {
+impl ComponentBuilt {
     /// The node at layout id l.
     pub fn node(&self, l: u32) -> u32 {
         self.nodes[self.h.node_of[l as usize] as usize]
@@ -39,10 +40,13 @@ impl ExpertBuilt {
 }
 
 pub struct Built {
-    pub experts: Vec<ExpertBuilt>,
-    /// Each node's layout id in its expert.
+    pub components: Vec<ComponentBuilt>,
+    /// The family's layout id of each component's local id 0: components are consecutive
+    /// ranges of layout ids, in index order (FORMAT §4).
+    pub first: Vec<u32>,
+    /// Each node's layout id in the family.
     pub layout_of: Vec<u32>,
-    /// The arcs inside one expert, CSR by tail node (`arc_count` order inside a node).
+    /// The arcs inside one component, CSR by tail node (`arc_count` order inside a node).
     pub out_first: Vec<u32>,
     pub out: Vec<u32>,
 }
@@ -51,24 +55,24 @@ pub struct Built {
 /// `NONE` if the list does not name it.
 pub type FixedRanks = Vec<u32>;
 
-/// A family split by expert: each expert's nodes and the arcs inside it.
+/// A family split by component: each component's nodes and the arcs inside it.
 pub struct Split {
-    /// The nodes of expert x, ascending, are `members[first[x] .. first[x + 1]]`.
+    /// The nodes of component x, ascending, are `members[first[x] .. first[x + 1]]`.
     members: Vec<u32>,
     first: Vec<usize>,
-    /// A node's position among its expert's nodes.
+    /// A node's position among its component's nodes.
     local_of: Vec<u32>,
-    /// The arcs inside expert x are `by_expert[arc_first[x] .. arc_first[x + 1]]`.
-    by_expert: Vec<u32>,
+    /// The arcs inside component x are `by_component[arc_first[x] .. arc_first[x + 1]]`.
+    by_component: Vec<u32>,
     arc_first: Vec<usize>,
-    /// The arcs inside one expert, CSR by tail node.
+    /// The arcs inside one component, CSR by tail node.
     out_first: Vec<u32>,
     out: Vec<u32>,
 }
 
 impl Split {
     fn new(f: &dyn Family) -> Split {
-        let e = f.experts();
+        let e = f.components();
         let n = f.nodes();
         let mut members: Vec<(u32, u32)> = (0..n as u32).map(|v| (e.of[v as usize], v)).collect();
         members.sort_unstable();
@@ -86,23 +90,23 @@ impl Split {
                 local_of[v as usize] = i as u32;
             }
         }
-        // Arcs inside one expert, by expert and by tail.
+        // Arcs inside one component, by component and by tail.
         let inner: Vec<u32> = (0..f.arc_count() as u32)
             .filter(|&a| {
                 let (t, h) = f.arc(a as usize);
                 e.of[t as usize] == e.of[h as usize]
             })
             .collect();
-        let mut by_expert: Vec<(u32, u32)> = inner.iter().map(|&a| (e.of[f.arc(a as usize).0 as usize], a)).collect();
-        by_expert.sort_unstable();
+        let mut by_component: Vec<(u32, u32)> = inner.iter().map(|&a| (e.of[f.arc(a as usize).0 as usize], a)).collect();
+        by_component.sort_unstable();
         let mut arc_first = vec![0usize; e.len() + 1];
-        for &(x, _) in &by_expert {
+        for &(x, _) in &by_component {
             arc_first[x as usize + 1] += 1;
         }
         for i in 0..e.len() {
             arc_first[i + 1] += arc_first[i];
         }
-        let by_expert: Vec<u32> = by_expert.into_iter().map(|x| x.1).collect();
+        let by_component: Vec<u32> = by_component.into_iter().map(|x| x.1).collect();
         let mut out_first = vec![0u32; n + 1];
         for &a in &inner {
             out_first[f.arc(a as usize).0 as usize + 1] += 1;
@@ -117,13 +121,13 @@ impl Split {
             out[fill[t] as usize] = a;
             fill[t] += 1;
         }
-        Split { members, first, local_of, by_expert, arc_first, out_first, out }
+        Split { members, first, local_of, by_component, arc_first, out_first, out }
     }
 
-    /// Expert x: its nodes, its arcs, and its arcs as local node pairs without loops.
-    fn expert(&self, f: &dyn Family, x: usize) -> (Vec<u32>, &[u32], Vec<(u32, u32)>) {
+    /// Component x: its nodes, its arcs, and its arcs as local node pairs without loops.
+    fn component(&self, f: &dyn Family, x: usize) -> (Vec<u32>, &[u32], Vec<(u32, u32)>) {
         let nodes = self.members[self.first[x]..self.first[x + 1]].to_vec();
-        let arcs = &self.by_expert[self.arc_first[x]..self.arc_first[x + 1]];
+        let arcs = &self.by_component[self.arc_first[x]..self.arc_first[x + 1]];
         let edges = arcs.iter().map(|&a| self.local(f, a)).filter(|(t, h)| t != h).collect();
         (nodes, arcs, edges)
     }
@@ -134,20 +138,20 @@ impl Split {
     }
 }
 
-/// Every expert's blocks (SPEC §5), in their contraction order.
+/// Every component's blocks (SPEC §5), in their contraction order.
 pub struct Ordered {
     split: Split,
     plans: Vec<Vec<Block>>,
 }
 
-/// Orders every expert: in one piece if it has at most `max_cell` nodes, else as cells, cut
+/// Orders every component: in one piece if it has at most `max_cell` nodes, else as cells, cut
 /// from its fine graph's order if it has at most `nd_max` nodes.
 pub fn order(f: &dyn Family, max_cell: usize, nd_max: usize, fixed: Option<&FixedRanks>) -> Result<Ordered> {
     let split = Split::new(f);
-    let plans: Vec<Result<Vec<Block>>> = (0..f.experts().len())
+    let plans: Vec<Result<Vec<Block>>> = (0..f.components().len())
         .into_par_iter()
         .map(|x| {
-            let (nodes, _, edges) = split.expert(f, x);
+            let (nodes, _, edges) = split.component(f, x);
             let k = nodes.len();
             let tail: Vec<u32> = edges.iter().map(|e| e.0).collect();
             let head: Vec<u32> = edges.iter().map(|e| e.1).collect();
@@ -155,8 +159,8 @@ pub fn order(f: &dyn Family, max_cell: usize, nd_max: usize, fixed: Option<&Fixe
             let g = Graph { n: k, tail: &tail, head: &head, lat: &lat, lon: &lon };
             Ok(match fixed {
                 Some(rank) => {
-                    ensure!(nodes.iter().all(|&v| rank[v as usize] != NONE), "{} expert {x}: the fixed order misses a node", f.name());
-                    ensure!(k <= max_cell, "{} expert {x}: a fixed order cannot be built as cells", f.name());
+                    ensure!(nodes.iter().all(|&v| rank[v as usize] != NONE), "{} component {x}: the fixed order misses a node", f.name());
+                    ensure!(k <= max_cell, "{} component {x}: a fixed order cannot be built as cells", f.name());
                     let mut order: Vec<u32> = (0..k as u32).collect();
                     order.sort_by_key(|&i| rank[nodes[i as usize] as usize]);
                     plan(&g, &Fixed(order), max_cell, nd_max)
@@ -168,16 +172,16 @@ pub fn order(f: &dyn Family, max_cell: usize, nd_max: usize, fixed: Option<&Fixe
     Ok(Ordered { split, plans: plans.into_iter().collect::<Result<_>>()? })
 }
 
-/// Contracts and customizes every expert in its order.
+/// Contracts and customizes every component in its order.
 pub fn build(f: &dyn Family, o: Ordered) -> Result<Built> {
     let Ordered { split, plans } = o;
     let n = f.nodes();
     let metrics = f.metrics().len();
-    let experts: Vec<Result<ExpertBuilt>> = plans
+    let components: Vec<Result<ComponentBuilt>> = plans
         .into_par_iter()
         .enumerate()
         .map(|(x, blocks)| {
-            let (nodes, arcs, edges) = split.expert(f, x);
+            let (nodes, arcs, edges) = split.component(f, x);
             let k = nodes.len();
             let local = |a: u32| split.local(f, a);
             let h = Hierarchy::build(k, &edges, &blocks);
@@ -202,15 +206,20 @@ pub fn build(f: &dyn Family, o: Ordered) -> Result<Built> {
                 up.push(u);
                 down.push(d);
             }
-            Ok(ExpertBuilt { nodes, h, up, down })
+            Ok(ComponentBuilt { nodes, h, up, down })
         })
         .collect();
-    let experts: Vec<ExpertBuilt> = experts.into_iter().collect::<Result<_>>()?;
-    let mut layout_of = vec![NONE; n];
-    for x in &experts {
+    let components: Vec<ComponentBuilt> = components.into_iter().collect::<Result<_>>()?;
+    // Layout ids are U32, NONE excluded (FORMAT §1, §4).
+    ensure!((n as u64) < NONE as u64, "{}: {n} layout nodes, beyond the U32 layout ids (FORMAT §4)", f.name());
+    let (mut first, mut layout_of) = (Vec::with_capacity(components.len()), vec![NONE; n]);
+    let mut next = 0u32;
+    for x in &components {
+        first.push(next);
         for (i, &v) in x.nodes.iter().enumerate() {
-            layout_of[v as usize] = x.h.layout_of[i];
+            layout_of[v as usize] = next + x.h.layout_of[i];
         }
+        next += x.nodes.len() as u32;
     }
-    Ok(Built { experts, layout_of, out_first: split.out_first, out: split.out })
+    Ok(Built { components, first, layout_of, out_first: split.out_first, out: split.out })
 }

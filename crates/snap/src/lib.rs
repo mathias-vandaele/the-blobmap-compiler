@@ -57,7 +57,7 @@ impl Found {
 }
 
 /// What a build keeps of a `Found`: whether any piece of the family's graph is within the
-/// radius, the outcome, and for the data report a trapped expert and the nearest servable
+/// radius, the outcome, and for the data report a trapped component and the nearest servable
 /// piece when a larger component won over it (`u32::MAX` for none).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Snapped {

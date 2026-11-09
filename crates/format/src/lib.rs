@@ -18,8 +18,8 @@ pub use writer::{ModelWriter, ShardLimits, Written};
 
 /// The format name and version this crate reads and writes (FORMAT §12).
 pub const FORMAT: &str = "blobmap-model";
-pub const FORMAT_VERSION: &str = "2.0.0";
-pub const FORMAT_MAJOR: u64 = 2;
+pub const FORMAT_VERSION: &str = "3.0.0";
+pub const FORMAT_MAJOR: u64 = 3;
 
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const INDEX_FILE: &str = "model.safetensors.index.json";

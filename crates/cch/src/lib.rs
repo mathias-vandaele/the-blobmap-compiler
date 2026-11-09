@@ -1,7 +1,7 @@
-//! The hierarchy of one expert (SPEC §5, FORMAT §4, §5.2, §6). Each cell is contracted on
+//! The hierarchy of one component (SPEC §5, FORMAT §4, §5.2, §6). Each cell is contracted on
 //! its own, with its top-block neighbours as external nodes; the cliques it leaves among
 //! them are contracted with the top block, last. Layout ids number the top block (or the
-//! whole expert) first, then the cells; inside a block, levels top first.
+//! whole component) first, then the cells; inside a block, levels top first.
 
 use blobmap_format::{INF, sat};
 use blobmap_order::elim::eliminate;
@@ -191,7 +191,7 @@ impl Hierarchy {
 
     /// The elimination tree's height in levels: the nodes on its longest root-to-leaf path
     /// (FORMAT §5.2: the parent of v is its largest upper neighbour). It equals `levels`
-    /// for an expert built in one piece, and for one built as cells from the fine order.
+    /// for a component built in one piece, and for one built as cells from the fine order.
     pub fn tree_levels(&self) -> u32 {
         let mut h = vec![1u32; self.len()];
         for v in (0..self.len() as u32).rev() {

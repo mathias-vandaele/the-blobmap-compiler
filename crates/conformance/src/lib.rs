@@ -101,7 +101,7 @@ fn run(rt: &Runtime, ex: &Expected, s: &Facts, n: &Samples, hashes: bool, rep: &
     if hashes {
         invariants::hashes(rt, rep)?;
     }
-    checks::experts(rt, ex.r, rep);
+    checks::components(rt, ex.r, rep);
     checks::snapping(rt, ex.r, rep)?;
     checks::snapping_brute(ex.r, n.brute, rep);
     checks::recustomization(rt, rep)?;

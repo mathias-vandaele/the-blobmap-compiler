@@ -4,8 +4,8 @@
 //! Each pair is asked `travel_time` on the model; one column per origin, in parallel. The
 //! answered pairs give the MAE, the p95 of |diff|, the bias (mean of ours − OSRM) and the
 //! median relative error |diff| / OSRM, in all and by OSRM duration; the others are counted
-//! by answer. With `--experts`, no time is computed: the pairs whose ends are served in
-//! different experts are counted by their two experts.
+//! by answer. With `--components`, no time is computed: the pairs whose ends are served in
+//! different components are counted by their two components.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -35,10 +35,10 @@ fn stats(d: &[(f64, f64)]) -> String {
 
 fn main() -> Result<()> {
     let a: Vec<String> = std::env::args().skip(1).collect();
-    let by_experts = a.iter().any(|x| x == "--experts");
-    let a: Vec<&String> = a.iter().filter(|x| *x != "--experts").collect();
+    let by_components = a.iter().any(|x| x == "--components");
+    let a: Vec<&String> = a.iter().filter(|x| *x != "--components").collect();
     let [model, pairs, mode, oc, dc, tc] = a[..] else {
-        bail!("usage: accuracy <model> <pairs.csv> <mode> <origin column> <dest column> <osrm column> [--experts]");
+        bail!("usage: accuracy <model> <pairs.csv> <mode> <origin column> <dest column> <osrm column> [--components]");
     };
     let rt = Runtime::open(Path::new(model))?;
     let m = rt.mode(mode)?;
@@ -54,9 +54,9 @@ fn main() -> Result<()> {
             Ok((f[oi].to_string(), f[di].to_string(), f[ti].parse::<f64>()?))
         })
         .collect::<Result<_>>()?;
-    if by_experts {
+    if by_components {
         let mv = &rt.vocab.modes[m];
-        let nodes = &rt.tables[&mv.info.fam].nodes;
+        let t = &rt.tables[&mv.info.fam];
         let served = |id: &str| rt.resolve(id).and_then(|i| rt.served(i, m)).ok();
         let mut apart: BTreeMap<(u32, u32), u64> = BTreeMap::new();
         for (o, d, _) in &rows {
@@ -66,12 +66,12 @@ fn main() -> Result<()> {
                 *apart.entry((x, y)).or_default() += 1;
             }
         }
-        println!("{mode}: {} pairs served in different experts", apart.values().sum::<u64>());
-        // One OSM way of each expert but the largest, which would take long to load.
-        let way = |x: u32| -> Result<String> { Ok(if x == 0 { "–".into() } else { rt.expert(mv.info.fam, x)?.way[0].to_string() }) };
+        println!("{mode}: {} pairs served in different components", apart.values().sum::<u64>());
+        // One OSM way of each component but the largest, which would take long to load.
+        let way = |x: u32| -> Result<String> { Ok(if x == 0 { "–".into() } else { rt.component(mv.info.fam, x)?.way[0].to_string() }) };
         println!("  {:>7} {:>9} {:>11}  {:>7} {:>9} {:>11}  {:>6}", "origin", "nodes", "OSM way", "dest", "nodes", "OSM way", "pairs");
         for ((x, y), k) in apart {
-            println!("  {x:>7} {:>9} {:>11}  {y:>7} {:>9} {:>11}  {k:>6}", nodes[x as usize], way(x)?, nodes[y as usize], way(y)?);
+            println!("  {x:>7} {:>9} {:>11}  {y:>7} {:>9} {:>11}  {k:>6}", t.nodes(x), way(x)?, t.nodes(y), way(y)?);
         }
         return Ok(());
     }
@@ -97,7 +97,7 @@ fn main() -> Result<()> {
                         Ok(i) => i,
                         Err(r) => return (k, Err(format!("destination {}", r.name()))),
                     };
-                    if mv.expert[d as usize] != mv.expert[src as usize] {
+                    if mv.component[d as usize] != mv.component[src as usize] {
                         return (k, Err("DifferentComponent".into()));
                     }
                     let t = times[d as usize];

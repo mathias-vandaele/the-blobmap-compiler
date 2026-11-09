@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use blobmap_format::{INF, NONE, Tensor, Unit};
 use blobmap_graph::active::METRICS;
 use blobmap_overture::{Catalog, Id, Taxonomy};
-use blobmap_snap::modes::{active_expert, car_expert};
+use blobmap_snap::modes::{active_component, car_component};
 use blobmap_snap::{Grid, Membership, Sets, Snapped, parts};
 use rayon::prelude::*;
 
@@ -17,7 +17,7 @@ use crate::layout::Layout;
 /// The modes, in manifest order, with their family.
 pub const MODES: [(&str, &str); 3] = [("car", "car"), ("bike", "active"), ("walk", "active")];
 
-/// One mode's snapping of every point: the outcome, and the trapped expert holding the
+/// One mode's snapping of every point: the outcome, and the trapped component holding the
 /// nearest eligible piece, if any (for the data report, SPEC §3).
 pub struct ModeSnap {
     pub at: Vec<Snapped>,
@@ -124,7 +124,7 @@ pub fn unit(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash:
     let mut served: Served = BTreeMap::new();
     for (m, (mode, family)) in MODES.iter().enumerate() {
         let counts = served.entry(mode.to_string()).or_default();
-        let (mut expert, mut node, mut road, mut off) = (vec![NONE; n], vec![NONE; 2 * n], vec![NONE; n], Vec::new());
+        let (mut node, mut road, mut off) = (vec![NONE; 2 * n], vec![NONE; n], Vec::new());
         off.resize(4 * n, INF);
         let (mut rid, mut rcode, mut rm) = (Vec::new(), Vec::new(), Vec::new());
         for (i, &(pt, filtered)) in pts.iter().enumerate() {
@@ -146,8 +146,7 @@ pub fn unit(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash:
             let k = piece as usize;
             if *mode == "car" {
                 let (car, b) = (f.car, f.car_built);
-                let x = car_expert(car.g, &car.e, k).expect("servable");
-                expert[i] = x;
+                let x = car_component(car.g, &car.e, k).expect("servable");
                 for d in 0..2 {
                     let s = car.g.seg_of_piece[k][d];
                     if s == NONE || car.e.of[s as usize] != x {
@@ -162,8 +161,7 @@ pub fn unit(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash:
             } else {
                 let (act, b, l) = (f.active, f.active_built, f.active_layout);
                 let metric = m - 1;
-                let x = active_expert(act.p, &act.e, k).expect("servable");
-                expert[i] = x;
+                debug_assert!(active_component(act.p, &act.e, k).is_some(), "a served piece is servable");
                 let [along, against] = act.g.road_of_piece[k];
                 let (uu, vv, fu, ruv, rvu) = if along != NONE {
                     (act.p.u[k], act.p.v[k], frac, along, against)
@@ -179,7 +177,6 @@ pub fn unit(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash:
             }
         }
         let p = format!("vocab/{family}/{mode}.");
-        u.put(format!("{p}expert"), Tensor::vec(&expert));
         if *mode == "car" {
             u.put(format!("{p}seg"), Tensor::rows(2, &node));
             u.put(format!("{p}off"), Tensor::new(&[n as u64, 2, 2], &off));

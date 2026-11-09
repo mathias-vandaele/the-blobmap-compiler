@@ -16,19 +16,18 @@ SPEC version 2.0.0
 
 ## 2. Concepts
 
-No boundary in the model is drawn by a human: experts come from the connectivity of the road network, cells from the compiler's own nested dissection. Country borders, polygons and file splits never change a result.
+No boundary in the model is drawn by a human: components come from the connectivity of the road network, cells from the compiler's own nested dissection. Country borders, polygons and file splits never change a result.
 
 | Term | Definition | Decided by |
 | --- | --- | --- |
 | Model | One versioned artifact: a manifest, an index and shards. One build produces one model. | the build |
 | Mode family | CAR (car) or ACTIVE (bike and walk, one shared graph). | this spec |
 | Metric | One set of travel times for one mode: car, bike or walk. | this spec (3 metrics) |
-| Expert | One strongly connected component of one mode family's graph, with one hierarchy (CCH). Every trip inside an expert is exact; trips between experts are unreachable. | the compiler, from the data |
-| Expert group | Small experts packed together into shared shards. Each component inside stays its own expert for routing. | the compiler, by size |
-| Cell | A build unit: a piece of an expert, chosen by nested dissection so the build fits in memory. Never a routing boundary. | the compiler, from the memory budget |
-| Road part | The graph, hierarchy, metrics and re-customization data of an expert. Changes with OSM. | the build |
-| Vocabulary part | Overture address and place IDs mapped to positions in each expert, plus place categories. Changes with each Overture release, and depends on the road part's hash. | the build |
-| Router | The mapping from an input ID and a mode to its expert and entries. Part of the vocabulary. | the build |
+| Hierarchy | One CCH per mode family, over all its components. Its elimination tree is a forest with one tree per component, so components never share links or levels. | the compiler |
+| Component | One strongly connected component of one mode family's graph: one tree of the family's hierarchy. Every trip inside a component is exact; trips between components are unreachable. The model stores the component of every node. | the compiler, from the data |
+| Cell | A build unit: a piece of a component, chosen by nested dissection so the build fits in memory. Never a routing boundary. | the compiler, from the memory budget |
+| Road part | The graph, hierarchy, metrics and re-customization data of each mode family. Changes with OSM. | the build |
+| Vocabulary part | Overture address and place IDs mapped directly to their nodes and offsets in each mode family's graph, plus place categories. Changes with each Overture release, and depends on the road part's hash. | the build |
 
 ## 3. Inputs and data rules
 
@@ -80,27 +79,27 @@ Three metrics exist in this version, car, bike and walk, in two mode families. P
 
 - **Delays** are part of the time of the road that arrives at them, in the direction they apply to (§7).
 - **Ferries and car shuttles:** excluded in this version. The format reserves a `ferry` link type (fixed crossing time plus an average wait) so they can be added later as a profile change.
-- **Format room:** an expert family may carry more than its current metrics later (e-bike, slow walker), without a format change. This version defines exactly three.
+- **Format room:** a mode family may carry more than its current metrics later (e-bike, slow walker), without a format change. This version defines exactly three.
 
-## 5. Experts and cells
+## 5. Components and cells
 
-The compiler splits the network into experts by connectivity and splits large experts into cells by memory, then builds one exact hierarchy per expert. No user input decides either.
+The compiler finds each mode family's components by connectivity and splits large components into cells by memory, then builds one exact hierarchy per family whose elimination tree has one tree per component. No user input decides either.
 
 1. **Build each mode family's graph** over the whole `.pbf` (CAR: the turn graph; ACTIVE: the bike and walk union).
-2. **Compute strongly connected components.** Each component is an expert: Eurasia plus Africa is one CAR expert; Britain is its own while ferries and shuttles are excluded; every island is its own. CAR and ACTIVE components are computed separately and need not line up.
-   - **CAR via-way copies** (§4, FORMAT §5.3): experts are determined by the original segments only: the components are those of the originals, a turn into or out of a copy counting as one into or out of its original. Every copy belongs to its original's expert, whatever its own strong connectivity. A copy is an arrival state and no trip starts from one, so this stays exact; a turn from a copy into another expert is dropped like any cross-expert turn. A restriction whose prefix copy has no turn out is likely mis-tagged and is listed in the data report (§3).
-3. **Keep every component.** Small ones are packed into expert groups by size, to keep shard counts reasonable. A component attached to a larger one only by one-way roads (a one-way street into a dead end, a mis-tagged junction) is a trapped component, usually a data error: it stays in the model, but no ID snaps to it (§6). A component with no road at all to the rest is an island, served whatever its size.
-   - **Precisely:** group the components that roads join, ignoring road direction. In each group, the largest component is served and every other one is trapped, with ties to the smaller expert index. A group of one component is an island.
-4. **ACTIVE reachability per metric.** An ACTIVE expert is a component of the union graph. Inside it, a pair one mode cannot connect gets ∞ for that metric, which is exact.
-5. **Cells, when an expert is too large to build at once.** The compiler orders the expert's fine graph by the same nested dissection as in one piece, and cuts the elimination tree of that order where subtrees fit the memory budget: the subtrees below the cut, packed together, are the cells; the nodes above it, the top separators, are the top block. Every block keeps that order. Each cell is contracted on its own; the separators are ordered above all cells and contracted last.
-   - **Fallback:** only an expert whose fine graph is too large to order within the build's memory (§10) is coarsened first. Its top separators then come from the coarse graph's order, and each block is ordered on its own.
-6. **One hierarchy per expert.** Contracting a cell's interior only creates shortcuts among that cell's own nodes and its separator nodes, so the assembled hierarchy is exact. Its shards follow the cells.
+2. **Compute strongly connected components.** Eurasia plus Africa is one CAR component; Britain is its own while ferries and shuttles are excluded; every island is its own. CAR and ACTIVE components are computed separately and need not line up.
+   - **CAR via-way copies** (§4, FORMAT §5.3): components are determined by the original segments only: they are those of the originals, a turn into or out of a copy counting as one into or out of its original. Every copy belongs to its original's component, whatever its own strong connectivity. A copy is an arrival state and no trip starts from one, so this stays exact; a turn from a copy into another component is dropped like any turn between components. A restriction whose prefix copy has no turn out is likely mis-tagged and is listed in the data report (§3).
+3. **Keep every component.** Small ones share packs, to keep shard counts reasonable; packs are storage only. A component attached to a larger one only by one-way roads (a one-way street into a dead end, a mis-tagged junction) is a trapped component, usually a data error: it stays in the model, but no ID snaps to it (§6). A component with no road at all to the rest is an island, served whatever its size.
+   - **Precisely:** group the components that roads join, ignoring road direction. In each group, the largest component is served and every other one is trapped, with ties to the smaller component index. A group of one component is an island.
+4. **ACTIVE reachability per metric.** An ACTIVE component is a component of the union graph. Inside it, a pair one mode cannot connect gets ∞ for that metric, which is exact.
+5. **Cells, when a component is too large to build at once.** The compiler orders the component's fine graph by the same nested dissection as in one piece, and cuts the elimination tree of that order where subtrees fit the memory budget: the subtrees below the cut, packed together, are the cells; the nodes above it, the top separators, are the top block. Every block keeps that order. Each cell is contracted on its own; the separators are ordered above all cells and contracted last.
+   - **Fallback:** only a component whose fine graph is too large to order within the build's memory (§10) is coarsened first. Its top separators then come from the coarse graph's order, and each block is ordered on its own.
+6. **One hierarchy per family.** Each component is ordered and contracted on its own, so no link joins two components and each is one tree of the family's elimination forest. Contracting a cell's interior only creates shortcuts among that cell's own nodes and its separator nodes, so the assembled hierarchy is exact. Its shards follow the cells.
 
-The assembly must give the same answers as building the expert in one piece. Cut from the fine order, it is the one-piece hierarchy: a reordering of the same elimination tree, with the same links. Only the coarse fallback may cost a slightly worse ordering (more levels or shortcuts), which is measured and reported (§13, milestone 4).
+The assembly must give the same answers as building the component in one piece. Cut from the fine order, it is the one-piece hierarchy: a reordering of the same elimination tree, with the same links. Only the coarse fallback may cost a slightly worse ordering (more levels or shortcuts), which is measured and reported (§13, milestone 4).
 
-&#91;embedded content: model anatomy · experts by connectivity, cells by memory\]
+&#91;embedded content: model anatomy · components by connectivity, cells by memory\]
 
-Experts (top row) are separate road networks with no road between them; cells (bottom) are only how one large expert gets built within memory, tied back together by the separators.
+Components (top row) are separate road networks with no road between them; cells (bottom) are only how one large component gets built within memory, tied back together by the separators.
 
 ## 6. Vocabulary: what a query can name
 
@@ -114,12 +113,12 @@ The only inputs the model accepts are Overture address IDs and Overture place ID
 - **Aliases:** the ID of a duplicate merged into another place (§3) is an alias of the kept place.
   - A query naming an alias is answered exactly as if it named the kept place; an alias and its kept place are the same ID (§9).
   - Answers name kept IDs only.
-- **Entries per mode:** for each mode, each ID maps to its expert and its entries in that expert's graph.
+- **Entries per mode:** for each mode, each ID maps directly to its nodes and offsets in the family's graph; its component is that of its nodes.
   - **CAR:** the two directed segments of its road piece, with the offset in seconds to each end.
-  - **ACTIVE:** bike and walk snap separately on the family's shared graph. One ID may stand on different pieces, even in different experts, for the two modes. Each entry holds the two ends of its piece, with offsets for that mode's metric.
+  - **ACTIVE:** bike and walk snap separately on the family's shared graph. One ID may stand on different pieces, even in different components, for the two modes. Each entry holds the two ends of its piece, with offsets for that mode's metric.
   - A direction the mode may not use has offset ∞. An example is a bike against a one-way it can neither ride nor push along.
   - Offsets are whole seconds (§7).
-- **Snapping happens once, at compile time.** An ID snaps to the nearest eligible road piece within 2 km for car and 500 m for bike and walk. An ID whose closest point falls exactly on a node stands at that node. Pieces in trapped components (§5) are skipped: the ID snaps to the next nearest eligible piece within the radius, or gets the reason code TrappedComponent if there is none. An ACTIVE piece whose two ends lie in different experts lies on no route, and is skipped the same way. Only the result is stored; no geometry or coordinate index ships in the model.
+- **Snapping happens once, at compile time.** An ID snaps to the nearest eligible road piece within 2 km for car and 500 m for bike and walk. An ID whose closest point falls exactly on a node stands at that node. Pieces in trapped components (§5) are skipped: the ID snaps to the next nearest eligible piece within the radius, or gets the reason code TrappedComponent if there is none. An ACTIVE piece whose two ends lie in different components lies on no route, and is skipped the same way. Only the result is stored; no geometry or coordinate index ships in the model.
 - **Small components yield, in every mode.** A component of at most N nodes is never chosen when a piece of a larger component, left after the skips above, lies within the radius: the ID snaps to the nearest such piece. Otherwise the nearest piece wins, as above. N is a profile setting per family, 10 for both, mirroring OSRM's small-component size. So an ID beside a tiny fragment (a car park, a mapping gap) snaps to the street beyond it.
   - Islands stay served whatever their size; a small one loses its IDs only to a larger component within the radius. Fragments stay in the model and are never dropped.
   - No other rule applies to fragments. The IDs they keep are reported as OSM errors (§3).
@@ -157,15 +156,15 @@ Every time in the model and in every answer is an integer number of seconds in `
 
 ## 8. Model format
 
-A model is one directory: `manifest.json`, `model.safetensors.index.json` (tensor name to shard), the shards (like a large LLM checkpoint) and a `LICENSES` file (§12). Nothing else is in it. The build and data reports (§3, §10) are written outside it. Runtimes memory-map the shards and read only the experts they use.
+A model is one directory: `manifest.json`, `model.safetensors.index.json` (tensor name to shard), the shards (like a large LLM checkpoint) and a `LICENSES` file (§12). Nothing else is in it. The build and data reports (§3, §10) are written outside it. Runtimes memory-map the shards and read only the packs they use.
 
-- **Manifest:** format version, model ID, compiler version with commit and dirty flag, input provenance (`.pbf` name, timestamp, SHA-256; Overture release; taxonomy version), config hashes (profiles, place rules), the list of experts (family, component count, node and link counts, levels, cells, shards), and the hash of every part.
-- **Road part, per expert:** the hierarchy (nodes in level order, upper-neighbour lists, level boundaries), the `u16` metrics per mode, the master `f32` road times, and the re-customization data.
+- **Manifest:** format version, model ID, compiler version with commit and dirty flag, input provenance (`.pbf` name, timestamp, SHA-256; Overture release; taxonomy version), config hashes (profiles, place rules), per family its node, link, component and pack counts, and the hash of every part.
+- **Road part, per family:** the component of every node, the hierarchy (nodes in level order, upper-neighbour lists, level boundaries), the `u16` metrics per mode, the master `f32` road times, and the re-customization data.
   - **Re-customization data:** which road initializes each link, each road's rounding group (way, direction, metric; §7), and the triangles per level.
   - **Triangles:** they are derived from the sorted upper-neighbour lists. Storing them is optional.
   - With these, a runtime can recompute every link weight from new road times without the compiler.
 - **Vocabulary part:** the ID table (Overture ID to internal index, stored as one byte buffer), the aliases, the entries per mode, the reason codes, the filtered places, and the place categories (basic category, hierarchy, primary and alternates, redirects). It records the hash of the road part it was built on and refuses any other.
-- **Shards** are split by expert, part and cell, with a target of 2 GB and a hard maximum of 4 GB (configurable). A shard holds one expert group or a slice of one expert, never a mix of unrelated parts.
+- **Shards** are split by part, pack and cell, with a target of 2 GB and a hard maximum of 4 GB (configurable). A shard holds one pack (small components together, or one block of a large one) or a slice of one, never a mix of unrelated parts.
 - **Never in the model:** snap geometry, coordinate indexes, place names, category fields, runtime tuning (tile sizes, block splits, batch sizes, the narrow-top cutoff).
 - **Versioning:** semantic versions. A minor version may add optional tensors and optional manifest keys. Old runtimes ignore them, and every runtime must ignore manifest keys it does not know. Anything else is a major version.
 
@@ -189,7 +188,7 @@ The spec defines each operation by its exact result, never by an algorithm. A ru
 - **Direction:** `from` is the time from the sources to each ID; `to` is the time from each ID to the sources (the reversed graph). One-way streets make them differ.
 - **Same ID:** 0 s.
 - **Same road piece:** the minimum of driving straight along the shared piece, when allowed and the target is ahead, and the best route through at least one other node (around the block). Two IDs at the same offset on the shared road count as ahead: 0 s.
-- **Different experts:** unreachable, answered without computation (`DifferentComponent`).
+- **Different components:** unreachable, answered by comparing the two IDs' component ids, without computation (`DifferentComponent`).
 - **Mixed modes:** terms of one expression may use different modes; they combine per ID.
 - **Ties:** the smallest Overture ID wins (§7).
 - **Reasons:** an ID that is not served for the mode an operation needs answers its reason (§6).
@@ -265,8 +264,8 @@ Checks:
 - Re-customization with random metrics on the same hierarchy.
 - The address and place heads, including same-piece pairs and same-ID queries.
 - Snapping re-check: re-snapping, trapped skips and the small-component rule included, reproduces the stored entries exactly; an ID beside a fragment snaps to the street, and IDs on a large island within the radius and on a small one beyond it stay on their islands.
-- Experts: components found as expected on synthetic graphs (islands, one-way traps, a footbridge linking two parts for walkers only); cross-expert pairs unreachable.
-- Cells: an expert built as cells gives the same answers as the same expert built in one piece.
+- Components: found as expected on synthetic graphs (islands, one-way traps, a footbridge linking two parts for walkers only); pairs in different components unreachable.
+- Cells: a component built as cells gives the same answers as the same component built in one piece.
 - The cap: synthetic graphs with routes longer than 18 h give `BEYOND`, and routes just under it stay exact; a piece longer than the cap is cut (§7), and an ID on it gets its exact time.
 - Car `to` queries (from each ID to the sources):
   - same-piece pairs on one-way and two-way pieces, in both orders, including equal offsets and the way around the block;
@@ -290,10 +289,10 @@ Each milestone ends at a gate, and the next starts only once the gate passes. Th
 
 1. **Spec and FORMAT.md.** This spec approved; FORMAT.md written (every tensor, invariant and version rule) and approved. Gate: both signed off, before any compiler code.
 2. **Toy and synthetic.** The compiler, reference runtime and suite on the toy town and synthetic graphs (islands, one-way traps, the cap, ties, cells). Gate: tiny tier green, byte-identical builds across thread counts.
-3. **France.** A full build from the France `.pbf` within 62 GB. Gate: country tier green; accuracy against OSRM at least as good as the research engine (car MAE about 19 s over France), with pairs in different experts only where a real island or a ferry separates them; no ID unserved because of its expert, Corsica and islands served.
-4. **Fallback.** Experts built as cells from the coarsening fallback (§5), forced, on Hauts-de-France, France, and a `.pbf` covering France, Belgium, Luxembourg, Switzerland and Germany. Gate: zero mismatches at every tier; cross-border golden checks green; at most 1.25× the sweep layers of one piece (FORMAT's level count: top block plus deepest cell); peak RSS ≤ 62 GB. Cells cut from the fine order have the one-piece links and elimination-tree height exactly.
+3. **France.** A full build from the France `.pbf` within 62 GB. Gate: country tier green; accuracy against OSRM at least as good as the research engine (car MAE about 19 s over France), with pairs in different components only where a real island or a ferry separates them; no ID unserved because of its component, Corsica and islands served.
+4. **Fallback.** Components built as cells from the coarsening fallback (§5), forced, on Hauts-de-France, France, and a `.pbf` covering France, Belgium, Luxembourg, Switzerland and Germany. Gate: zero mismatches at every tier; cross-border golden checks green; at most 1.25× the sweep layers of one piece (FORMAT's level count: top block plus deepest cell); peak RSS ≤ 62 GB. Cells cut from the fine order have the one-piece links and elimination-tree height exactly.
 5. **Europe.** Gate: built within 62 GB; measured bytes per link, per address and per column, and the extrapolation to each continent.
-6. **World.** Gate: built; experts per continent listed; the hardware choice for serving made from the measured sizes.
+6. **World.** Gate: built; components per continent listed; the hardware choice for serving made from the measured sizes.
 
 ## 14. Deferred
 

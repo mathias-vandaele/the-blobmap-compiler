@@ -1,7 +1,7 @@
-//! Experts (SPEC §5, FORMAT §4): the strongly connected components of a family's graph,
+//! Components (SPEC §5, FORMAT §4): the strongly connected components of a family's graph,
 //! numbered by node count descending, ties to the smallest road key; and which of them are
 //! trapped: in each group of components joined by roads ignoring direction, the largest is
-//! served and the others are trapped, ties to the smaller expert index.
+//! served and the others are trapped, ties to the smaller component index.
 
 /// A directed graph as CSR.
 pub struct Csr {
@@ -122,19 +122,19 @@ impl Dsu {
     }
 }
 
-/// A family's experts.
+/// A family's components.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Experts {
-    /// Expert index of each node.
+pub struct Components {
+    /// Component index of each node.
     pub of: Vec<u32>,
-    /// Node count of each expert (descending).
+    /// Node count of each component (descending).
     pub nodes: Vec<u32>,
     pub trapped: Vec<bool>,
-    /// Weak group of each expert, numbered by its smallest expert.
+    /// Weak group of each component, numbered by its smallest component.
     pub group: Vec<u32>,
 }
 
-impl Experts {
+impl Components {
     pub fn len(&self) -> usize {
         self.nodes.len()
     }
@@ -144,9 +144,9 @@ impl Experts {
     }
 
     /// Numbers the components (`comp`, any ids) and finds the trapped ones. `key[v]` orders
-    /// nodes for the tie-break (its smallest key over an expert's nodes); `joined` lists
+    /// nodes for the tie-break (its smallest key over a component's nodes); `joined` lists
     /// node pairs that a road joins, ignoring direction.
-    pub fn new<K: Ord + Copy>(comp: &[u32], key: impl Fn(usize) -> K, joined: impl Iterator<Item = (u32, u32)>) -> Experts {
+    pub fn new<K: Ord + Copy>(comp: &[u32], key: impl Fn(usize) -> K, joined: impl Iterator<Item = (u32, u32)>) -> Components {
         let k = comp.iter().map(|&c| c as usize + 1).max().unwrap_or(0);
         let mut size = vec![0u32; k];
         let mut best: Vec<Option<K>> = vec![None; k];
@@ -170,11 +170,11 @@ impl Experts {
         for (a, b) in joined {
             dsu.union(of[a as usize], of[b as usize]);
         }
-        // The root of each group is its smallest expert index, which is its largest
+        // The root of each group is its smallest component index, which is its largest
         // component (ties to the smaller index): it is served, every other one is trapped.
         let group: Vec<u32> = (0..nodes.len() as u32).map(|e| dsu.find(e)).collect();
         let trapped: Vec<bool> = group.iter().enumerate().map(|(e, &g)| g != e as u32).collect();
-        Experts { of, nodes, trapped, group }
+        Components { of, nodes, trapped, group }
     }
 }
 
@@ -189,7 +189,7 @@ mod tests {
         let g = Csr::new(7, arcs.iter().copied());
         let comp = scc(&g);
         let keys = [10, 11, 12, 13, 14, 1, 2];
-        let e = Experts::new(&comp, |v| keys[v], arcs.iter().copied());
+        let e = Components::new(&comp, |v| keys[v], arcs.iter().copied());
         assert_eq!(e.nodes, [3, 2, 2]);
         // Ties by smallest key: the island (key 1) before the pocket (key 13).
         assert_eq!(e.of, [0, 0, 0, 2, 2, 1, 1]);

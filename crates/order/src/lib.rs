@@ -1,5 +1,5 @@
 //! Node orders and cells (SPEC §5). An `Orderer` gives a contraction order; `plan` decides
-//! whether an expert is built in one piece or as cells, and orders each block.
+//! whether a component is built in one piece or as cells, and orders each block.
 
 pub mod cells;
 pub mod elim;

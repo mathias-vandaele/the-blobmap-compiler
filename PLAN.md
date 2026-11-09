@@ -41,7 +41,7 @@ Each crate gets unit tests as it lands. "Old" is `~/Work/blobmap/blobmap-compile
      their directions), and the restriction parsing of old `edge/edge.rs`.
    - **New:** keeping via-way restrictions (one or more via ways) instead of skipping
      them.
-5. **`graph`**: the mode-family graphs and experts.
+5. **`graph`**: the mode-family graphs and their components.
    - **Ports:** old `graph` and `edge` (CAR turn graph, OSRM turn costs, u-turns,
      node-via restrictions), the ACTIVE union graph, SCC.
    - **New:**
@@ -50,7 +50,7 @@ Each crate gets unit tests as it lands. "Old" is `~/Work/blobmap/blobmap-compile
        `copy_of`, `copies`).
      - **Per-way rounding** (SPEC §7) on the stored `f32` times.
      - **Trapped detection:** see the reading under "Open items".
-     - **Expert numbering** (FORMAT §4).
+     - **Component numbering** (FORMAT §4).
 6. **`order`**: the node order and cells.
    - **Ports:** RoutingKit inertial-flow nested dissection, vendored with its OpenMP
      patch, whose order is bit-identical across thread counts (old `order`).
@@ -84,8 +84,8 @@ Each crate gets unit tests as it lands. "Old" is `~/Work/blobmap/blobmap-compile
 10. **`build`**: the stages behind a `Stage` trait.
     - **Rewrites:** old `pipeline`.
     - **New:**
-      - expert groups;
-      - the model writer (packs, entries, shards, manifest, `LICENSES`);
+      - packs shared by small components;
+      - the model writer (packs, shards, manifest, `LICENSES`);
       - the data report (per-country and per-category counts, trapped components, `NONE16`
         places);
       - the build report (wall time and peak RSS per stage, largest pack per family);
@@ -148,8 +148,8 @@ outside the read-only reference folders.
         SPEC §4);
       - the pairs answered `DifferentComponent` are only those a real island or a ferry
         separates;
-    - no ID unserved because of its expert: the IDs per reason code, Corsica's and the
-      islands' served counts, and the largest experts that serve no ID.
+    - no ID unserved because of its component: the IDs per reason code, Corsica's and the
+      islands' served counts, and the largest components that serve no ID.
 - **4. Fallback.**
   - **Build:** Hauts-de-France, France, and one `.pbf` covering France, Belgium,
     Luxembourg, Switzerland and Germany, each with the coarsening fallback forced, and
@@ -173,5 +173,5 @@ outside the read-only reference folders.
 - **6. World.**
   - **Gate:**
     - built;
-    - experts per continent listed from the expert table;
+    - components per continent listed from the component tensor;
     - the hardware choice for serving written down from the measured sizes.

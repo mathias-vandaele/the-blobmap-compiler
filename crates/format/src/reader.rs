@@ -264,7 +264,7 @@ mod tests {
         let vw = w.write_unit(&v).unwrap();
         assert!(uw.shards.iter().all(|s| !vw.shards.contains(s)), "units never share a shard");
         w.finish().unwrap();
-        std::fs::write(dir.join(crate::MANIFEST_FILE), "{\"format\":\"blobmap-model\",\"format_version\":\"2.0.0\",\"unknown\":1}")
+        std::fs::write(dir.join(crate::MANIFEST_FILE), "{\"format\":\"blobmap-model\",\"format_version\":\"3.0.0\",\"unknown\":1}")
             .unwrap();
         let m = Model::open(&dir).unwrap();
         assert_eq!(&*m.get::<u32>("a/big").unwrap(), &big[..]);

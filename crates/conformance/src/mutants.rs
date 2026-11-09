@@ -48,7 +48,13 @@ pub const MODEL_MUTANTS: &[Mutant] = &[
     Mutant { name: "turn cost raised", tensor: "road/car/p0/car.turn_cost", size: 2, edit: |b| u16s(b, |x| Some(x + 7)) },
     Mutant { name: "walk road weight raised", tensor: "road/active/p0/walk.w", size: 2, edit: |b| u16s(b, |x| (x != INF).then(|| x + 1)) },
     Mutant { name: "walk offset raised", tensor: "vocab/active/walk.off", size: 2, edit: |b| u16s(b, |x| (x != INF && x > 0).then(|| x + 1)) },
-    Mutant { name: "car expert of an ID", tensor: "vocab/car/car.expert", size: 4, edit: |b| u32s(b, 0, |x| (x != u32::MAX).then_some(u32::MAX)) },
+    Mutant { name: "car segment of an ID", tensor: "vocab/car/car.seg", size: 4, edit: |b| u32s(b, 0, |x| (x != u32::MAX).then_some(u32::MAX)) },
+    Mutant { name: "car component of a node", tensor: "road/car/nodes/component", size: 4, edit: |b| {
+        let Some(k) = (b.len() / 4).checked_sub(1) else { return false };
+        let x = u32::from_le_bytes(b[4 * k..4 * k + 4].try_into().unwrap());
+        b[4 * k..4 * k + 4].copy_from_slice(&(x + 1).to_le_bytes());
+        true
+    } },
     Mutant { name: "address IDs out of order", tensor: "vocab/ids/address", size: 16, edit: |b| {
         if b.len() < 32 {
             return false;

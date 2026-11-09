@@ -63,10 +63,10 @@ impl Hasher {
     }
 }
 
-/// Tensor hash = sha256("blobmap-tensor-2" ‖ 0x00 ‖ name ‖ 0x00 ‖ dtype ‖ 0x00 ‖ rank U8 ‖
+/// Tensor hash = sha256("blobmap-tensor-3" ‖ 0x00 ‖ name ‖ 0x00 ‖ dtype ‖ 0x00 ‖ rank U8 ‖
 /// dims U64 ‖ data). The data may come in pieces (chunks).
 pub fn tensor_hash<'a>(name: &str, dtype: Dtype, shape: &[u64], data: impl IntoIterator<Item = &'a [u8]>) -> Hash {
-    let mut h = Hasher::tagged("blobmap-tensor-2");
+    let mut h = Hasher::tagged("blobmap-tensor-3");
     h.str0(name).str0(dtype.name()).bytes(&[shape.len() as u8]);
     for d in shape {
         h.bytes(&d.to_le_bytes());
@@ -77,7 +77,7 @@ pub fn tensor_hash<'a>(name: &str, dtype: Dtype, shape: &[u64], data: impl IntoI
     h.finish()
 }
 
-/// A hash over a tag and a list of hashes (entry, road part, vocabulary part, model ID).
+/// A hash over a tag and a list of hashes (road part, vocabulary part, model ID).
 pub fn of_hashes<'a>(tag: &str, hashes: impl IntoIterator<Item = &'a Hash>) -> Hash {
     let mut h = Hasher::tagged(tag);
     for x in hashes {
@@ -86,10 +86,9 @@ pub fn of_hashes<'a>(tag: &str, hashes: impl IntoIterator<Item = &'a Hash>) -> H
     h.finish()
 }
 
-pub const ENTRY_TAG: &str = "blobmap-entry-2";
-pub const ROAD_TAG: &str = "blobmap-road-2";
-pub const VOCAB_TAG: &str = "blobmap-vocab-2";
-pub const MODEL_TAG: &str = "blobmap-model-2";
+pub const ROAD_TAG: &str = "blobmap-road-3";
+pub const VOCAB_TAG: &str = "blobmap-vocab-3";
+pub const MODEL_TAG: &str = "blobmap-model-3";
 
 /// `model_id` (FORMAT §9).
 pub fn model_id(road: &Hash, vocab: &Hash) -> Hash {

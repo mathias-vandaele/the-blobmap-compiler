@@ -15,9 +15,9 @@ pub fn all() -> Vec<Scenario> {
     vec![toy(), town(), cap(), viaway(), deadend(), fragment(), cells()]
 }
 
-fn build_toml(target: u64, budget: u64, group: u64, order: Option<&[i64]>) -> String {
+fn build_toml(target: u64, budget: u64, pack: u64, order: Option<&[i64]>) -> String {
     let mut s = format!(
-        "[build]\nshard_target_bytes = {target}\nshard_max_bytes = {}\nmemory_budget_bytes = {budget}\ngroup_max_nodes = {group}\n",
+        "[build]\nshard_target_bytes = {target}\nshard_max_bytes = {}\nmemory_budget_bytes = {budget}\npack_max_nodes = {pack}\n",
         2 * target
     );
     if let Some(o) = order {
@@ -96,7 +96,7 @@ fn toy() -> Scenario {
         extent: None,
         variants: vec![Variant { name: "default", build_toml: build_toml(1 << 20, 1 << 30, 0, Some(&order)) }],
         checks: vec![
-            Check::Hierarchy { family: "active", expert: 0, links: 17, levels: 5 },
+            Check::Hierarchy { family: "active", component: 0, links: 17, levels: 5 },
             Check::Grid { mode: "walk", ids: ids.clone(), times },
             Check::Reason { id: ids[0].clone(), mode: "bike", reason: "NoEligibleRoad" },
         ],

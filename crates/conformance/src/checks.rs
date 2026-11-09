@@ -1,4 +1,4 @@
-//! The checks of SPEC §11 that compare a model with the reference: experts, the snapping
+//! The checks of SPEC §11 that compare a model with the reference: components, the snapping
 //! re-check, re-customization, distances against Dijkstra, and the scenario's own facts.
 
 use std::cmp::Reverse;
@@ -9,7 +9,7 @@ use blobmap_fixtures::Check;
 use blobmap_format::{INF, NONE};
 use blobmap_runtime::query::Source;
 use blobmap_runtime::recustomize::{RoadRef, customize};
-use blobmap_runtime::{Dir, Expert, Fam, Runtime};
+use blobmap_runtime::{Dir, Component, Fam, Runtime};
 use blobmap_snap::parts;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
@@ -20,14 +20,13 @@ use crate::expected::{Expected, reason_name, uuid};
 use crate::reference::Reference;
 use crate::report::Report;
 
-pub fn experts(rt: &Runtime, r: &Reference, rep: &mut Report) {
-    let o = rep.check("experts against the reference (SPEC §5)");
-    for (fam, e) in [(Fam::Car, &r.car_experts), (Fam::Active, &r.active_experts)] {
+pub fn components(rt: &Runtime, r: &Reference, rep: &mut Report) {
+    let o = rep.check("components against the reference (SPEC §5)");
+    for (fam, e) in [(Fam::Car, &r.car_components), (Fam::Active, &r.active_components)] {
         let t = &rt.tables[&fam];
         o.count();
-        o.expect(t.nodes == e.nodes, || format!("{}: expert sizes {:?} != {:?}", fam.name(), t.nodes, e.nodes));
-        let tr: Vec<bool> = t.trapped.iter().map(|&x| x == 1).collect();
-        o.expect(tr == e.trapped, || format!("{}: trapped flags differ", fam.name()));
+        let nodes: Vec<u32> = (0..t.components() as u32).map(|x| t.nodes(x)).collect();
+        o.expect(nodes == e.nodes, || format!("{}: component sizes {nodes:?} != {:?}", fam.name(), e.nodes));
     }
 }
 
@@ -39,12 +38,12 @@ fn expected_entry(r: &Reference, m: usize, piece: usize, frac: f64) -> ([Option<
         let g = &r.car;
         let e = r.modes[m].at.iter().flatten().next().map(|_| ()).is_some();
         let _ = e;
-        let x = blobmap_snap::modes::car_expert(g, &r.car_experts, piece).unwrap();
+        let x = blobmap_snap::modes::car_component(g, &r.car_components, piece).unwrap();
         let mut keys = [None, None];
         let mut off = [INF; 4];
         for d in 0..2 {
             let s = g.seg_of_piece[piece][d];
-            if s == NONE || r.car_experts.of[s as usize] != x {
+            if s == NONE || r.car_components.of[s as usize] != x {
                 continue;
             }
             keys[d] = Some((g.way[s as usize], g.seq[s as usize], g.dir[s as usize]));
@@ -113,19 +112,19 @@ pub fn snapping(rt: &Runtime, r: &Reference, rep: &mut Report) -> Result<()> {
             o.count();
             let stored_reason = mv.reasons.binary_search_by_key(&(i as u32), |x| x.0).ok().map(|j| (mv.reasons[j].1, mv.reasons[j].2));
             match mode.at[i] {
-                Err((4, _)) => o.expect(mv.expert[i] == NONE && v.status_of(i as u32) == 4, || {
+                Err((4, _)) => o.expect(mv.component[i] == NONE && v.status_of(i as u32) == 4, || {
                     format!("{} {}: not a filtered place", mode.name, uuid(&r.ids[i]))
                 }),
                 Err((c, d)) => o
-                    .expect(mv.expert[i] == NONE && stored_reason.is_some_and(|(sc, sd)| sc == c && sd.to_bits() == d.to_bits()), || {
+                    .expect(mv.component[i] == NONE && stored_reason.is_some_and(|(sc, sd)| sc == c && sd.to_bits() == d.to_bits()), || {
                         format!("{} {}: reason {stored_reason:?}, expected ({c}, {d})", mode.name, uuid(&r.ids[i]))
                     }),
                 Ok(e) => {
-                    if mv.expert[i] != e.expert {
-                        o.fail(format!("{} {}: expert {} != {}", mode.name, uuid(&r.ids[i]), mv.expert[i], e.expert));
+                    if mv.component[i] != e.component {
+                        o.fail(format!("{} {}: component {} != {}", mode.name, uuid(&r.ids[i]), mv.component[i], e.component));
                         continue;
                     }
-                    let x = rt.expert(mv.info.fam, e.expert)?;
+                    let x = rt.component(mv.info.fam, e.component)?;
                     let (keys, off) = expected_entry(r, m, e.piece as usize, e.frac);
                     let stored: [Option<(i64, u32, u8)>; 2] = if mode.car {
                         [0, 1].map(|d| {
@@ -153,7 +152,7 @@ pub fn snapping(rt: &Runtime, r: &Reference, rep: &mut Report) -> Result<()> {
 }
 
 /// The CCH sweep of FORMAT §8 with given link weights, from one node.
-fn sweep(e: &Expert, up: &[u16], down: &[u16], src: u32) -> Vec<u16> {
+fn sweep(e: &Component, up: &[u16], down: &[u16], src: u32) -> Vec<u16> {
     let mut l = vec![INF; e.n];
     l[src as usize] = 0;
     for v in (0..e.n as u32).rev() {
@@ -173,8 +172,8 @@ fn sweep(e: &Expert, up: &[u16], down: &[u16], src: u32) -> Vec<u16> {
     l
 }
 
-/// Dijkstra over an expert's own arcs with road weights w (CAR start view).
-fn dijkstra(e: &Expert, w: &[u16], src: u32) -> Vec<u16> {
+/// Dijkstra over a component's own arcs with road weights w (CAR start view).
+fn dijkstra(e: &Component, w: &[u16], src: u32) -> Vec<u16> {
     let mut d = vec![u32::MAX; e.n];
     d[src as usize] = 0;
     let mut h = BinaryHeap::from([Reverse((0u32, src))]);
@@ -205,14 +204,14 @@ pub fn recustomization(rt: &Runtime, rep: &mut Report) -> Result<()> {
     for fam in [Fam::Car, Fam::Active] {
         let o = rep.check(&format!("{}: re-customization from the bytes", fam.name()));
         let stored = rt.reround(fam, &|r, m| rt.stored_time(fam, r, m))?;
-        for x in 0..rt.experts(fam) as u32 {
-            let e = rt.expert(fam, x)?;
+        for x in 0..rt.components(fam) as u32 {
+            let e = rt.component(fam, x)?;
             for m in 0..e.up.len() {
                 o.count();
                 let w = &stored.w[m][x as usize];
-                o.expect(*w == e.w[m], || format!("expert {x} metric {m}: re-rounded weights differ"));
+                o.expect(*w == e.w[m], || format!("component {x} metric {m}: re-rounded weights differ"));
                 let (up, down) = customize(&e, w)?;
-                o.expect(up == e.up[m] && down == e.down[m], || format!("expert {x} metric {m}: re-customized links differ"));
+                o.expect(up == e.up[m] && down == e.down[m], || format!("component {x} metric {m}: re-customized links differ"));
             }
         }
         if fam == Fam::Active {
@@ -221,13 +220,13 @@ pub fn recustomization(rt: &Runtime, rep: &mut Report) -> Result<()> {
         }
         let o = rep.check(&format!("{}: random metrics against Dijkstra", fam.name()));
         let random = |r: RoadRef, m: usize| -> f32 {
-            let seed = ((r.expert as u64) << 40) ^ ((r.index as u64) << 8) ^ m as u64;
+            let seed = ((r.component as u64) << 40) ^ ((r.index as u64) << 8) ^ m as u64;
             let mut g = rand::rngs::StdRng::seed_from_u64(seed);
             if g.random_bool(0.05) { f32::INFINITY } else { g.random_range(0.0f32..400.0) }
         };
         let rw = rt.reround(fam, &random)?;
-        for x in 0..rt.experts(fam) as u32 {
-            let e = rt.expert(fam, x)?;
+        for x in 0..rt.components(fam) as u32 {
+            let e = rt.component(fam, x)?;
             for m in 0..e.up.len() {
                 let w = &rw.w[m][x as usize];
                 let (up, down) = customize(&e, w)?;
@@ -235,7 +234,7 @@ pub fn recustomization(rt: &Runtime, rep: &mut Report) -> Result<()> {
                     o.count();
                     let a = sweep(&e, &up, &down, src);
                     let b = dijkstra(&e, w, src);
-                    o.expect(a == b, || format!("expert {x} metric {m} from {src}: CCH and Dijkstra differ"));
+                    o.expect(a == b, || format!("component {x} metric {m} from {src}: CCH and Dijkstra differ"));
                 }
             }
         }
@@ -320,12 +319,12 @@ pub fn via_copies(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()> {
     let mut prefixes: Vec<&[u32]> = g.forbidden.iter().flat_map(|f| (2..f.len()).map(move |j| &f[..j])).collect();
     prefixes.sort_unstable();
     prefixes.dedup();
-    // IDs by the segment of each slot, in the ID's expert.
+    // IDs by the segment of each slot, in the ID's component.
     let mut on: Vec<(u32, u32)> = Vec::new();
     for (i, at) in mode.at.iter().enumerate() {
         if let Ok(e) = at {
             for s in g.seg_of_piece[e.piece as usize] {
-                if s != NONE && r.car_experts.of[s as usize] == e.expert {
+                if s != NONE && r.car_components.of[s as usize] == e.component {
                     on.push((s, i as u32));
                 }
             }
@@ -410,15 +409,15 @@ pub fn via_segments(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()>
     let mut pairs: Vec<(u32, u32)> = prefixes.iter().map(|p| (p[0], *p.last().unwrap())).collect();
     pairs.sort_unstable();
     pairs.dedup();
-    let x_of = |s: u32| r.car_experts.of[s as usize];
+    let x_of = |s: u32| r.car_components.of[s as usize];
     let elsewhere = pairs.iter().filter(|p| x_of(p.0) != x_of(p.1)).count();
     pairs.retain(|p| x_of(p.0) == x_of(p.1));
-    // Per expert, the layout id of each original segment by its road key.
+    // Per component, the layout id of each original segment by its road key.
     let key = |s: u32| (g.way[s as usize], g.seq[s as usize], g.dir[s as usize]);
     let mut layout: BTreeMap<u32, Vec<((i64, u32, u8), u32)>> = BTreeMap::new();
     for &(_, b) in &pairs {
         if let std::collections::btree_map::Entry::Vacant(v) = layout.entry(x_of(b)) {
-            let e = rt.expert(Fam::Car, x_of(b))?;
+            let e = rt.component(Fam::Car, x_of(b))?;
             let mut l: Vec<_> = (0..e.n as u32)
                 .filter(|&v| e.kind[v as usize] != 2)
                 .map(|v| ((e.way[v as usize], e.way_seq[v as usize], e.way_dir[v as usize]), v))
@@ -433,8 +432,8 @@ pub fn via_segments(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()>
     };
     let want: Vec<u16> = pairs.par_iter().map(|&(a, b)| ex.car_segments(a, b)).collect();
     // One sweep per first segment (from) and per original (to).
-    let label = |x: u32, seeds: &mut dyn Iterator<Item = u32>, dir: Dir| -> Result<(std::sync::Arc<Expert>, Vec<u16>)> {
-        let e = rt.expert(Fam::Car, x)?;
+    let label = |x: u32, seeds: &mut dyn Iterator<Item = u32>, dir: Dir| -> Result<(std::sync::Arc<Component>, Vec<u16>)> {
+        let e = rt.component(Fam::Car, x)?;
         let mut l = vec![INF; e.n];
         for v in seeds {
             l[v as usize] = 0;
@@ -449,7 +448,7 @@ pub fn via_segments(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()>
         }
         m.into_values().collect()
     };
-    let missing = |s: u32| anyhow::anyhow!("car segment {s} (way {}) has no node in its expert", g.way[s as usize]);
+    let missing = |s: u32| anyhow::anyhow!("car segment {s} (way {}) has no node in its component", g.way[s as usize]);
     let from: Vec<Result<Vec<(usize, u16)>>> = group(|p| p.0)
         .par_iter()
         .map(|ks| {
@@ -468,7 +467,7 @@ pub fn via_segments(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()>
         .map(|ks| {
             let b = pairs[ks[0]].1;
             let nb = node(b).ok_or_else(|| missing(b))?;
-            let e = rt.expert(Fam::Car, x_of(b))?;
+            let e = rt.component(Fam::Car, x_of(b))?;
             let (_, l) = label(x_of(b), &mut e.arrivals(nb, f), Dir::To)?;
             ks.iter()
                 .map(|&i| {
@@ -479,7 +478,7 @@ pub fn via_segments(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()>
         })
         .collect();
     let o = rep.check(&format!(
-        "car: every via-way copy, segment to segment, both directions ({} prefixes, {} first and last segment pairs; {elsewhere} with the first segment in another expert)",
+        "car: every via-way copy, segment to segment, both directions ({} prefixes, {} first and last segment pairs; {elsewhere} with the first segment in another component)",
         prefixes.len(),
         pairs.len() + elsewhere
     ));
@@ -509,11 +508,11 @@ pub fn scenario(rt: &Runtime, ex: &Expected, checks: &[Check], cells_variant: bo
     for c in checks {
         o.count();
         match c {
-            Check::Hierarchy { family, expert, links, levels } => {
+            Check::Hierarchy { family, component, links, levels } => {
                 let fam = if *family == "car" { Fam::Car } else { Fam::Active };
-                let e = rt.expert(fam, *expert)?;
-                o.expect(e.up_head.len() as u64 == *links && rt.tables[&fam].levels[*expert as usize] == *levels, || {
-                    format!("{family} expert {expert}: {} links, {} levels", e.up_head.len(), rt.tables[&fam].levels[*expert as usize])
+                let e = rt.component(fam, *component)?;
+                o.expect(e.up_head.len() as u64 == *links && rt.tables[&fam].levels(*component) == *levels, || {
+                    format!("{family} component {component}: {} links, {} levels", e.up_head.len(), rt.tables[&fam].levels(*component))
                 });
             }
             Check::Grid { mode, ids, times } => {
@@ -591,8 +590,8 @@ pub fn scenario(rt: &Runtime, ex: &Expected, checks: &[Check], cells_variant: bo
                 o.expect(ok, || format!("{id} does not stand at a node for {mode}"));
             }
             Check::Trapped { family, at_least } => {
-                let fam = if *family == "car" { Fam::Car } else { Fam::Active };
-                let n = rt.tables[&fam].trapped.iter().filter(|&&t| t == 1).count();
+                let e = if *family == "car" { &ex.r.car_components } else { &ex.r.active_components };
+                let n = e.trapped.iter().filter(|&&t| t).count();
                 o.expect(n >= *at_least, || format!("{family}: {n} trapped, expected at least {at_least}"));
             }
             Check::Restrictions { at_least } => {
@@ -607,9 +606,9 @@ pub fn scenario(rt: &Runtime, ex: &Expected, checks: &[Check], cells_variant: bo
                 let m = rt.mode("car")?;
                 let ok = rt.resolve(id).is_ok_and(|i| {
                     let mv = &rt.vocab.modes[m];
-                    let x = mv.expert[i as usize];
+                    let x = mv.component[i as usize];
                     x != NONE
-                        && rt.expert(Fam::Car, x).is_ok_and(|e| {
+                        && rt.component(Fam::Car, x).is_ok_and(|e| {
                             mv.node[i as usize].iter().any(|&s| s != NONE && e.copy_first[s as usize + 1] > e.copy_first[s as usize])
                         })
                 });
@@ -626,8 +625,8 @@ pub fn scenario(rt: &Runtime, ex: &Expected, checks: &[Check], cells_variant: bo
             Check::Cells { family } => {
                 if cells_variant {
                     let fam = if *family == "car" { Fam::Car } else { Fam::Active };
-                    let e = rt.expert(fam, 0)?;
-                    o.expect(e.blocks.iter().filter(|b| b.kind == 2).count() >= 2, || format!("{family} expert 0 is not built as cells"));
+                    let e = rt.component(fam, 0)?;
+                    o.expect(e.blocks.iter().filter(|b| b.kind == 2).count() >= 2, || format!("{family} component 0 is not built as cells"));
                 }
             }
         }

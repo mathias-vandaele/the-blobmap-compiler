@@ -1,4 +1,4 @@
-//! Cells (SPEC §5): an expert too large to build at once is ordered by the same nested
+//! Cells (SPEC §5): a component too large to build at once is ordered by the same nested
 //! dissection as in one piece, on its fine graph, and the elimination tree of that order is
 //! cut where subtrees fit the budget. The subtrees below the cut, packed together, are the
 //! cells; the nodes above it are the top block. Different subtrees of an elimination tree
@@ -6,7 +6,7 @@
 //! reordering of the same elimination tree and the hierarchy is the one-piece hierarchy (its
 //! links, its fill).
 //!
-//! When the fine graph is too large to order within the budget, the expert is coarsened
+//! When the fine graph is too large to order within the budget, the component is coarsened
 //! instead: the coarse graph is ordered and its elimination tree cut the same way, the
 //! coarse nodes above the cut, lifted to the fine graph, are the top block, and each block
 //! is ordered on its own (the top block by the coarse order, which is the separator
@@ -24,7 +24,7 @@ pub enum Kind {
     Cell = 2,
 }
 
-/// A block of an expert: its nodes in contraction order.
+/// A block of a component: its nodes in contraction order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block {
     pub kind: Kind,
@@ -114,9 +114,9 @@ fn matching(adj: &Adj, w: &[u64], cap: u64) -> (Vec<u32>, usize) {
     (cluster, k as usize)
 }
 
-/// The blocks of an expert: one whole block if it has at most `max_cell` nodes, else a top
+/// The blocks of a component: one whole block if it has at most `max_cell` nodes, else a top
 /// block and cells of at most `max_cell` nodes each: from the fine graph's order when the
-/// expert has at most `nd_max` nodes, else from a coarsened graph.
+/// component has at most `nd_max` nodes, else from a coarsened graph.
 pub fn plan(g: &Graph, orderer: &dyn Orderer, max_cell: usize, nd_max: usize) -> Vec<Block> {
     if g.n <= max_cell.max(1) {
         return vec![Block { kind: Kind::Whole, nodes: orderer.order(g) }];
@@ -182,7 +182,7 @@ fn fine(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
     out
 }
 
-/// Cells from a coarsened graph, for an expert too large to order at once.
+/// Cells from a coarsened graph, for a component too large to order at once.
 fn coarse(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
     let fine = Adj::new(g.n, g.tail.iter().zip(g.head).map(|(&a, &b)| (a, b, 1)));
     // Coarsen to clusters of at most a quarter cell, until about 16 fine nodes per cluster.

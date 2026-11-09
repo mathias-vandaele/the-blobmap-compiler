@@ -1,12 +1,14 @@
-# BlobMap model format 2.0.0
+# BlobMap model format 3.0.0
 
 This is the byte-level contract between `blobc` and every runtime. SPEC.md says what a model
 means; this document says only how it is laid out in bytes. Section references such as
 "SPEC §7" point to SPEC.md. Where this document seems to say more than SPEC about meaning,
 SPEC wins and this document is wrong.
 
-- **Format name:** `blobmap-model`. **Version:** `2.0.0` (§12).
-- **Status:** approved at milestone 1 (SPEC §13), 2026-11-08.
+- **Format name:** `blobmap-model`. **Version:** `3.0.0` (§12).
+- **Status:** 2.0.0 approved at milestone 1 (SPEC §13), 2026-11-08. 3.0.0, 2026-11-09: one
+  hierarchy per family over all its components, with global layout ids; no experts, groups
+  or manifest entries.
 
 Contents: §1 conventions · §2 files · §3 manifest · §4 storage units and names · §5 road part ·
 §6 re-customization · §7 vocabulary part · §8 meaning of the bytes · §9 hashes ·
@@ -25,7 +27,7 @@ Contents: §1 conventions · §2 files · §3 manifest · §4 storage units and 
   No master time is NaN or negative, and every finite one is at most 65534, because long
   pieces are cut (SPEC §7).
 - **`rnd(x)`**, for a non-negative `f64` x: the nearest integer, ties away from zero (SPEC §7).
-- **Layout id:** a `U32` node number within one expert (§4). **Row:** a position in a pack's
+- **Layout id:** a `U32` node number within one family (§4). **Row:** a position in a pack's
   per-node tensors. **Local link index:** a `U32` position in one pack's per-link tensors.
 - **Strings:** UTF-8 bytes concatenated in a `U8` tensor `<x>.bytes`, plus `U32` offsets
   `<x>.first` of length n + 1; string i is `bytes[first[i] .. first[i+1]]`.
@@ -57,7 +59,7 @@ Each shard is a standard safetensors file:
 - the tensor data.
 
 The header holds:
-- `__metadata__` = `{"format":"blobmap-shard","format_version":"2.0.0"}`;
+- `__metadata__` = `{"format":"blobmap-shard","format_version":"3.0.0"}`;
 - one entry per tensor, `{"dtype","shape","data_offsets"}`;
 - no whitespace other than the padding. `__metadata__` comes first, then the tensors in
   data order.
@@ -87,7 +89,7 @@ cover logical tensors, so chunking never changes a hash.
   "chunks": { "<logical name>": ["<name>@0", "<name>@1"] },
   "metadata": {
     "format": "blobmap-index",
-    "format_version": "2.0.0",
+    "format_version": "3.0.0",
     "total_size": 0
   },
   "shards": [ { "bytes": 0, "file": "model-00001-of-00003.safetensors", "sha256": "…" } ],
@@ -108,12 +110,11 @@ A **unit** is one of:
 - one pack (§4);
 - the vocabulary part (§7).
 
-A manifest entry is a run of consecutive pack units. "Never mixes" in SPEC §8 holds because
-no shard holds two units.
+"Never mixes" in SPEC §8 holds because no shard holds two units.
 
 The compiler assigns tensors to shards in this order:
 1. **Units, in order:** each family's road tables, `car` then `active`; then the packs,
-   in manifest-entry order and pack order inside an entry; then the vocabulary part.
+   `car` then `active`, each family's in pack order; then the vocabulary part.
 2. **Within a unit,** tensors in full-name order.
 3. **Filling:** a unit's tensors fill shards one after the other. A new shard starts when
    the next tensor (or chunk) would push the current one past `build.shard_target_bytes`,
@@ -127,17 +128,16 @@ So a shard never mixes units (SPEC §8). Chunks are at most the target, so no sh
 | key | type | meaning |
 | --- | --- | --- |
 | `format` | string | `"blobmap-model"` |
-| `format_version` | string | `"2.0.0"` |
+| `format_version` | string | `"3.0.0"` |
 | `model_id` | string | §9; the identity of the model's content |
 | `inputs_hash` | string | §9; the identity of what the answers depend on, which keys golden files (§11) |
 | `spec_version` | string | the version of SPEC.md the model was built to, read from its "SPEC version" line (`"2.0.0"`) |
 | `compiler` | object | `{name: "blobc", version, commit, dirty}`: commit is the 40-hex git commit, dirty a boolean |
 | `inputs` | object | below |
 | `config` | object | below |
-| `build` | object | `{shard_target_bytes, shard_max_bytes, memory_budget_bytes, group_max_nodes}`: options that shape the output without changing answers |
-| `families` | object | family → `{graph, metrics}` |
+| `build` | object | `{shard_target_bytes, shard_max_bytes, memory_budget_bytes, pack_max_nodes}`: options that shape the output without changing answers |
+| `families` | object | family → `{graph, metrics, nodes, links, components, packs}` |
 | `modes` | object | mode → `{family, metric, snap_radius_m}` |
-| `experts` | array | the manifest entries, below |
 | `parts` | object | `{road: {hash}, vocabulary: {hash, road_hash}}` (§9) |
 | `attribution` | array of strings | attribution strings (SPEC §12) |
 | `licenses_sha256` | string | SHA-256 of the `LICENSES` file |
@@ -152,58 +152,53 @@ So a shard never mixes units (SPEC §8). Chunks are at most the target, so no sh
 - **`config`:** `{profiles: {car: {name, sha256}, active: {name, sha256}}, place_rules: {name,
   sha256}}`. Each `sha256` covers the config file's bytes.
 - **`families`:**
-  - `car`: `{"graph": "edge", "metrics": ["car"]}`;
-  - `active`: `{"graph": "node", "metrics": ["bike", "walk"]}`.
+  - `car`: `{"graph": "edge", "metrics": ["car"], …}`;
+  - `active`: `{"graph": "node", "metrics": ["bike", "walk"], …}`.
   - The metric list is data. A later model may list more metrics (SPEC §4); a runtime ignores
     metrics it does not serve.
+  - `nodes`: the family's layout nodes; `links`: its links (CCH arcs); `components`: its
+    components (§4); `packs`: its packs. All are informative: they equal what the family's
+    tensors give.
 - **`modes`:** `car → {family: car, metric: car}`, `bike` and `walk → {family: active, metric:
   <same name>}`. `snap_radius_m` is copied from the profile and is informative.
-- **`experts`:** one object per manifest entry. An entry is a single expert, or an expert
-  group (SPEC §2):
-
-| key | meaning |
-| --- | --- |
-| `family` | `car` or `active` |
-| `kind` | `"expert"` or `"group"` |
-| `experts` | `[first, count]`: the family expert indices it holds (§4) |
-| `components` | `count`; 1 for `kind = expert` |
-| `nodes`, `links` | layout nodes and links (CCH arcs), summed over its experts |
-| `levels` | the longest top-down chain of levels in any of its experts (§5.2) |
-| `cells` | number of cell blocks; 0 for a group or an expert built in one piece |
-| `packs` | `[first, count]`: its packs (§4) |
-| `shards` | its shard file names, in order |
-| `hash` | the entry hash (§9) |
-
-  Entries are ordered by family (`car`, then `active`), then by first expert index.
 
 ## 4. Storage units and names
 
-- **Expert index:** per family, the experts (SPEC §2, §5) are numbered from 0, by node
-  count descending. Ties go to the expert holding the smallest road key `(way, way_seq,
-  way_dir)` (§5.3, §5.4). Expert 0 is the largest.
+Each family has one graph and one hierarchy over all its components (SPEC §5). Its
+elimination tree is a forest with one tree per component: components share no link and no
+level.
+
+- **Component index:** per family, the components (SPEC §2, §5) are numbered from 0, by node
+  count descending. Ties go to the component holding the smallest road key `(way, way_seq,
+  way_dir)` (§5.3, §5.4). Component 0 is the largest.
   - **CAR:** the keys of its segments. A copy has its original's key; an original comes
     before its copies, and copies of one segment are ordered by their prefixes, compared
     as sequences of segment keys.
-  - **ACTIVE:** the keys of the roads at its nodes, inside the expert or in the cross
+  - **ACTIVE:** the keys of the roads at its nodes, inside the component or in the cross
     table, extended to `(way, way_seq, way_dir, end)` with `end` 0 at the road's tail and
     1 at its head.
-- **Layout ids:** each expert numbers its own nodes 0 .. n−1 (§5.2). Every reference to a
-  node is a layout id within the expert at hand.
-- **Block:** a contiguous range of one expert's layout ids, with its own levels.
-  - An expert built in one piece is one block (kind 0, `whole`).
-  - An expert built as cells (SPEC §5) is block 0 (kind 1, `top`: every separator node),
+- **Layout ids:** each family numbers its nodes 0 .. n−1. Each component is a consecutive
+  range of layout ids, and the ranges follow the component index: component 0 first. Every
+  reference to a node, in any tensor, is a layout id of the family at hand.
+  - n must be below 2³² − 1, since layout ids are `U32` and `NONE` is reserved. The build
+    fails otherwise, and the build report gives n per family.
+- **Block:** a consecutive range of one component's layout ids, with its own levels.
+  - A component built in one piece is one block (kind 0, `whole`).
+  - A component built as cells (SPEC §5) is block 0 (kind 1, `top`: every separator node),
     then one block per cell (kind 2, `cell`), in layout-id order. The top block starts at
-    layout id 0.
+    the component's first layout id.
 - **Pack:** one group of safetensors tensors; the unit that tensors are stored in.
-  - A `kind = expert` entry has one pack per block.
-  - A `kind = group` entry has one pack holding every block of its experts. Each of those
-    experts is one whole block.
-  - Packs are numbered per family from 0, in entry order.
+  - Each block of a component built as cells, or of one with at least `pack_max_nodes`
+    nodes, is a pack of its own.
+  - The other components share packs: in component order, each pack takes the next
+    components while their nodes sum to at most `pack_max_nodes`. Each of them is one whole
+    block.
+  - Packs are numbered per family from 0, in layout-id order.
   - A pack's per-node tensors are its blocks' nodes concatenated in block order; a node's
     position there is its row. Per-link and per-road tensors use local indices within the
     pack.
 - **Link:** a CCH arc (SPEC §2 "links"). It is stored in the pack holding its lower node:
-  the endpoint with the larger layout id.
+  the endpoint with the larger layout id. Both ends are in the same component.
 
 **Link references.** No tensor stores a pack number for a link. A reference to a link is a
 local index, and the pack it indexes is always the pack of the link's lower node, which
@@ -217,8 +212,9 @@ be the other endpoint. Equivalently, link (v, u) with v > u is at
 `up_first[row(v)] + j` in v's pack, where j is the position of u in v's sorted row.
 
 **Which references cross packs.** Only cell → top:
-- An expert built in one piece, or one inside a group, has all its links in one pack.
-- In an expert built as cells, a cell node's upper neighbours are in its own cell or in the
+- A component built in one piece, alone in its pack or sharing one, has all its links in
+  that pack.
+- In a component built as cells, a cell node's upper neighbours are in its own cell or in the
   top block (§5.2). So a reference from a cell pack names either the cell pack or the top
   pack, never another cell.
 - When a cell is customized, its triangles write onto top-block links (§6.3). A runtime that
@@ -236,9 +232,9 @@ tensors (§12).
 
 | prefix | holds |
 | --- | --- |
-| `road/<family>/experts/` | the expert table (§5.1) |
+| `road/<family>/nodes/` | per layout id: its component (§5.1) |
 | `road/<family>/blocks/` | the block table (§5.1) |
-| `road/active/cross/` | ACTIVE roads between experts (§5.4) |
+| `road/active/cross/` | ACTIVE roads between components (§5.4) |
 | `road/<family>/p<k>/` | pack k (§5.2–§5.4); k in decimal without padding |
 | `vocab/` | the vocabulary part (§7) |
 
@@ -246,32 +242,31 @@ tensors (§12).
 
 ### 5.1 Family tables
 
-**`road/<family>/experts/`** (E experts):
+**`road/<family>/nodes/`** (n layout nodes):
 
 | tensor | dtype | shape | meaning |
 | --- | --- | --- | --- |
-| `nodes` | U32 | [E] | layout nodes of the expert |
-| `links` | U64 | [E] | links of the expert |
-| `levels` | U32 | [E] | its longest top-down chain of levels |
-| `trapped` | U8 | [E] | 1 if it is a trapped component (SPEC §5), else 0 |
-| `entry` | U32 | [E] | index of its manifest entry in `experts` |
-| `block_first` | U32 | [E + 1] | CSR into the block table; its blocks in layout-id order |
+| `component` | U32 | [n] | component index of the node (§4); non-decreasing, starting at 0, each step 0 or 1 |
 
-**`road/<family>/blocks/`** (B blocks, ordered by expert, then layout id):
+Two nodes are in the same component exactly when their `component` values are equal. That is
+the whole test for `DifferentComponent` (SPEC §9, §8 below).
+
+**`road/<family>/blocks/`** (B blocks, ordered by `id_first`):
 
 | tensor | dtype | shape | meaning |
 | --- | --- | --- | --- |
-| `expert` | U32 | [B] | owning expert |
 | `kind` | U8 | [B] | 0 whole, 1 top, 2 cell |
-| `id_first` | U32 | [B] | first layout id of the block |
+| `id_first` | U32 | [B] | first layout id of the block, strictly ascending |
 | `nodes` | U32 | [B] | node count; the block is layout ids `id_first .. id_first + nodes` |
 | `pack` | U32 | [B] | pack holding the block |
 | `row_first` | U32 | [B] | row of `id_first` in that pack |
 | `levels` | U32 | [B] | number of levels L of the block |
 | `level_base` | U32 | [B] | where the block's L + 1 level bounds start in the pack's `level_first` |
 
-To find node v of expert e: among the blocks `block_first[e] .. block_first[e+1]`, take the
-last one with `id_first ≤ v`. Its row is `row_first + (v − id_first)` in pack `pack`.
+The blocks cover the layout ids exactly, and no block spans two components.
+- **To find node v:** take the last block with `id_first ≤ v`. Its row is
+  `row_first + (v − id_first)` in pack `pack`.
+- **The blocks of component c:** those whose `id_first` lies in c's range of layout ids.
 
 ### 5.2 Pack: the hierarchy
 
@@ -289,12 +284,14 @@ Pack `road/<family>/p<k>/` with n rows, A links:
 - **Levels:** a block's levels cover its ids exactly, top level first. Both ends of a link
   are never in the same level of the same block.
   - Inside a block, an upper neighbour is in a smaller level.
-  - An upper neighbour in another block is in the top block (kind 1). Cells share no links.
+  - An upper neighbour in another block is in the top block (kind 1) of the same component.
+    Cells share no links.
   - A pass over layout ids in increasing order therefore visits every upper neighbour of v
     before v.
 - **Chordality:** if x and y are upper neighbours of v with y < x, the link (x, y) exists.
 - **Elimination tree:** the parent of v is its largest upper neighbour (the last entry of
-  its row), or none if v has no upper neighbour.
+  its row), or none if v has no upper neighbour. It is a forest: every link joins two nodes
+  of one component, so each component is one tree, rooted at its first layout id.
 - **Free choices of the compiler:** the order of nodes inside a level, and the numbering of
   cells. They are fixed per build (SPEC §10, determinism), but a runtime must not rely on
   them.
@@ -317,8 +314,8 @@ CAR layout nodes are directed road segments (SPEC §4); its roads are the segmen
 | `way` | I64 | [n] | OSM way id |
 | `way_dir` | U8 | [n] | 0 along the way's node order, 1 against it |
 | `way_seq` | U32 | [n] | position of the piece on the way, 0-based in node order; each part of a cut piece (SPEC §7, long pieces) counts as a piece |
-| `kind` | U8 | [n] | 0 road; 1 ferry: reserved, never written in 2.0 (SPEC §4); 2 via-way copy (below) |
-| `copy_of` | U32 | [n] | for a copy: layout id of its original, which is always in the same expert (SPEC §5); `NONE` for every original |
+| `kind` | U8 | [n] | 0 road; 1 ferry: reserved, never written in 3.0 (SPEC §4); 2 via-way copy (below) |
+| `copy_of` | U32 | [n] | for a copy: layout id of its original, which is always in the same component (SPEC §5); `NONE` for every original |
 | `copy_first` | U32 | [n + 1] | CSR by row into `copies` |
 | `copies` | U32 | [C] | for an original: layout ids of all its copies, ascending; empty for a copy |
 
@@ -328,10 +325,10 @@ Turns, by the row of the segment they leave (T turns):
 | --- | --- | --- | --- |
 | `turn_first` | U32 | [n + 1] | CSR by row |
 | `turn_head` | U32 | [T] | layout id of the segment the turn enters |
-| `car.turn_cost` | U16 | [T] | turn cost in whole seconds (SPEC §7). Never `INF` in 2.0, because a turn forbidden to car is absent (SPEC §4); `INF` is kept for a later metric of the family |
+| `car.turn_cost` | U16 | [T] | turn cost in whole seconds (SPEC §7). Never `INF` in 3.0, because a turn forbidden to car is absent (SPEC §4); `INF` is kept for a later metric of the family |
 | `turn_link` | U32 | [T] | local index of link {tail, head}, in the pack holding max(tail, head); `NONE` if tail = head |
 
-- Turns between different experts are not stored; no route within an expert uses them.
+- Turns between different components are not stored; no route within a component uses them.
 - Inside a row, turns are ordered by `turn_head` ascending. There is at most one turn per
   pair of segments.
 
@@ -352,9 +349,9 @@ graph:
 - **Rows of a copy:** a copy has its original's `way`, `way_dir`, `way_seq`, `car.time_s`
   and `car.w`.
   - A copy is a layout node like any other, with links and turns of its own.
-  - **Expert of a copy:** its original's (SPEC §5), even when the copy cannot reach the
-    original's component again; a copy may have no turn at all. Its turns into another
-    expert are not stored, like every cross-expert turn.
+  - **Component of a copy:** its original's (SPEC §5), even when the copy cannot reach the
+    original's strongly connected component again; a copy may have no turn at all. Its turns
+    into another component are not stored, like every turn between components.
   - It is not a road of its own: it is not a member of any rounding group (§6.1), and no ID
     snaps to it (§7.2).
   - Heads and seeds take copies into account as §8 says.
@@ -385,15 +382,15 @@ Roads are stored by the row of their tail (R roads):
 - Inside a row, roads are ordered by (`road_head`, `way`, `way_seq`, `way_dir`); `way_dir`
   separates the two directions of a closed piece. Parallel roads are kept: each is a
   separate piece that IDs can stand on.
-- **Roads between experts:** these roads have ends in different ACTIVE experts and never lie
-  on a route. They are kept only because a way's rounding (§6.1) spans all its pieces. They
+- **Roads between components:** these roads have ends in different ACTIVE components and
+  never lie on a route. They are kept only because a way's rounding (§6.1) spans all its pieces. They
   live in `road/active/cross/` as `way`, `way_dir`, `way_seq`, `kind`, `<m>.time_s`, `<m>.w`,
   each [R_x], sorted by (`way`, `way_dir`, `way_seq`).
 - **CAR needs no cross table**, including for one-way roads into trapped components:
   - A CAR road is a segment, which is a node of the turn graph. Every node belongs to
-    exactly one strongly connected component, so every segment is stored in some expert.
-  - A segment that cannot be returned to is a component of its own: a trapped expert.
-  - What crosses experts in CAR is a turn. Turns carry no master time and take no part in
+    exactly one component, so every segment is stored as a layout node.
+  - A segment that cannot be returned to is a component of its own: a trapped component.
+  - What crosses components in CAR is a turn. Turns carry no master time and take no part in
     rounding (§6.1), so dropping them loses nothing that re-customization needs.
 
 ## 6. Re-customization
@@ -406,12 +403,12 @@ procedure reproduces the stored bytes.
 
 SPEC §7 defines the rounding groups and the rule. In bytes:
 - **Members:** a group of metric m is all roads of one family with the same (`way`,
-  `way_dir`) and a finite `<m>.time_s`, over every expert and the cross table (§5.4). Every
+  `way_dir`) and a finite `<m>.time_s`, over every component and the cross table (§5.4). Every
   member of every group is stored, so re-rounding needs no data outside the model.
   - CAR rows with `kind = 2` (via-way copies, §5.3) are not members.
   - A road whose new time is `+∞` leaves its group; one whose time becomes finite joins it.
 - **Copies:** after rounding, each CAR copy takes the `car.time_s` and `car.w` of its
-  original, the row `copy_of` names in the same expert.
+  original, the node `copy_of` names in the same component.
 - **Travel order:** `way_seq` ascending if `way_dir = 0`, descending if 1.
 
 For each group, the exact integer computation:
@@ -452,7 +449,8 @@ ascending:
   top block, t is a top-block link.
 
 **Order:**
-- blocks of an expert from the last to the first (cells before the top, SPEC §5);
+- components independently of each other, since they share no link;
+- blocks of a component from the last to the first (cells before the top, SPEC §5);
 - inside a block, levels from the bottom (largest l) to the top;
 - inside a level, any order.
 
@@ -483,7 +481,8 @@ from `up_head`; both give the same bytes.
 
 ## 7. Vocabulary part
 
-The vocabulary covers every ID of the model, across families and experts. Which Overture
+The vocabulary covers every ID of the model, across families and components. It maps each ID
+directly to its nodes and offsets per mode; an ID's component is that of its nodes (§5.1). Which Overture
 IDs are in it depends on the extent (SPEC §3).
 
 ### 7.1 IDs
@@ -519,16 +518,14 @@ Each mode has its own entries (SPEC §6). In bytes, "the mode's graph" (SPEC §6
 
 | tensor | dtype | shape | meaning |
 | --- | --- | --- | --- |
-| `car.expert` | U32 | [N] | CAR expert of the ID, `NONE` if not served for car |
-| `car.seg` | U32 | [N, 2] | layout ids of the piece's two directed segments, [A → B, B → A]; always original segments (`kind ≠ 2`, §5.3); `NONE` for a direction absent from the expert |
+| `car.seg` | U32 | [N, 2] | layout ids of the piece's two directed segments, [A → B, B → A]; always original segments (`kind ≠ 2`, §5.3); `NONE` for a direction outside the ID's component; both `NONE` if the ID is not served for car |
 | `car.off` | U16 | [N, 2, 2] | for slot k: `[k, 0]` = time from the start of `seg[k]` to the ID, `[k, 1]` = time from the ID to the end of `seg[k]` |
 
 **ACTIVE, `vocab/active/`,** for each mode m (`bike`, `walk`):
 
 | tensor | dtype | shape | meaning |
 | --- | --- | --- | --- |
-| `<m>.expert` | U32 | [N] | ACTIVE expert of the ID for mode m, `NONE` if not served for m |
-| `<m>.node` | U32 | [N, 2] | layout ids [U, V] of the piece's ends; U = V for a loop |
+| `<m>.node` | U32 | [N, 2] | layout ids [U, V] of the piece's ends; U = V for a loop; both `NONE` if the ID is not served for m |
 | `<m>.road` | U32 | [N] | local index, in the pack holding U, of the road U → V of the piece; it identifies the piece for the same-piece rule. U and V are ordered so that this road exists; when both directions exist, U is the end where the way's node order starts |
 | `<m>.off` | U16 | [N, 4] | for the mode's metric: [U → ID, ID → U, V → ID, ID → V] |
 
@@ -547,11 +544,13 @@ the ID's snap point, so f from A (or U) for r = A → B (or U → V), and 1 − 
   are `INF`. For ACTIVE, that is U → ID and ID → V, or V → ID and ID → U.
 
 **Other invariants:**
-- An unserved ID has `expert = NONE`, `NONE` nodes and `INF` offsets for that mode.
-- A served ID's nodes belong to its expert for the mode, and that expert has `trapped = 0`.
+- An unserved ID has `NONE` nodes and `INF` offsets for that mode.
+- A served ID's nodes are all in one component for the mode, and that component is not
+  trapped (SPEC §5). Trapped components are an analysis of the compiler; the model does not
+  mark them.
 - At least one direction of a served ID's piece is finite for the mode.
-- **CAR:** if the piece's two segments are in different experts, the ID takes the one with
-  the smaller expert index among those that are not trapped, and the other slot is
+- **CAR:** if the piece's two segments are in different components, the ID takes the one
+  with the smaller component index among those that are not trapped, and the other slot is
   `NONE`.
 
 ### 7.3 Reason codes
@@ -573,9 +572,9 @@ Codes, with their meaning in SPEC §6:
 | 3 | `TrappedComponent` | distance to the nearest eligible piece (all are in trapped components) |
 | 4 | `FilteredPlace` | never in these lists; stored in `vocab/places/status` (§7.4) |
 
-- An ID is served for a mode exactly when its `<mode>.expert ≠ NONE`.
+- An ID is served for a mode exactly when one of its nodes for that mode is not `NONE`.
 - An unserved ID that is not a filtered place has exactly one entry in the mode's list.
-- Code 0 and codes 5–255 are not used in 2.0. `UnknownId` and `DifferentComponent` are
+- Code 0 and codes 5–255 are not used in 3.0. `UnknownId` and `DifferentComponent` are
   never stored.
 
 ### 7.4 Places and categories
@@ -630,23 +629,26 @@ This section restates no rule of SPEC §9. It says which bytes a runtime combine
 quantities those rules are written in. All sums use ⊕. All terms are non-negative, so any
 true time below the cap is reached without saturating, and is exact.
 
-**Road graph distances.** For an expert and metric m, d(x, y) is the shortest time from node
-x to node y:
+**Road graph distances.** For a family and metric m, d(x, y) is the shortest time from node
+x to node y; it is ∞ when x and y are in different components:
 - **ACTIVE:** over its roads, with weights `<m>.w`.
 - **CAR:** over its turns, where turn a → b weighs `car.w[a] ⊕ c(a, b)`, c being
   `car.turn_cost`. d is the time from the start of segment x to the start of segment y.
 
-**Hierarchy property.** For any x, y of one expert,
+**Hierarchy property.** For any x, y of one component,
 d(x, y) = min over z of (up(x, z) ⊕ down(z, y)), where:
 - up(x, z) is the shortest path from x to z using only lower → upper links and `up` weights;
 - down(z, y) is the shortest path from z to y using only upper → lower links and `down`
   weights;
-- z ranges over the common ancestors of x and y.
+- z ranges over the common ancestors of x and y, which are in their component's tree.
 
 This is what the metric tensors guarantee. Any CCH sweep that relies only on it is exact.
 
-**Time between two IDs.** Take o ≠ d, both served for the mode and with the same
-`<mode>.expert`. Let `off` be the mode's offsets.
+**Different components.** Two IDs served for a mode whose nodes have different `component`
+values (§5.1) answer `DifferentComponent`, without any sweep (SPEC §9).
+
+**Time between two IDs.** Take o ≠ d, both served for the mode and in the same component.
+Let `off` be the mode's offsets.
 
 - **ACTIVE:** the route term is
   min over x ∈ {U_o, V_o} and y ∈ {U_d, V_d} of (o → x) ⊕ d(x, y) ⊕ (y → d).
@@ -686,19 +688,18 @@ rest of its time. This is intended.
 
 ## 9. Hashes
 
-- **Tensor hash** = sha256(`"blobmap-tensor-2"` ‖ 0x00 ‖ full logical name ‖ 0x00 ‖ dtype
+- **Tensor hash** = sha256(`"blobmap-tensor-3"` ‖ 0x00 ‖ full logical name ‖ 0x00 ‖ dtype
   name ‖ 0x00 ‖ rank as U8 ‖ each dimension as U64 ‖ the data bytes).
-- **Entry hash** of a manifest entry = sha256(`"blobmap-entry-2"` ‖ 0x00 ‖ the tensor hashes
-  of all its packs, in full-name order).
-- **Road part hash** = sha256(`"blobmap-road-2"` ‖ 0x00 ‖ the tensor hashes of every
-  `road/<family>/experts/`, `road/<family>/blocks/` and `road/active/cross/` tensor, in
-  full-name order ‖ the entry hashes, in manifest order).
-- **Vocabulary part hash** = sha256(`"blobmap-vocab-2"` ‖ 0x00 ‖ the tensor hashes of every
+- **Road part hash** = sha256(`"blobmap-road-3"` ‖ 0x00 ‖ the tensor hashes of every `road/`
+  tensor, family tables and packs alike, in full-name order).
+- **Vocabulary part hash** = sha256(`"blobmap-vocab-3"` ‖ 0x00 ‖ the tensor hashes of every
   `vocab/` tensor except `vocab/road_hash`, in full-name order ‖ the raw `vocab/road_hash`).
-- **`model_id`** = hex sha256(`"blobmap-model-2"` ‖ 0x00 ‖ road part hash ‖ vocabulary part
+- **`model_id`** = hex sha256(`"blobmap-model-3"` ‖ 0x00 ‖ road part hash ‖ vocabulary part
   hash). It changes with layout: the same inputs built as cells or in one piece give
   different model IDs.
-- **`inputs_hash`** = hex sha256 of:
+- **`inputs_hash`** = hex sha256 of the following. Its tag stays `"blobmap-inputs-2"` in
+  3.0: the inputs and the answers they define did not change, so golden files keyed by it
+  (§11) stay valid across the two formats.
   - `"blobmap-inputs-2"` ‖ 0x00;
   - the `.pbf`'s sha256;
   - the Overture `release` string ‖ 0x00;
@@ -731,7 +732,9 @@ A reader **must ignore** manifest keys it does not know (SPEC §8).
 A reader **should** check, at least per pack it loads:
 - the CSR shapes, and that `up_head` is ascending and below the node's id (§5.2);
 - the level bounds;
-- that every layout id and local index is in range.
+- that every layout id and local index is in range;
+- that `component` (§5.1) starts at 0 and steps by 0 or 1, and that no block spans two
+  components.
 
 The conformance suite (SPEC §11) checks every invariant of §5–§8 on every model, and
 mutated models must fail it.
@@ -743,7 +746,8 @@ Per tier and inputs (SPEC §10, verify), a directory `<root>/<tier>/<inputs>/` w
 line).
 
 **`golden.json`:** `{format: "blobmap-golden", format_version: "2.0.0", tier, inputs_hash,
-queries_sha256}`.
+queries_sha256}`. The golden format has its own version: `2.0.0` in every model format so
+far, since 3.0 changed only the model's bytes.
 - A replay refuses a model whose `inputs_hash` (§9) differs, and accepts any model with the
   same one: whatever its layout, cells, shards or compiler version.
 - Answers are layout-independent. They name IDs only, and the only order they use is the
@@ -789,7 +793,7 @@ queries_sha256}`.
   minor ignores (SPEC §8). Examples: the triangle tensors of §6.3, or a CAR end view
   (§5.3).
   - Readers ignore unknown manifest keys (§10).
-  - A reader of 2.y reads any 2.x. When x < y, the tensors and keys added after 2.x are
+  - A reader of 3.y reads any 3.x. When x < y, the tensors and keys added after 3.x are
     absent.
 - **MAJOR:** anything else. That includes a changed name, dtype, shape, meaning or
   invariant; a removed tensor; a required key; and any new key in the index or in shard
@@ -797,7 +801,7 @@ queries_sha256}`.
 
 Not format changes:
 - **A new metric** in a family (SPEC §4): new `<m>.*` tensors and a longer `metrics` list,
-  which readers of 2.0 ignore.
+  which readers of 3.0 ignore.
 - **Ferries** (SPEC §4): roads with `kind = 1`, a profile change; runtimes route on them
   like any road.
 

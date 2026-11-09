@@ -21,7 +21,6 @@ pub struct Manifest {
     pub build: Build,
     pub families: BTreeMap<String, Family>,
     pub modes: BTreeMap<String, Mode>,
-    pub experts: Vec<Entry>,
     pub parts: Parts,
     pub attribution: Vec<String>,
     pub licenses_sha256: String,
@@ -86,13 +85,18 @@ pub struct Build {
     pub shard_target_bytes: u64,
     pub shard_max_bytes: u64,
     pub memory_budget_bytes: u64,
-    pub group_max_nodes: u64,
+    pub pack_max_nodes: u64,
 }
 
+/// A mode family: its graph kind, its metrics, and the size of its one hierarchy (FORMAT §3).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Family {
     pub graph: String,
     pub metrics: Vec<String>,
+    pub nodes: u64,
+    pub links: u64,
+    pub components: u64,
+    pub packs: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -100,22 +104,6 @@ pub struct Mode {
     pub family: String,
     pub metric: String,
     pub snap_radius_m: u64,
-}
-
-/// A manifest entry: one expert, or an expert group (FORMAT §3).
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct Entry {
-    pub family: String,
-    pub kind: String,
-    pub experts: [u64; 2],
-    pub components: u64,
-    pub nodes: u64,
-    pub links: u64,
-    pub levels: u64,
-    pub cells: u64,
-    pub packs: [u64; 2],
-    pub shards: Vec<String>,
-    pub hash: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

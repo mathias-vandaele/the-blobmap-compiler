@@ -40,8 +40,9 @@ concept that contradicts SPEC.md.
 - `~/Work/blobmap/blobmap-compiler`: a previous attempt. Its crates reproduce the research
   compiler byte for byte and are good porting material. Two things in it are wrong and
   must not be carried over:
-  - its experts, one per region polygon (its DECISIONS D14): experts are connected
-    components, and cells are compiler-chosen build units;
+  - its experts, one per region polygon (its DECISIONS D14): there are no experts; each
+    family has one hierarchy over all its components, and cells are compiler-chosen
+    build units;
   - its FORMAT v1.
 
 ## Crate map
@@ -52,10 +53,11 @@ Build order (PLAN.md), each crate under `crates/`:
   `fixtures` binary writes every scenario's inputs.
 - `profile`: car and active profiles, place rules, `build.toml`.
 - `osm`: ways, pieces, restrictions. `graph`: CAR turn graph with via-way copies, ACTIVE
-  union graph, rounding, experts.
-- `order`: `Orderer` (inertial flow, fixed) and cells. `cch`: one hierarchy per expert.
+  union graph, rounding, components (and which are trapped).
+- `order`: `Orderer` (inertial flow, fixed) and cells. `cch`: the hierarchy, built one
+  component at a time.
 - `overture`: release, taxonomy, place rules, aliases, extent. `snap`: IDs onto pieces.
-- `build`: the `Stage`s, groups and packs, vocabulary, model writer, reports.
+- `build`: the `Stage`s, packs, vocabulary, model writer, reports.
 - `runtime`: the CPU reference runtime. `conformance`: the SPEC §11 suite, golden files,
   mutants. `cli`: `blobc build | verify | inspect`.
 
@@ -64,4 +66,5 @@ directory; `tools/determinism.sh` the thread-count check. Golden
 files live in `golden/<tier>/<inputs>/`. `tiers/<tier>.toml` lists each tier's inputs by
 path and SHA-256 (`blobc verify --data <dir>`); the `tier` binary of `conformance` writes
 them (`tier tiny <dir> tiers/tiny.toml`, `tier add …`). Milestone 3 tools: `fixtures`
-`extract` (city extracts); `conformance` `accuracy` (cached OSRM pairs), `experts` (served components).
+`extract` (city extracts); `conformance` `accuracy` (cached OSRM pairs), `components` (served
+components), `fragments` (what the small-component rule moves).

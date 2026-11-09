@@ -57,7 +57,7 @@ pub struct BuildOptions {
     pub shard_target_bytes: u64,
     pub shard_max_bytes: u64,
     pub memory_budget_bytes: u64,
-    pub group_max_nodes: u64,
+    pub pack_max_nodes: u64,
 }
 
 /// A hand-made node order for the ACTIVE family, as OSM node ids from the first contracted

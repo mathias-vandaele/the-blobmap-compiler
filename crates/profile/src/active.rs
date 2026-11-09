@@ -1,4 +1,4 @@
-//! ACTIVE expert profile (modes phase, Step 4; OSRM's values since the France ACTIVE phase,
+//! ACTIVE component profile (modes phase, Step 4; OSRM's values since the France ACTIVE phase,
 //! Step 2): bike and walk on one node-based graph, the union of both networks, with one
 //! metric per mode (∞ where a mode may not go). Speeds are flat (no elevation in this phase).
 //!

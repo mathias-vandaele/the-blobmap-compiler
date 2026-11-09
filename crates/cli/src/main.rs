@@ -109,24 +109,13 @@ fn run() -> Result<bool> {
             println!("compiler     {} {} {}{}", mf.compiler.name, mf.compiler.version, mf.compiler.commit, if mf.compiler.dirty { " (dirty)" } else { "" });
             println!("pbf          {} ({} bytes)", mf.inputs.pbf.name, mf.inputs.pbf.bytes);
             println!("overture     {}", mf.inputs.overture.release);
-            for e in &mf.experts {
-                println!(
-                    "{:>6} {:>6} experts {:>6}+{:<4} nodes {:>9} links {:>10} levels {:>4} cells {:>3} shards {}",
-                    e.family,
-                    e.kind,
-                    e.experts[0],
-                    e.experts[1],
-                    e.nodes,
-                    e.links,
-                    e.levels,
-                    e.cells,
-                    e.shards.len()
-                );
+            for (f, x) in &mf.families {
+                println!("{f:<12} {} nodes, {} links, {} components, {} packs", x.nodes, x.links, x.components, x.packs);
             }
-            // Experts built as cells: the top block's levels and the deepest cell's (SPEC §5).
+            // Components built as cells: the top block's levels and the deepest cell's (SPEC §5).
             let rt = blobmap_runtime::Runtime::open(&model)?;
             for (fam, t) in &rt.tables {
-                for x in 0..t.nodes.len() {
+                for x in 0..t.components() {
                     let bs = t.block_first[x] as usize..t.block_first[x + 1] as usize;
                     if bs.len() < 2 {
                         continue;
@@ -135,9 +124,9 @@ fn run() -> Result<bool> {
                     let cells: Vec<usize> = bs.filter(|&b| t.b_kind[b] == 2).collect();
                     let deepest = cells.iter().copied().max_by_key(|&b| (t.b_levels[b], std::cmp::Reverse(b))).unwrap();
                     println!(
-                        "{:>6} expert {x}: levels {} = top {} ({} nodes) + deepest cell {} ({} nodes); {} cells of {}..{} nodes",
+                        "{:>6} component {x}: levels {} = top {} ({} nodes) + deepest cell {} ({} nodes); {} cells of {}..{} nodes",
                         fam.name(),
-                        t.levels[x],
+                        t.levels(x as u32),
                         top.iter().map(|&b| t.b_levels[b]).sum::<u32>(),
                         top.iter().map(|&b| t.b_nodes[b]).sum::<u32>(),
                         t.b_levels[deepest],

@@ -1,10 +1,10 @@
-# Build options (manifest `build`): they shape the output (shards, cells, groups) but never
+# Build options (manifest `build`): they shape the output (shards, cells, packs) but never
 # an answer, so this file is not part of inputs_hash (FORMAT §9).
 
 [build]
 shard_target_bytes = 2147483648
 shard_max_bytes = 4294967296
-# Peak memory for building one cell; an expert larger than this is built as cells (SPEC §5).
+# Peak memory for building one cell; a component larger than this is built as cells (SPEC §5).
 memory_budget_bytes = 34359738368
-# Experts with fewer nodes are packed into expert groups of at most this many nodes.
-group_max_nodes = 65536
+# Components with fewer nodes, built in one piece, share packs of at most this many nodes.
+pack_max_nodes = 65536

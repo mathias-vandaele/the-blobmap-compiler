@@ -16,6 +16,8 @@ use crate::report::Report;
 
 pub const HEADER: &str = "golden.json";
 pub const QUERIES: &str = "queries.jsonl";
+/// The golden format's own version (FORMAT §11), independent of the model format's.
+pub const GOLDEN_VERSION: &str = "2.0.0";
 
 /// IDs a scenario names, plus an even sample of the model's IDs (at most `k`).
 pub fn sample(e: &Expected, named: &[String], k: usize) -> Vec<String> {
@@ -170,7 +172,7 @@ pub fn write(dir: &Path, tier: &str, inputs_hash: &str, lines: &[Value]) -> Resu
     f.write_all(&compact)?;
     let header = json!({
         "format": "blobmap-golden",
-        "format_version": blobmap_format::FORMAT_VERSION,
+        "format_version": GOLDEN_VERSION,
         "tier": tier,
         "inputs_hash": inputs_hash,
         "queries_sha256": hex::encode(Sha256::digest(&compact)),
@@ -181,7 +183,7 @@ pub fn write(dir: &Path, tier: &str, inputs_hash: &str, lines: &[Value]) -> Resu
 /// Replays a golden directory: every answer must match exactly.
 pub fn replay(rt: &Runtime, dir: &Path, rep: &mut Report) -> Result<()> {
     let header = blobmap_format::json::read_file(&dir.join(HEADER))?;
-    ensure!(header["format"] == "blobmap-golden", "{}: not a golden header", dir.display());
+    ensure!(header["format"] == "blobmap-golden" && header["format_version"] == GOLDEN_VERSION, "{}: not a {GOLDEN_VERSION} golden header", dir.display());
     ensure!(header["inputs_hash"] == rt.manifest.inputs_hash.as_str(), "{}: golden for another inputs_hash (FORMAT §11)", dir.display());
     let body = std::fs::read(dir.join(QUERIES)).with_context(|| format!("reading {}", dir.display()))?;
     ensure!(header["queries_sha256"] == hex::encode(Sha256::digest(&body)).as_str(), "{}: queries_sha256 differs", dir.display());

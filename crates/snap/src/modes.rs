@@ -1,16 +1,16 @@
-//! The three sets of SPEC §6 for each mode, from a family's pieces, graph and experts.
+//! The three sets of SPEC §6 for each mode, from a family's pieces, graph and components.
 //!
 //! - **graph:** the family's graph (NoRoad when none is in the radius): for CAR, the pieces
 //!   with a segment; for ACTIVE, the pieces with a road.
 //! - **eligible:** pieces of the mode's graph that pass the profile's tag rules. A mode's
 //!   graph is the pieces with a road it may use (SPEC §6): a finite master time, which is
 //!   a finite weight since long pieces are cut (SPEC §7).
-//! - **servable:** eligible pieces in an expert that is not trapped. An ACTIVE piece whose
-//!   two ends lie in different experts never lies on a route (FORMAT §5.4), so it is skipped
+//! - **servable:** eligible pieces in a component that is not trapped. An ACTIVE piece whose
+//!   two ends lie in different components never lies on a route (FORMAT §5.4), so it is skipped
 //!   like a trapped one.
 
 use blobmap_format::NONE;
-use blobmap_graph::{ActiveGraph, CarGraph, Experts};
+use blobmap_graph::{ActiveGraph, CarGraph, Components};
 use blobmap_osm::Pieces;
 
 use crate::Sets;
@@ -19,7 +19,7 @@ pub struct Membership {
     graph: Vec<bool>,
     eligible: Vec<bool>,
     servable: Vec<bool>,
-    /// The node count of each servable piece's expert, else 0.
+    /// The node count of each servable piece's component, else 0.
     size: Vec<u32>,
 }
 
@@ -38,37 +38,37 @@ impl Sets for Membership {
     }
 }
 
-/// The CAR expert an ID on `piece` is served in: the smallest index among the experts of
+/// The CAR component an ID on `piece` is served in: the smallest index among the components of
 /// the piece's segments that are not trapped (FORMAT §7.2), or None.
-pub fn car_expert(g: &CarGraph, e: &Experts, piece: usize) -> Option<u32> {
+pub fn car_component(g: &CarGraph, e: &Components, piece: usize) -> Option<u32> {
     g.seg_of_piece[piece].iter().filter(|&&s| s != NONE).map(|&s| e.of[s as usize]).filter(|&x| !e.trapped[x as usize]).min()
 }
 
-/// The ACTIVE expert of `piece`, if both its ends are in the same expert and it is not
+/// The ACTIVE component of `piece`, if both its ends are in the same component and it is not
 /// trapped.
-pub fn active_expert(p: &Pieces, e: &Experts, piece: usize) -> Option<u32> {
+pub fn active_component(p: &Pieces, e: &Components, piece: usize) -> Option<u32> {
     let (a, b) = (e.of[p.u[piece] as usize], e.of[p.v[piece] as usize]);
     (a == b && !e.trapped[a as usize]).then_some(a)
 }
 
 impl Membership {
-    pub fn car(p: &Pieces, g: &CarGraph, e: &Experts) -> Membership {
+    pub fn car(p: &Pieces, g: &CarGraph, e: &Components) -> Membership {
         let graph: Vec<bool> = g.seg_of_piece.iter().map(|s| s.iter().any(|&x| x != NONE)).collect();
         let eligible: Vec<bool> = (0..p.len()).map(|k| graph[k] && p.eligible[k]).collect();
-        let expert: Vec<Option<u32>> = (0..p.len()).map(|k| car_expert(g, e, k).filter(|_| eligible[k])).collect();
-        let servable = expert.iter().map(Option::is_some).collect();
-        let size = expert.iter().map(|x| x.map_or(0, |x| e.nodes[x as usize])).collect();
+        let component: Vec<Option<u32>> = (0..p.len()).map(|k| car_component(g, e, k).filter(|_| eligible[k])).collect();
+        let servable = component.iter().map(Option::is_some).collect();
+        let size = component.iter().map(|x| x.map_or(0, |x| e.nodes[x as usize])).collect();
         Membership { graph, eligible, servable, size }
     }
 
     /// For ACTIVE metric `m` (an index into `blobmap_graph::active::METRICS`).
-    pub fn active(p: &Pieces, g: &ActiveGraph, e: &Experts, m: usize) -> Membership {
+    pub fn active(p: &Pieces, g: &ActiveGraph, e: &Components, m: usize) -> Membership {
         let graph: Vec<bool> = g.road_of_piece.iter().map(|r| r.iter().any(|&x| x != NONE)).collect();
         let usable = |k: usize| g.road_of_piece[k].iter().any(|&r| r != NONE && g.time[m][r as usize].is_finite());
         let eligible: Vec<bool> = (0..p.len()).map(|k| graph[k] && p.eligible[k] && usable(k)).collect();
-        let expert: Vec<Option<u32>> = (0..p.len()).map(|k| active_expert(p, e, k).filter(|_| eligible[k])).collect();
-        let servable = expert.iter().map(Option::is_some).collect();
-        let size = expert.iter().map(|x| x.map_or(0, |x| e.nodes[x as usize])).collect();
+        let component: Vec<Option<u32>> = (0..p.len()).map(|k| active_component(p, e, k).filter(|_| eligible[k])).collect();
+        let servable = component.iter().map(Option::is_some).collect();
+        let size = component.iter().map(|x| x.map_or(0, |x| e.nodes[x as usize])).collect();
         Membership { graph, eligible, servable, size }
     }
 }
@@ -91,13 +91,13 @@ mod tests {
         let cp = car_net.pieces(&[|a: &WayAttrs| *a]);
         let (r, _) = blobmap_osm::restrictions::read(&w.pbf).unwrap();
         let cg = CarGraph::build(&cp, &cfg.car.config.turns, &r);
-        let ce = cg.experts();
+        let ce = cg.components();
         let prof = ActiveProfile::new(&cfg.active.config);
         let act_net = blobmap_osm::Network::read(&w.pbf, &prof, &cfg.active.config.snap).unwrap();
         let modes: Vec<ActiveMode> = [Mode::Bike, Mode::Walk].map(|mode| ActiveMode { mode, cfg: prof.cfg }).to_vec();
         let ap = act_net.pieces(&modes);
         let ag = ActiveGraph::build(&ap);
-        let ae = ag.experts();
+        let ae = ag.components();
         let (cgrid, agrid) = (Grid::new(&cp), Grid::new(&ap));
         let car = Membership::car(&cp, &cg, &ce);
         let bike = Membership::active(&ap, &ag, &ae, 0);

@@ -1,10 +1,10 @@
-//! Columns (FORMAT §8): seeds from the sources' offsets, a full sweep of the expert, heads
+//! Columns (FORMAT §8): seeds from the sources' offsets, a full sweep of the component, heads
 //! at every ID, and the direct term on a shared piece.
 
 use anyhow::Result;
 use blobmap_format::{INF, NONE};
 
-use crate::model::{Dir, Expert, Fam, Faults, ModeVocab, Reason, Runtime};
+use crate::model::{Dir, Component, Fam, Faults, ModeVocab, Reason, Runtime};
 
 impl Faults {
     #[inline]
@@ -27,7 +27,7 @@ impl Runtime {
             return Err(Reason::FilteredPlace);
         }
         let mv = &self.vocab.modes[mode];
-        match mv.expert[i as usize] {
+        match mv.component[i as usize] {
             NONE => {
                 let k = mv.reasons.binary_search_by_key(&i, |r| r.0).map_err(|_| Reason::NoRoad)?;
                 Err(Reason::from_code(mv.reasons[k].1).unwrap_or(Reason::NoRoad))
@@ -44,22 +44,22 @@ impl Runtime {
         let f = &self.faults;
         let n = self.vocab.n();
         let mut out = vec![INF; n];
-        let mut by_expert: std::collections::BTreeMap<u32, Vec<Source>> = std::collections::BTreeMap::new();
+        let mut by_component: std::collections::BTreeMap<u32, Vec<Source>> = std::collections::BTreeMap::new();
         for s in sources {
-            let x = mv.expert[s.id as usize];
+            let x = mv.component[s.id as usize];
             anyhow::ensure!(x != NONE, "a column source must be served (internal index {})", s.id);
             let start = if f.no_start { 0 } else { s.start };
-            by_expert.entry(x).or_default().push(Source { id: s.id, start });
+            by_component.entry(x).or_default().push(Source { id: s.id, start });
         }
-        for (x, srcs) in by_expert {
-            let e = self.expert(mv.info.fam, x)?;
+        for (x, srcs) in by_component {
+            let e = self.component(mv.info.fam, x)?;
             let mut label = vec![INF; e.n];
             for s in &srcs {
                 seed(&e, mv, s, dir, f, &mut label);
             }
             sweep(&e, mv.info.metric, &mut label, dir, f);
             for i in 0..n {
-                if mv.expert[i] != x {
+                if mv.component[i] != x {
                     continue;
                 }
                 let mut t = head(&e, mv, i, &label, dir, f);
@@ -81,7 +81,7 @@ impl Runtime {
 
 /// Upward by decreasing layout id, then downward by increasing id (FORMAT §8). `To`
 /// sweeps the reversed hierarchy: `down` weights going up, `up` going down.
-pub fn sweep(e: &Expert, metric: usize, label: &mut [u16], dir: Dir, f: &Faults) {
+pub fn sweep(e: &Component, metric: usize, label: &mut [u16], dir: Dir, f: &Faults) {
     let (go_up, go_down) = match dir {
         Dir::From => (&e.up[metric], &e.down[metric]),
         Dir::To => (&e.down[metric], &e.up[metric]),
@@ -105,7 +105,7 @@ pub fn sweep(e: &Expert, metric: usize, label: &mut [u16], dir: Dir, f: &Faults)
     }
 }
 
-fn seed(e: &Expert, mv: &ModeVocab, s: &Source, dir: Dir, f: &Faults, label: &mut [u16]) {
+fn seed(e: &Component, mv: &ModeVocab, s: &Source, dir: Dir, f: &Faults, label: &mut [u16]) {
     let i = s.id as usize;
     let (nodes, off) = (mv.node[i], mv.off[i]);
     let mut put = |v: u32, t: u16| label[v as usize] = label[v as usize].min(t);
@@ -141,7 +141,7 @@ fn seed(e: &Expert, mv: &ModeVocab, s: &Source, dir: Dir, f: &Faults, label: &mu
     }
 }
 
-fn head(e: &Expert, mv: &ModeVocab, i: usize, label: &[u16], dir: Dir, f: &Faults) -> u16 {
+fn head(e: &Component, mv: &ModeVocab, i: usize, label: &[u16], dir: Dir, f: &Faults) -> u16 {
     let (nodes, off) = (mv.node[i], mv.off[i]);
     let mut t = INF;
     match (mv.info.fam, dir) {
@@ -177,7 +177,7 @@ fn head(e: &Expert, mv: &ModeVocab, i: usize, label: &[u16], dir: Dir, f: &Fault
 
 /// Two IDs on the same piece (FORMAT §8 "Direct drive"): same segments, or same ends and road.
 pub fn same_piece(mv: &ModeVocab, a: usize, b: usize) -> bool {
-    mv.expert[a] == mv.expert[b] && mv.node[a] == mv.node[b] && mv.road[a] == mv.road[b]
+    mv.component[a] == mv.component[b] && mv.node[a] == mv.node[b] && mv.road[a] == mv.road[b]
 }
 
 /// The direct term from a to b on their shared piece: per shared directed road with a
