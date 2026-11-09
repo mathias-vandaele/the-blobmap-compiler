@@ -12,7 +12,7 @@ const WALK: f64 = 5.0 / 3.6;
 const RESIDENTIAL: f64 = 25.0 / 3.6;
 
 pub fn all() -> Vec<Scenario> {
-    vec![toy(), town(), cap(), viaway(), deadend(), cells()]
+    vec![toy(), town(), cap(), viaway(), deadend(), fragment(), cells()]
 }
 
 fn build_toml(target: u64, budget: u64, group: u64, order: Option<&[i64]>) -> String {
@@ -443,6 +443,45 @@ fn deadend() -> Scenario {
             Check::DeadEnds { at_least: 1 },
             Check::OnVia { id: on_v2.clone() },
             Check::Reachable { mode: "car", a: src, b: on_v2 },
+        ],
+    }
+}
+
+/// A street with a disconnected fragment beside it, and an island 1.5 km away (SPEC §6):
+/// an ID 5 m from the fragment and 20 m from the street snaps to the street, the larger
+/// component within Δ; an ID on the island stays served there, its mainland beyond Δ.
+fn fragment() -> Scenario {
+    let mut b = Builder::new(Frame::new(47.0, 2.0), 7);
+    let res = [("highway", "residential")];
+    // The street network: a 300 × 200 m loop with a cross street.
+    let c = [b.node(0.0, 0.0), b.node(300.0, 0.0), b.node(300.0, 200.0), b.node(0.0, 200.0)];
+    let (m0, m1) = (b.node(150.0, 0.0), b.node(150.0, 200.0));
+    b.way(&[c[0], m0, c[1], c[2], m1, c[3], c[0]], &res);
+    b.way(&[m0, m1], &res);
+    // The fragment: 40 m of road 25 m north of the street, sharing no node with it.
+    let (f0, f1) = (b.node(80.0, 25.0), b.node(120.0, 25.0));
+    b.way(&[f0, f1], &res);
+    // The island: a small loop 1.5 km east.
+    let i = [b.node(1800.0, 0.0), b.node(1900.0, 0.0), b.node(1900.0, 100.0), b.node(1800.0, 100.0)];
+    b.way(&[i[0], i[1], i[2], i[3], i[0]], &res);
+    taxonomy(&mut b);
+    let street = b.address(250.0, 5.0);
+    let near_fragment = b.address(100.0, 20.0);
+    let on_island = b.address(1850.0, 5.0);
+    Scenario {
+        name: "fragment",
+        osm: b.osm,
+        release: b.release,
+        extent: None,
+        variants: vec![Variant { name: "default", build_toml: build_toml(1 << 20, 1 << 30, 0, None) }],
+        checks: vec![
+            Check::Reachable { mode: "car", a: street.clone(), b: near_fragment.clone() },
+            Check::Reachable { mode: "walk", a: street.clone(), b: near_fragment.clone() },
+            Check::Reachable { mode: "bike", a: near_fragment, b: street.clone() },
+            Check::Served { id: on_island.clone(), mode: "car" },
+            Check::Served { id: on_island.clone(), mode: "walk" },
+            Check::DifferentComponent { mode: "car", a: street.clone(), b: on_island.clone() },
+            Check::DifferentComponent { mode: "walk", a: street, b: on_island },
         ],
     }
 }

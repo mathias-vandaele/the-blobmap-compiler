@@ -76,6 +76,9 @@ sett = 9.0
 # may stand on (as in car.toml; no highway is excluded for bike and walk).
 [snap]
 radius_m = 500
+# A servable piece of a larger component (more nodes) at most this many metres beyond the
+# nearest one wins: an ID next to a disconnected fragment snaps to the street beyond it.
+larger_within_m = 100.0
 exclude_highways = []
 exclude_keys = ["bridge", "tunnel", "covered"]
 keep_values = ["no"]

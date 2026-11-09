@@ -19,6 +19,8 @@ pub struct Membership {
     graph: Vec<bool>,
     eligible: Vec<bool>,
     servable: Vec<bool>,
+    /// The node count of each servable piece's expert, else 0.
+    size: Vec<u32>,
 }
 
 impl Sets for Membership {
@@ -30,6 +32,9 @@ impl Sets for Membership {
     }
     fn servable(&self, piece: u32) -> bool {
         self.servable[piece as usize]
+    }
+    fn size(&self, piece: u32) -> u32 {
+        self.size[piece as usize]
     }
 }
 
@@ -50,8 +55,10 @@ impl Membership {
     pub fn car(p: &Pieces, g: &CarGraph, e: &Experts) -> Membership {
         let graph: Vec<bool> = g.seg_of_piece.iter().map(|s| s.iter().any(|&x| x != NONE)).collect();
         let eligible: Vec<bool> = (0..p.len()).map(|k| graph[k] && p.eligible[k]).collect();
-        let servable = (0..p.len()).map(|k| eligible[k] && car_expert(g, e, k).is_some()).collect();
-        Membership { graph, eligible, servable }
+        let expert: Vec<Option<u32>> = (0..p.len()).map(|k| car_expert(g, e, k).filter(|_| eligible[k])).collect();
+        let servable = expert.iter().map(Option::is_some).collect();
+        let size = expert.iter().map(|x| x.map_or(0, |x| e.nodes[x as usize])).collect();
+        Membership { graph, eligible, servable, size }
     }
 
     /// For ACTIVE metric `m` (an index into `blobmap_graph::active::METRICS`).
@@ -59,8 +66,10 @@ impl Membership {
         let graph: Vec<bool> = g.road_of_piece.iter().map(|r| r.iter().any(|&x| x != NONE)).collect();
         let usable = |k: usize| g.road_of_piece[k].iter().any(|&r| r != NONE && g.time[m][r as usize].is_finite());
         let eligible: Vec<bool> = (0..p.len()).map(|k| graph[k] && p.eligible[k] && usable(k)).collect();
-        let servable = (0..p.len()).map(|k| eligible[k] && active_expert(p, e, k).is_some()).collect();
-        Membership { graph, eligible, servable }
+        let expert: Vec<Option<u32>> = (0..p.len()).map(|k| active_expert(p, e, k).filter(|_| eligible[k])).collect();
+        let servable = expert.iter().map(Option::is_some).collect();
+        let size = expert.iter().map(|x| x.map_or(0, |x| e.nodes[x as usize])).collect();
+        Membership { graph, eligible, servable, size }
     }
 }
 
@@ -103,9 +112,9 @@ mod tests {
             };
             let Some((lat, lon)) = at(id) else { continue };
             let f = match mode {
-                "car" => cgrid.find(&cp, lat, lon, cfg.car.config.snap.radius_m as f64, &car),
-                "bike" => agrid.find(&ap, lat, lon, cfg.active.config.snap.radius_m as f64, &bike),
-                _ => agrid.find(&ap, lat, lon, cfg.active.config.snap.radius_m as f64, &walk),
+                "car" => cgrid.find(&cp, lat, lon, cfg.car.config.snap.radius_m as f64, cfg.car.config.snap.larger_within_m, &car),
+                "bike" => agrid.find(&ap, lat, lon, cfg.active.config.snap.radius_m as f64, cfg.active.config.snap.larger_within_m, &bike),
+                _ => agrid.find(&ap, lat, lon, cfg.active.config.snap.radius_m as f64, cfg.active.config.snap.larger_within_m, &walk),
             };
             let got = f.outcome().err().map(|(code, _)| match code {
                 NO_ELIGIBLE_ROAD => "NoEligibleRoad",

@@ -32,6 +32,9 @@ pub struct Families<'a> {
     pub active_layout: &'a Layout,
     pub car_radius_m: f64,
     pub active_radius_m: f64,
+    /// Δ per family (SPEC §6).
+    pub car_larger_m: f64,
+    pub active_larger_m: f64,
 }
 
 /// Snaps points per mode (car, bike, walk).
@@ -41,9 +44,15 @@ pub fn snap(f: &Families, points: &[(f64, f64)]) -> Vec<ModeSnap> {
     let agrid = Grid::new(act.p);
     let mut out = Vec::new();
     for (mode, _) in MODES {
-        let (grid, p, sets, radius) = match mode {
-            "car" => (&cgrid, car.p, Membership::car(car.p, car.g, &car.e), f.car_radius_m),
-            m => (&agrid, act.p, Membership::active(act.p, act.g, &act.e, METRICS.iter().position(|x| *x == m).unwrap()), f.active_radius_m),
+        let (grid, p, sets, radius, larger) = match mode {
+            "car" => (&cgrid, car.p, Membership::car(car.p, car.g, &car.e), f.car_radius_m, f.car_larger_m),
+            m => (
+                &agrid,
+                act.p,
+                Membership::active(act.p, act.g, &act.e, METRICS.iter().position(|x| *x == m).unwrap()),
+                f.active_radius_m,
+                f.active_larger_m,
+            ),
         };
         let trapped = |k: usize| -> Option<u32> {
             if sets.servable(k as u32) {
@@ -58,7 +67,7 @@ pub fn snap(f: &Families, points: &[(f64, f64)]) -> Vec<ModeSnap> {
         let at = points
             .par_iter()
             .map(|&(lat, lon)| {
-                let fd = grid.find(p, lat, lon, radius, &sets as &dyn Sets);
+                let fd = grid.find(p, lat, lon, radius, larger, &sets as &dyn Sets);
                 let t = fd.eligible.and_then(|h| trapped(h.piece as usize)).unwrap_or(NONE);
                 Snapped::new(&fd, t)
             })

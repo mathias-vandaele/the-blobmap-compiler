@@ -122,13 +122,15 @@ pub struct CarTurns {
     pub u_turn_penalty_s: f64,
 }
 
-/// Snapping (SPEC §6): the radius, and which pieces an ID may stand on. A piece is
+/// Snapping (SPEC §6): the radius, Δ, and which pieces an ID may stand on. A piece is
 /// ineligible if its `highway` is in `exclude_highways`, or if it has a key of
-/// `exclude_keys` with a value not in `keep_values` (`bridge=no` is no bridge).
+/// `exclude_keys` with a value not in `keep_values` (`bridge=no` is no bridge). A servable
+/// piece of a larger component at most `larger_within_m` (Δ) beyond the nearest one wins.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SnapRules {
     pub radius_m: u64,
+    pub larger_within_m: f64,
     pub exclude_highways: Vec<String>,
     pub exclude_keys: Vec<String>,
     pub keep_values: Vec<String>,
@@ -163,6 +165,7 @@ impl ProfileConfig for CarFile {
         }
         ensure!(s.maxspeed_table.keys().all(|k| *k == k.to_lowercase()), "speeds.maxspeed_table keys must be lower case");
         ensure!(self.snap.radius_m > 0, "snap.radius_m must be positive");
+        ensure!(self.snap.larger_within_m >= 0.0, "snap.larger_within_m must not be negative");
         Ok(())
     }
 }
@@ -231,6 +234,7 @@ impl ProfileConfig for ActiveFile {
         ensure!(self.walk.kmh > 0.0 && self.bike.kmh > 0.0, "walk.kmh and bike.kmh must be positive");
         ensure!(self.walk.surface_factor.values().all(|&f| f > 0.0 && f <= 1.0), "walk.surface_factor values must be in (0, 1]");
         ensure!(self.snap.radius_m > 0, "snap.radius_m must be positive");
+        ensure!(self.snap.larger_within_m >= 0.0, "snap.larger_within_m must not be negative");
         Ok(())
     }
 }
