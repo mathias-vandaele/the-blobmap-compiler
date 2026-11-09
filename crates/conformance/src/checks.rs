@@ -2,7 +2,7 @@
 //! re-check, re-customization, distances against Dijkstra, and the scenario's own facts.
 
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeMap, BinaryHeap};
 
 use anyhow::Result;
 use blobmap_fixtures::Check;
@@ -15,8 +15,8 @@ use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 use serde_json::{Value, json};
 
-use crate::expected::{Expected, reason_name, uuid};
 use crate::Samples;
+use crate::expected::{Expected, reason_name, uuid};
 use crate::reference::Reference;
 use crate::report::Report;
 
@@ -113,11 +113,13 @@ pub fn snapping(rt: &Runtime, r: &Reference, rep: &mut Report) -> Result<()> {
             o.count();
             let stored_reason = mv.reasons.binary_search_by_key(&(i as u32), |x| x.0).ok().map(|j| (mv.reasons[j].1, mv.reasons[j].2));
             match mode.at[i] {
-                Err((4, _)) => o.expect(mv.expert[i] == NONE && v.status_of(i as u32) == 4, || format!("{} {}: not a filtered place", mode.name, uuid(&r.ids[i]))),
-                Err((c, d)) => o.expect(
-                    mv.expert[i] == NONE && stored_reason.is_some_and(|(sc, sd)| sc == c && sd.to_bits() == d.to_bits()),
-                    || format!("{} {}: reason {stored_reason:?}, expected ({c}, {d})", mode.name, uuid(&r.ids[i])),
-                ),
+                Err((4, _)) => o.expect(mv.expert[i] == NONE && v.status_of(i as u32) == 4, || {
+                    format!("{} {}: not a filtered place", mode.name, uuid(&r.ids[i]))
+                }),
+                Err((c, d)) => o
+                    .expect(mv.expert[i] == NONE && stored_reason.is_some_and(|(sc, sd)| sc == c && sd.to_bits() == d.to_bits()), || {
+                        format!("{} {}: reason {stored_reason:?}, expected ({c}, {d})", mode.name, uuid(&r.ids[i]))
+                    }),
                 Ok(e) => {
                     if mv.expert[i] != e.expert {
                         o.fail(format!("{} {}: expert {} != {}", mode.name, uuid(&r.ids[i]), mv.expert[i], e.expert));
@@ -134,7 +136,10 @@ pub fn snapping(rt: &Runtime, r: &Reference, rep: &mut Report) -> Result<()> {
                         let [uu, vv] = mv.node[i];
                         let uv = x.arcs(uu).find(|&a| x.arc_local[a] == mv.road[i] && x.arc_head[a] == vv);
                         let key = |a: usize| (x.way[a], x.way_seq[a], x.way_dir[a]);
-                        let vu = uv.and_then(|uv| x.arcs(vv).find(|&a| x.arc_head[a] == uu && key(a).0 == key(uv).0 && key(a).1 == key(uv).1 && key(a).2 != key(uv).2));
+                        let vu = uv.and_then(|uv| {
+                            x.arcs(vv)
+                                .find(|&a| x.arc_head[a] == uu && key(a).0 == key(uv).0 && key(a).1 == key(uv).1 && key(a).2 != key(uv).2)
+                        });
                         [uv.map(key), vu.map(key)]
                     };
                     o.expect(stored == keys && mv.off[i] == off, || {
@@ -374,7 +379,8 @@ pub fn via_copies(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()> {
             let want = ex.car_pair(s, t);
             let from = rt.column(&[Source { id: s as u32, start: 0 }], k, Dir::From)?[t];
             let to = rt.column(&[Source { id: t as u32, start: 0 }], k, Dir::To)?[s];
-            Ok((from != want || to != want).then(|| format!("{} -> {}: from {from}, to {to}, reference {want}", uuid(&r.ids[s]), uuid(&r.ids[t]))))
+            Ok((from != want || to != want)
+                .then(|| format!("{} -> {}: from {from}, to {to}, reference {want}", uuid(&r.ids[s]), uuid(&r.ids[t]))))
         })
         .collect();
     let o = rep.check(&format!(
@@ -385,6 +391,105 @@ pub fn via_copies(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()> {
         o.count();
         if let Some(f) = res? {
             o.fail(f);
+        }
+    }
+    Ok(())
+}
+
+/// Every via-way copy at segment level (SPEC §5): from the start of the first segment of
+/// each forbidden sequence to the arrival at the original of each of its copies (the least
+/// over the original and its copies), from and to, against the reference.
+pub fn via_segments(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()> {
+    let r = ex.r;
+    let g = &r.car;
+    let k = rt.mode("car")?;
+    let (metric, f) = (rt.vocab.modes[k].info.metric, &rt.faults);
+    let mut prefixes: Vec<&[u32]> = g.forbidden.iter().flat_map(|f| (2..f.len()).map(move |j| &f[..j])).collect();
+    prefixes.sort_unstable();
+    prefixes.dedup();
+    let mut pairs: Vec<(u32, u32)> = prefixes.iter().map(|p| (p[0], *p.last().unwrap())).collect();
+    pairs.sort_unstable();
+    pairs.dedup();
+    let x_of = |s: u32| r.car_experts.of[s as usize];
+    let elsewhere = pairs.iter().filter(|p| x_of(p.0) != x_of(p.1)).count();
+    pairs.retain(|p| x_of(p.0) == x_of(p.1));
+    // Per expert, the layout id of each original segment by its road key.
+    let key = |s: u32| (g.way[s as usize], g.seq[s as usize], g.dir[s as usize]);
+    let mut layout: BTreeMap<u32, Vec<((i64, u32, u8), u32)>> = BTreeMap::new();
+    for &(_, b) in &pairs {
+        if let std::collections::btree_map::Entry::Vacant(v) = layout.entry(x_of(b)) {
+            let e = rt.expert(Fam::Car, x_of(b))?;
+            let mut l: Vec<_> = (0..e.n as u32)
+                .filter(|&v| e.kind[v as usize] != 2)
+                .map(|v| ((e.way[v as usize], e.way_seq[v as usize], e.way_dir[v as usize]), v))
+                .collect();
+            l.sort_unstable();
+            v.insert(l);
+        }
+    }
+    let node = |s: u32| -> Option<u32> {
+        let l = &layout[&x_of(s)];
+        l.binary_search_by_key(&key(s), |e| e.0).ok().map(|i| l[i].1)
+    };
+    let want: Vec<u16> = pairs.par_iter().map(|&(a, b)| ex.car_segments(a, b)).collect();
+    // One sweep per first segment (from) and per original (to).
+    let label = |x: u32, seeds: &mut dyn Iterator<Item = u32>, dir: Dir| -> Result<(std::sync::Arc<Expert>, Vec<u16>)> {
+        let e = rt.expert(Fam::Car, x)?;
+        let mut l = vec![INF; e.n];
+        for v in seeds {
+            l[v as usize] = 0;
+        }
+        blobmap_runtime::query::sweep(&e, metric, &mut l, dir, f);
+        Ok((e, l))
+    };
+    let group = |by: fn(&(u32, u32)) -> u32| -> Vec<Vec<usize>> {
+        let mut m: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        for (i, p) in pairs.iter().enumerate() {
+            m.entry(by(p)).or_default().push(i);
+        }
+        m.into_values().collect()
+    };
+    let missing = |s: u32| anyhow::anyhow!("car segment {s} (way {}) has no node in its expert", g.way[s as usize]);
+    let from: Vec<Result<Vec<(usize, u16)>>> = group(|p| p.0)
+        .par_iter()
+        .map(|ks| {
+            let a = pairs[ks[0]].0;
+            let (e, l) = label(x_of(a), &mut std::iter::once(node(a).ok_or_else(|| missing(a))?), Dir::From)?;
+            ks.iter()
+                .map(|&i| {
+                    let b = pairs[i].1;
+                    Ok((i, e.arrivals(node(b).ok_or_else(|| missing(b))?, f).map(|y| l[y as usize]).min().unwrap()))
+                })
+                .collect()
+        })
+        .collect();
+    let to: Vec<Result<Vec<(usize, u16)>>> = group(|p| p.1)
+        .par_iter()
+        .map(|ks| {
+            let b = pairs[ks[0]].1;
+            let nb = node(b).ok_or_else(|| missing(b))?;
+            let e = rt.expert(Fam::Car, x_of(b))?;
+            let (_, l) = label(x_of(b), &mut e.arrivals(nb, f), Dir::To)?;
+            ks.iter()
+                .map(|&i| {
+                    let a = pairs[i].0;
+                    Ok((i, l[node(a).ok_or_else(|| missing(a))? as usize]))
+                })
+                .collect()
+        })
+        .collect();
+    let o = rep.check(&format!(
+        "car: every via-way copy, segment to segment, both directions ({} prefixes, {} first and last segment pairs; {elsewhere} with the first segment in another expert)",
+        prefixes.len(),
+        pairs.len() + elsewhere
+    ));
+    for (side, res) in [("from", from), ("to", to)] {
+        for (i, t) in res.into_iter().collect::<Result<Vec<_>>>()?.into_iter().flatten() {
+            o.count();
+            let (a, b) = pairs[i];
+            o.expect(t == want[i], || {
+                format!("{side}: way {} seg {a} -> way {} seg {b}: {t}, reference {}", g.way[a as usize], g.way[b as usize], want[i])
+            });
         }
     }
     Ok(())
@@ -429,9 +534,13 @@ pub fn scenario(rt: &Runtime, ex: &Expected, checks: &[Check], cells_variant: bo
                 let got = reason(id, mode);
                 o.expect(got.as_deref() == Some(*want), || format!("{id} {mode}: {got:?}, expected {want}"));
             }
-            Check::Served { id, mode } => o.expect(reason(id, mode).is_none() && rt.resolve(id).is_ok(), || format!("{id} not served for {mode}")),
+            Check::Served { id, mode } => {
+                o.expect(reason(id, mode).is_none() && rt.resolve(id).is_ok(), || format!("{id} not served for {mode}"))
+            }
             Check::Alias { alias, kept } => {
-                o.expect(rt.resolve(alias).is_ok() && rt.resolve(alias) == rt.resolve(kept), || format!("alias {alias} does not resolve to {kept}"));
+                o.expect(rt.resolve(alias).is_ok() && rt.resolve(alias) == rt.resolve(kept), || {
+                    format!("alias {alias} does not resolve to {kept}")
+                });
                 o.expect(tt(rt, alias, kept, "walk") == json!({"time": 0}), || "alias and kept place are not the same ID".into());
             }
             Check::Unknown { id } => o.expect(rt.resolve(id) == Err(blobmap_runtime::Reason::UnknownId), || format!("{id} is known")),

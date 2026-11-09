@@ -193,7 +193,8 @@ impl CarStates {
 
 /// Dijkstra from seeded labels: the arc v → h costs its cost plus `extra(v, h)`.
 fn run(g: &Csr, dist: &mut [u32], extra: impl Fn(u32, u32) -> u32) {
-    let mut heap: BinaryHeap<Reverse<(u32, u32)>> = (0..dist.len() as u32).filter(|&v| dist[v as usize] != u32::MAX).map(|v| Reverse((dist[v as usize], v))).collect();
+    let mut heap: BinaryHeap<Reverse<(u32, u32)>> =
+        (0..dist.len() as u32).filter(|&v| dist[v as usize] != u32::MAX).map(|v| Reverse((dist[v as usize], v))).collect();
     while let Some(Reverse((t, v))) = heap.pop() {
         if t > dist[v as usize] {
             continue;
@@ -219,7 +220,8 @@ impl Graphs {
         let g = &r.active;
         let active = (0..g.w.len())
             .map(|m| {
-                let arcs: Vec<(u32, u32, u16)> = (0..g.len()).filter(|&k| g.w[m][k] != INF).map(|k| (g.tail[k], g.head[k], g.w[m][k])).collect();
+                let arcs: Vec<(u32, u32, u16)> =
+                    (0..g.len()).filter(|&k| g.w[m][k] != INF).map(|k| (g.tail[k], g.head[k], g.w[m][k])).collect();
                 let f = Csr::new(g.nodes, &arcs);
                 let b = f.reversed();
                 (f, b)
@@ -312,7 +314,16 @@ impl Graphs {
     /// Per ID of expert x: the least over its sides of `at(side)`, and the direct terms with
     /// the sources on its piece.
     #[allow(clippy::too_many_arguments)]
-    fn read(&self, r: &Reference, m: &Mode, x: u32, on_piece: &[(u32, usize, u32)], from: bool, best: &mut [u32], at: impl Fn(&Side) -> Option<u32>) {
+    fn read(
+        &self,
+        r: &Reference,
+        m: &Mode,
+        x: u32,
+        on_piece: &[(u32, usize, u32)],
+        from: bool,
+        best: &mut [u32],
+        at: impl Fn(&Side) -> Option<u32>,
+    ) {
         for (i, b) in best.iter_mut().enumerate() {
             let Ok(d) = m.at[i] else { continue };
             if d.expert != x {
@@ -345,7 +356,8 @@ impl Graphs {
             return INF;
         }
         let (g, cs) = (&r.car, &self.car);
-        let targets: Vec<(u32, u32)> = sides(r, m, &ed).iter().flatten().filter_map(|s| split(s.w, s.g).map(|(before, _)| (s.tail, before))).collect();
+        let targets: Vec<(u32, u32)> =
+            sides(r, m, &ed).iter().flatten().filter_map(|s| split(s.w, s.g).map(|(before, _)| (s.tail, before))).collect();
         let mut best = direct(r, m, &eo, &ed);
         let mut dist: HashMap<u32, u32> = HashMap::new();
         let mut heap = BinaryHeap::new();
@@ -382,5 +394,31 @@ impl Graphs {
             }
         }
         cap(best)
+    }
+
+    /// The CAR time from the start of segment a, entered alone, to the first arrival at the
+    /// start of segment b in any state; `INF` when b cannot be reached.
+    pub fn car_segments(&self, r: &Reference, a: u32, b: u32) -> u16 {
+        let (g, cs) = (&r.car, &self.car);
+        let mut dist: HashMap<u32, u32> = HashMap::from([(a, 0)]);
+        let mut heap = BinaryHeap::from([Reverse((0u32, a))]);
+        while let Some(Reverse((t, k))) = heap.pop() {
+            if t > dist[&k] {
+                continue;
+            }
+            let s = cs.last[k as usize];
+            if s == b {
+                return cap(t);
+            }
+            let base = t.saturating_add(g.w[s as usize] as u32);
+            for (h, c) in cs.fwd.arcs(k) {
+                let x = base.saturating_add(c as u32);
+                if x < *dist.get(&h).unwrap_or(&u32::MAX) {
+                    dist.insert(h, x);
+                    heap.push(Reverse((x, h)));
+                }
+            }
+        }
+        INF
     }
 }

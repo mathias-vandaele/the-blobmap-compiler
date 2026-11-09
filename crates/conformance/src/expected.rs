@@ -41,7 +41,7 @@ struct Memo {
 }
 
 /// Bytes of columns kept.
-const MEMO_BYTES: usize = 2 << 30;
+const MEMO_BYTES: usize = 1 << 30;
 
 /// The reference with its graphs; columns are computed on demand by Dijkstra.
 pub struct Expected<'a> {
@@ -125,6 +125,11 @@ impl Expected<'_> {
     /// The CAR time from the ID at o to the ID at d, point to point.
     pub fn car_pair(&self, o: usize, d: usize) -> u16 {
         self.g.car_pair(self.r, &self.r.modes[self.mode("car")], o, d)
+    }
+
+    /// The CAR time between two segments (`Graphs::car_segments`).
+    pub fn car_segments(&self, a: u32, b: u32) -> u16 {
+        self.g.car_segments(self.r, a, b)
     }
 
     /// The kept places matching a category, by internal index.
@@ -223,7 +228,10 @@ impl Expected<'_> {
                 let cols: Vec<Arc<Vec<u16>>> = src.iter().map(|s| self.column(m, std::slice::from_ref(s), "from")).collect();
                 let ok = |c: &Arc<Vec<u16>>, i: usize| c[i] != INF && c[i] as u64 <= t;
                 let all = op == "reachable_from_all";
-                self.ids_answer((0..self.r.n()).filter(|&i| if all { !cols.is_empty() && cols.iter().all(|c| ok(c, i)) } else { cols.iter().any(|c| ok(c, i)) }))
+                self.ids_answer(
+                    (0..self.r.n())
+                        .filter(|&i| if all { !cols.is_empty() && cols.iter().all(|c| ok(c, i)) } else { cols.iter().any(|c| ok(c, i)) }),
+                )
             }
             "multi_criteria" => self.multi_criteria(a),
             "chained" | "chained_column" => self.chained(op, a),
@@ -296,7 +304,8 @@ impl Expected<'_> {
                 self.column(m, &src, dir)
             } else {
                 let c = self.category(target).expect("a known category");
-                let places: Vec<(usize, u16)> = self.matching(&c).into_iter().filter(|&p| self.r.modes[m].at[p].is_ok()).map(|p| (p, 0)).collect();
+                let places: Vec<(usize, u16)> =
+                    self.matching(&c).into_iter().filter(|&p| self.r.modes[m].at[p].is_ok()).map(|p| (p, 0)).collect();
                 self.column(m, &places, if dir == "from" { "to" } else { "from" })
             };
             if !modes.contains(&m) {

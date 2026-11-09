@@ -107,6 +107,7 @@ fn run(rt: &Runtime, ex: &Expected, s: &Facts, n: &Samples, hashes: bool, rep: &
     checks::recustomization(rt, rep)?;
     checks::distances(rt, ex, n, rep)?;
     checks::via_copies(rt, ex, rep)?;
+    checks::via_segments(rt, ex, rep)?;
     checks::scenario(rt, ex, &s.checks, s.cells, rep)?;
     Ok(())
 }
