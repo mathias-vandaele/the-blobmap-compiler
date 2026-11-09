@@ -4,7 +4,8 @@
 //! Each pair is asked `travel_time` on the model; one column per origin, in parallel. The
 //! answered pairs give the MAE, the p95 of |diff|, the bias (mean of ours − OSRM) and the
 //! median relative error |diff| / OSRM, in all and by OSRM duration; the others are counted
-//! by answer.
+//! by answer. With `--experts`, no time is computed: the pairs whose ends are served in
+//! different experts are counted by their two experts.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -34,8 +35,10 @@ fn stats(d: &[(f64, f64)]) -> String {
 
 fn main() -> Result<()> {
     let a: Vec<String> = std::env::args().skip(1).collect();
-    let [model, pairs, mode, oc, dc, tc] = &a[..] else {
-        bail!("usage: accuracy <model> <pairs.csv> <mode> <origin column> <dest column> <osrm column>");
+    let by_experts = a.iter().any(|x| x == "--experts");
+    let a: Vec<&String> = a.iter().filter(|x| *x != "--experts").collect();
+    let [model, pairs, mode, oc, dc, tc] = a[..] else {
+        bail!("usage: accuracy <model> <pairs.csv> <mode> <origin column> <dest column> <osrm column> [--experts]");
     };
     let rt = Runtime::open(Path::new(model))?;
     let m = rt.mode(mode)?;
@@ -51,6 +54,25 @@ fn main() -> Result<()> {
             Ok((f[oi].to_string(), f[di].to_string(), f[ti].parse::<f64>()?))
         })
         .collect::<Result<_>>()?;
+    if by_experts {
+        let mv = &rt.vocab.modes[m];
+        let nodes = &rt.tables[&mv.info.fam].nodes;
+        let served = |id: &str| rt.resolve(id).and_then(|i| rt.served(i, m)).ok();
+        let mut apart: BTreeMap<(u32, u32), u64> = BTreeMap::new();
+        for (o, d, _) in &rows {
+            if let (Some(x), Some(y)) = (served(o), served(d))
+                && x != y
+            {
+                *apart.entry((x, y)).or_default() += 1;
+            }
+        }
+        println!("{mode}: {} pairs served in different experts", apart.values().sum::<u64>());
+        println!("  {:>7} {:>9}  {:>7} {:>9}  {:>6}", "origin", "nodes", "dest", "nodes", "pairs");
+        for ((x, y), k) in apart {
+            println!("  {x:>7} {:>9}  {y:>7} {:>9}  {k:>6}", nodes[x as usize], nodes[y as usize]);
+        }
+        return Ok(());
+    }
     let mut by_origin: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (k, r) in rows.iter().enumerate() {
         by_origin.entry(&r.0).or_default().push(k);
