@@ -266,6 +266,7 @@ dependencies = [
  "blobmap-runtime",
  "blobmap-snap",
  "hex",
+ "osmpbf",
  "rand",
  "rayon",
  "serde",
