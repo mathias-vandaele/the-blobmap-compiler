@@ -15,7 +15,10 @@ pub mod tier;
 
 use std::path::{Path, PathBuf};
 
+use std::time::Instant;
+
 use anyhow::Result;
+use blobmap_build::mem;
 use blobmap_fixtures::Check;
 use blobmap_runtime::Runtime;
 
@@ -95,20 +98,31 @@ struct Facts {
     cells: bool,
 }
 
+/// Runs a phase of verify and, as it ends, prints its time and memory, as a build does
+/// per stage, so a long verify shows where it is.
+fn phase<T>(name: &str, f: impl FnOnce() -> T) -> T {
+    mem::reset_peak();
+    let t = Instant::now();
+    let out = f();
+    mem::trim();
+    eprintln!("{name:>18} {:>9.3} s  peak {:>6} MiB  after {:>6} MiB", t.elapsed().as_secs_f64(), mem::peak_rss().unwrap_or(0) >> 20, mem::rss().unwrap_or(0) >> 20);
+    out
+}
+
 /// Every check except golden replay and mutants.
 fn run(rt: &Runtime, ex: &Expected, s: &Facts, n: &Samples, hashes: bool, rep: &mut Report) -> Result<()> {
-    invariants::structure(rt, rep)?;
+    phase("structure", || invariants::structure(rt, rep))?;
     if hashes {
-        invariants::hashes(rt, rep)?;
+        phase("hashes", || invariants::hashes(rt, rep))?;
     }
-    checks::components(rt, ex.r, rep);
-    checks::snapping(rt, ex.r, rep)?;
-    checks::snapping_brute(ex.r, n.brute, rep);
-    checks::recustomization(rt, rep)?;
-    checks::distances(rt, ex, n, rep)?;
-    checks::via_copies(rt, ex, rep)?;
-    checks::via_segments(rt, ex, rep)?;
-    checks::scenario(rt, ex, &s.checks, s.cells, rep)?;
+    phase("components", || checks::components(rt, ex.r, rep));
+    phase("snapping", || checks::snapping(rt, ex.r, rep))?;
+    phase("snapping brute", || checks::snapping_brute(ex.r, n.brute, rep));
+    phase("recustomization", || checks::recustomization(rt, rep))?;
+    phase("distances", || checks::distances(rt, ex, n, rep))?;
+    phase("via copies", || checks::via_copies(rt, ex, rep))?;
+    phase("via segments", || checks::via_segments(rt, ex, rep))?;
+    phase("scenario", || checks::scenario(rt, ex, &s.checks, s.cells, rep))?;
     Ok(())
 }
 
@@ -132,8 +146,8 @@ pub fn verify(model: &Path, o: &Options) -> Result<Verified> {
         cells: scenario.as_ref().is_some_and(|s| s.variants.iter().any(|v| v.name == "cells" && v.build_toml.contains(&budget))),
         checks: scenario.map(|s| s.checks).unwrap_or_default(),
     };
-    let r = Reference::build(&inputs)?;
-    let ex = Expected::new(&r);
+    let r = phase("reference", || Reference::build(&inputs))?;
+    let ex = phase("dijkstra graphs", || Expected::new(&r));
     let n = Samples::for_tier(&o.tier);
     let mut report = Report::default();
     guarded(&mut report, "checks", |rep| run(&rt, &ex, &scenario, &n, true, rep));
@@ -142,10 +156,11 @@ pub fn verify(model: &Path, o: &Options) -> Result<Verified> {
     if let Some(root) = &o.golden {
         let dir = root.join(&o.tier).join(&set.name);
         if !dir.join(golden::HEADER).exists() {
-            golden::write(&dir, &o.tier, &rt.manifest.inputs_hash, &golden::queries(&ex, &named(&scenario.checks), &n))?;
+            let q = phase("golden queries", || golden::queries(&ex, &named(&scenario.checks), &n));
+            golden::write(&dir, &o.tier, &rt.manifest.inputs_hash, &q)?;
             golden_written = Some(dir.clone());
         }
-        guarded(&mut report, "golden replay", |rep| golden::replay(&rt, &dir, rep));
+        phase("golden replay", || guarded(&mut report, "golden replay", |rep| golden::replay(&rt, &dir, rep)));
         golden_dir = Some(dir);
     }
     let mut mutants = Vec::new();

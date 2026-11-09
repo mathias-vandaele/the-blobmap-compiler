@@ -230,6 +230,13 @@ impl Graphs {
         Graphs { car: CarStates::new(r), active }
     }
 
+    /// Bytes one run may hold on n IDs: per ID, its best time and its column entry; per
+    /// state, its label and about one heap entry.
+    pub fn scratch_bytes(&self, n: usize) -> usize {
+        let states = self.active.iter().map(|(f, _)| f.first.len() - 1).fold(self.car.last.len(), usize::max);
+        6 * n + 12 * states
+    }
+
     /// The column of a mode from (`from`) or to (`to`) the sources with their start times:
     /// per ID, the least start ⊕ time over the sources in its component.
     pub fn column(&self, r: &Reference, m: &Mode, src: &[(usize, u16)], from: bool) -> Vec<u16> {

@@ -72,9 +72,8 @@ pub struct Reference {
 impl Reference {
     pub fn build(i: &Inputs) -> Result<Reference> {
         let config = Config::load(&i.config)?;
-        let (car_pieces, car) = CarNetwork.run((i.pbf.as_path(), &config))?;
-        let (active_pieces, active) = ActiveNetwork.run((i.pbf.as_path(), &config))?;
-        let (car_components, active_components) = (car.components(), active.components());
+        // The catalog first: its reading peaks well above what it keeps, and so do the
+        // networks', so neither peak sits on the other's result.
         let release = Release::open(&i.overture)?;
         let polygon = match &i.extent {
             Some(p) => Some(Polygon::parse_poly(&std::fs::read_to_string(p)?)?),
@@ -82,6 +81,11 @@ impl Reference {
         };
         let catalog = ReadCatalog.run((&release, &config, polygon.as_ref()))?;
         blobmap_build::mem::trim();
+        let (car_pieces, car) = CarNetwork.run((i.pbf.as_path(), &config))?;
+        blobmap_build::mem::trim();
+        let (active_pieces, active) = ActiveNetwork.run((i.pbf.as_path(), &config))?;
+        blobmap_build::mem::trim();
+        let (car_components, active_components) = (car.components(), active.components());
         let points: Vec<(f64, f64)> =
             catalog.addresses.iter().map(|a| (a.lat, a.lon)).chain(catalog.places.iter().map(|p| (p.lat, p.lon))).collect();
         let (cg, ag) = (Grid::new(&car_pieces), Grid::new(&active_pieces));

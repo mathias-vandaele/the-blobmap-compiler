@@ -2,7 +2,7 @@
 //! taxonomy), in the golden JSON form of FORMAT §11. Golden answers are these.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use blobmap_format::{INF, NONE16};
 use blobmap_overture::Id;
@@ -43,11 +43,34 @@ struct Memo {
 /// Bytes of columns kept.
 const MEMO_BYTES: usize = 1 << 30;
 
+/// Bytes the Dijkstra runs in flight may hold together; a run beyond them waits, whatever
+/// the number of threads.
+const SCRATCH_BYTES: usize = 4 << 30;
+
+/// The runs that may start, and a signal when one ends.
+struct Gate {
+    free: Mutex<usize>,
+    ended: Condvar,
+}
+
+impl Gate {
+    fn run<T>(&self, f: impl FnOnce() -> T) -> T {
+        let mut free = self.ended.wait_while(self.free.lock().unwrap(), |k| *k == 0).unwrap();
+        *free -= 1;
+        drop(free);
+        let out = f();
+        *self.free.lock().unwrap() += 1;
+        self.ended.notify_one();
+        out
+    }
+}
+
 /// The reference with its graphs; columns are computed on demand by Dijkstra.
 pub struct Expected<'a> {
     pub r: &'a Reference,
     g: Graphs,
     memo: Mutex<Memo>,
+    gate: Gate,
 }
 
 pub enum Cat {
@@ -58,7 +81,9 @@ pub enum Cat {
 impl Expected<'_> {
     pub fn new(r: &Reference) -> Expected<'_> {
         let max = (MEMO_BYTES / (2 * r.n().max(1))).clamp(8, 4096);
-        Expected { r, g: Graphs::new(r), memo: Mutex::new(Memo { cells: BTreeMap::new(), order: VecDeque::new(), max }) }
+        let g = Graphs::new(r);
+        let gate = Gate { free: Mutex::new((SCRATCH_BYTES / g.scratch_bytes(r.n()).max(1)).max(1)), ended: Condvar::new() };
+        Expected { r, g, memo: Mutex::new(Memo { cells: BTreeMap::new(), order: VecDeque::new(), max }), gate }
     }
 
     fn mode(&self, name: &str) -> usize {
@@ -119,17 +144,17 @@ impl Expected<'_> {
                 c
             }
         };
-        cell.get_or_init(|| Arc::new(self.g.column(self.r, &self.r.modes[m], src, from))).clone()
+        cell.get_or_init(|| Arc::new(self.gate.run(|| self.g.column(self.r, &self.r.modes[m], src, from)))).clone()
     }
 
     /// The CAR time from the ID at o to the ID at d, point to point.
     pub fn car_pair(&self, o: usize, d: usize) -> u16 {
-        self.g.car_pair(self.r, &self.r.modes[self.mode("car")], o, d)
+        self.gate.run(|| self.g.car_pair(self.r, &self.r.modes[self.mode("car")], o, d))
     }
 
     /// The CAR time between two segments (`Graphs::car_segments`).
     pub fn car_segments(&self, a: u32, b: u32) -> u16 {
-        self.g.car_segments(self.r, a, b)
+        self.gate.run(|| self.g.car_segments(self.r, a, b))
     }
 
     /// The kept places matching a category, by internal index.

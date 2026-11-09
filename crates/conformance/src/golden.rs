@@ -187,15 +187,25 @@ pub fn replay(rt: &Runtime, dir: &Path, rep: &mut Report) -> Result<()> {
     ensure!(header["inputs_hash"] == rt.manifest.inputs_hash.as_str(), "{}: golden for another inputs_hash (FORMAT §11)", dir.display());
     let body = std::fs::read(dir.join(QUERIES)).with_context(|| format!("reading {}", dir.display()))?;
     ensure!(header["queries_sha256"] == hex::encode(Sha256::digest(&body)).as_str(), "{}: queries_sha256 differs", dir.display());
+    let lines: Vec<&[u8]> = body.split(|&b| b == b'\n').filter(|l| !l.is_empty()).collect();
+    // In parallel, each query on its own; the failures are reported in file order.
+    let results: Vec<Result<Option<String>>> = lines
+        .par_iter()
+        .map(|line| {
+            let q: Value = serde_json::from_slice(line)?;
+            let op = q["op"].as_str().context("op")?;
+            Ok(match rt.answer(op, &q["args"]) {
+                Ok(a) if a == q["answer"] => None,
+                Ok(a) => Some(format!("{op} {}: {a} != {}", q["args"], q["answer"])),
+                Err(e) => Some(format!("{op} {}: {e:#}", q["args"])),
+            })
+        })
+        .collect();
     let o = rep.check("golden replay");
-    for line in body.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
-        let q: Value = serde_json::from_slice(line)?;
+    for res in results {
         o.count();
-        let op = q["op"].as_str().context("op")?;
-        match rt.answer(op, &q["args"]) {
-            Ok(a) if a == q["answer"] => {}
-            Ok(a) => o.fail(format!("{op} {}: {a} != {}", q["args"], q["answer"])),
-            Err(e) => o.fail(format!("{op} {}: {e:#}", q["args"])),
+        if let Some(f) = res? {
+            o.fail(f);
         }
     }
     Ok(())
