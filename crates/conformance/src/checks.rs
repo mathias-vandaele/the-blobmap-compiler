@@ -78,7 +78,7 @@ pub fn snapping_brute(r: &Reference, max: usize, rep: &mut Report) {
             .par_iter()
             .map(|&i| {
                 let (lat, lon) = r.points[i];
-                let want = blobmap_snap::find_brute(p, lat, lon, r.radius[m], r.larger[m], &r.sets[m]).outcome();
+                let want = blobmap_snap::find_brute(p, lat, lon, r.radius[m], r.small_max[m], &r.sets[m]).outcome();
                 let got = mode.at[i].map(|e| (e.piece, e.frac.to_bits())).map_err(|(c, d)| (c, d.to_bits()));
                 let want = want.map(|h| (h.piece, h.frac.to_bits())).map_err(|(c, d)| (c, d.to_bits()));
                 (got != want).then(|| format!("{} {}: grid {got:?}, every segment {want:?}", mode.name, uuid(&r.ids[i])))

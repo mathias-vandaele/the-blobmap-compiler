@@ -1,7 +1,7 @@
 //! The data report (SPEC §3), written next to the model directory: place counts per country
 //! and basic category, compared with `--previous-report`; served counts and reasons per mode;
-//! every trapped component; the fragments IDs were moved away from, to a larger component
-//! within Δ (SPEC §6); restrictions whose prefix copy has no exit; places without a
+//! every trapped component; the small components IDs were moved away from, and the
+//! components other than the largest that still serve IDs (SPEC §6); restrictions whose prefix copy has no exit; places without a
 //! category.
 
 use std::collections::BTreeMap;
@@ -54,28 +54,43 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
             .collect();
         trapped.insert(fam.name().into(), Value::Array(list));
     }
-    // Per mode, the components IDs were moved away from (likely OSM errors), most IDs first,
-    // with one OSM way each.
-    let mut moved = serde_json::Map::new();
+    // Per mode (SPEC §6): the small components IDs were moved away from, most IDs first, with
+    // the IDs left on each; and every component other than the largest still serving IDs, the
+    // real islands and the fragments with no larger component in reach (likely OSM errors).
+    // One OSM way each; filtered places are not served and not counted.
+    let (mut moved, mut left) = (serde_json::Map::new(), serde_json::Map::new());
     for (m, (mode, family)) in MODES.iter().enumerate() {
         let car = *family == "car";
         let (p, e) = if car { (f.car.p, &f.car.e) } else { (f.active.p, &f.active.e) };
-        let mut by: BTreeMap<u32, (u64, i64)> = BTreeMap::new();
-        let kept = ids.addresses.iter().copied().chain(ids.places.iter().map(|&p| c.addresses.len() + p));
-        for i in kept {
-            let k = snaps[m].at[i].moved_from;
-            if k == blobmap_format::NONE {
-                continue;
-            }
-            let x = if car { car_expert(f.car.g, e, k as usize) } else { active_expert(p, e, k as usize) }.context("a moved-from piece is servable")?;
+        let expert = |k: u32| if car { car_expert(f.car.g, e, k as usize) } else { active_expert(p, e, k as usize) };
+        // Per expert: IDs moved away, IDs served, and the least way of the pieces involved.
+        let mut from: BTreeMap<u32, (u64, i64)> = BTreeMap::new();
+        let mut on: BTreeMap<u32, (u64, i64)> = BTreeMap::new();
+        let count = |by: &mut BTreeMap<u32, (u64, i64)>, x: u32, k: u32| {
             let b = by.entry(x).or_insert((0, p.way[k as usize]));
             b.0 += 1;
             b.1 = b.1.min(p.way[k as usize]);
+        };
+        let kept = ids.addresses.iter().copied().chain(ids.places.iter().filter(|&&q| c.places[q].status == 0).map(|&q| c.addresses.len() + q));
+        for i in kept {
+            let s = &snaps[m].at[i];
+            if s.moved_from != blobmap_format::NONE {
+                count(&mut from, expert(s.moved_from).context("a moved-from piece is servable")?, s.moved_from);
+            }
+            if let Ok((k, _)) = s.outcome() {
+                count(&mut on, expert(k).context("a served piece is servable")?, k);
+            }
         }
-        let mut list: Vec<(u32, u64, i64)> = by.into_iter().map(|(x, (n, w))| (x, n, w)).collect();
-        list.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        let rows = list.into_iter().map(|(x, n, w)| json!({"expert": x, "nodes": e.nodes[x as usize], "ids_moved": n, "way": w}));
+        let sorted = |by: &BTreeMap<u32, (u64, i64)>| {
+            let mut v: Vec<(u32, u64, i64)> = by.iter().map(|(&x, &(n, w))| (x, n, w)).collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            v
+        };
+        let ids_on = |x: u32| on.get(&x).map_or(0, |b| b.0);
+        let rows = sorted(&from).into_iter().map(|(x, n, w)| json!({"expert": x, "nodes": e.nodes[x as usize], "ids_moved": n, "ids_left": ids_on(x), "way": w}));
         moved.insert(mode.to_string(), Value::Array(rows.collect()));
+        let rows = sorted(&on).into_iter().filter(|r| r.0 != 0).map(|(x, n, w)| json!({"expert": x, "nodes": e.nodes[x as usize], "ids": n, "way": w}));
+        left.insert(mode.to_string(), Value::Array(rows.collect()));
     }
     let previous = match &a.previous_report {
         None => Value::Null,
@@ -115,6 +130,7 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
         "served": served,
         "trapped": trapped,
         "moved_from": moved,
+        "served_components": left,
         "dead_end_restrictions": dead_ends,
         "previous": previous,
     }))

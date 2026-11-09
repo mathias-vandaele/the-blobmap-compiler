@@ -537,8 +537,8 @@ pub fn build(a: &Args) -> Result<BuildResult> {
         active_layout: &al,
         car_radius_m: c.car.config.snap.radius_m as f64,
         active_radius_m: c.active.config.snap.radius_m as f64,
-        car_larger_m: c.car.config.snap.larger_within_m,
-        active_larger_m: c.active.config.snap.larger_within_m,
+        car_small_max: c.car.config.snap.small_component_max_nodes,
+        active_small_max: c.active.config.snap.small_component_max_nodes,
     };
     let (snaps, ids) = run.run(&Snap, (&families, &catalog, inputs.polygon.is_some()))?;
     let wo = run.run(&WriteModel, WriteInput { args: a, inputs: &inputs, families: &families, catalog: &catalog, snaps: &snaps, ids: &ids })?;

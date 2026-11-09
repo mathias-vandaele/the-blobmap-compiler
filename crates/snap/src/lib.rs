@@ -2,8 +2,8 @@
 //! segments, the nearest point in the local tangent plane at the ID, and the fraction of
 //! the piece's length before it. A query asks for the nearest piece of three nested sets:
 //! the family's graph, the pieces eligible for the mode, and those it may be served on (not
-//! trapped). Their absence gives the reason codes; the offsets follow SPEC §7. Among the
-//! servable pieces, one of a larger component within Δ beyond the nearest wins (SPEC §6).
+//! trapped). Their absence gives the reason codes; the offsets follow SPEC §7. A piece of a
+//! small component is passed over for one of a larger component within the radius (SPEC §6).
 
 use blobmap_format::{INF, rnd};
 use blobmap_osm::Pieces;
@@ -33,8 +33,8 @@ pub struct Found {
     pub eligible: Option<Hit>,
     /// The nearest servable piece.
     pub nearest: Option<Hit>,
-    /// The servable piece the ID stands on: the nearest piece of the component with the most
-    /// nodes among the servable pieces within Δ beyond `nearest` (SPEC §6).
+    /// The servable piece the ID stands on: the nearest one of a component with more than
+    /// `small_max` nodes, or `nearest` when there is none within the radius (SPEC §6).
     pub servable: Option<Hit>,
 }
 
@@ -98,37 +98,6 @@ pub trait Sets: Sync {
     /// The node count of a servable piece's component.
     fn size(&self, _piece: u32) -> u32 {
         0
-    }
-}
-
-/// A servable piece met by a search: its least distance and where, on which segment.
-#[derive(Clone, Copy)]
-struct Candidate {
-    piece: u32,
-    dist_m: f64,
-    seg: usize,
-    t: f64,
-}
-
-impl Candidate {
-    /// Keeps the least distance per piece, the first one met on a tie.
-    fn add(list: &mut Vec<Candidate>, c: Candidate) {
-        match list.iter_mut().find(|x| x.piece == c.piece) {
-            Some(x) if c.dist_m < x.dist_m => *x = c,
-            Some(_) => {}
-            None => list.push(c),
-        }
-    }
-
-    /// SPEC §6: among the candidates within `larger_m` beyond the nearest at `d0`, the nearest
-    /// piece of the component with the most nodes; ties to the nearer, then the smaller piece.
-    fn choose(list: &[Candidate], d0: f64, larger_m: f64, sets: &dyn Sets, p: &Pieces) -> Option<Hit> {
-        list.iter()
-            .filter(|c| c.dist_m <= d0 + larger_m)
-            .min_by(|a, b| {
-                sets.size(b.piece).cmp(&sets.size(a.piece)).then(a.dist_m.total_cmp(&b.dist_m)).then(a.piece.cmp(&b.piece))
-            })
-            .map(|c| Hit { piece: c.piece, dist_m: c.dist_m, frac: frac_along(p, c.piece as usize, c.seg, c.t) })
     }
 }
 
@@ -253,8 +222,9 @@ impl Grid {
     }
 
     /// The nearest piece of each set within `radius_m`, ties to the smaller piece index; and
-    /// the servable piece chosen with a larger component within `larger_m` (Δ, SPEC §6).
-    pub fn find(&self, p: &Pieces, lat: f64, lon: f64, radius_m: f64, larger_m: f64, sets: &dyn Sets) -> Found {
+    /// the servable piece chosen, passing over components of at most `small_max` nodes
+    /// (SPEC §6).
+    pub fn find(&self, p: &Pieces, lat: f64, lon: f64, radius_m: f64, small_max: u32, sets: &dyn Sets) -> Found {
         let local = Local::at(lat, lon);
         let (gy, gx) = grid_units(lat, lon);
         let (cy, cx) = (gy.floor() as i64, gx.floor() as i64);
@@ -267,7 +237,7 @@ impl Grid {
             ((r as f64 * cell_h / w).ceil() as i64).min(half)
         };
         let mut f = Found::default();
-        let mut cands: Vec<Candidate> = Vec::new();
+        let mut large: Option<Hit> = None;
         let max_ring = (radius_m / cell_h).ceil() as i64 + 1;
         let mut prev_cols = -1i64;
         for r in 0..=max_ring {
@@ -303,33 +273,35 @@ impl Grid {
                                 if better(&f.nearest) {
                                     f.nearest = mk();
                                 }
-                                Candidate::add(&mut cands, Candidate { piece: k, dist_m: d, seg: i, t });
+                                if sets.size(k) > small_max && better(&large) {
+                                    large = mk();
+                                }
                             }
                         }
                     }
                 }
             }
             prev_cols = c;
-            // Every piece within Δ beyond the nearest servable one has been met.
-            if f.nearest.is_some_and(|h| h.dist_m + larger_m <= r as f64 * cell_h * 0.999) {
+            // Every piece nearer than the nearest of a large component has been met.
+            if large.is_some_and(|h| h.dist_m <= r as f64 * cell_h * 0.999) {
                 break;
             }
         }
-        f.servable = f.nearest.and_then(|n| Candidate::choose(&cands, n.dist_m, larger_m, sets, p));
+        f.servable = large.or(f.nearest);
         f
     }
 
     /// `find` for many points, in parallel, results in input order.
-    pub fn find_all(&self, p: &Pieces, points: &[(f64, f64)], radius_m: f64, larger_m: f64, sets: &dyn Sets) -> Vec<Found> {
-        points.par_iter().map(|&(lat, lon)| self.find(p, lat, lon, radius_m, larger_m, sets)).collect()
+    pub fn find_all(&self, p: &Pieces, points: &[(f64, f64)], radius_m: f64, small_max: u32, sets: &dyn Sets) -> Vec<Found> {
+        points.par_iter().map(|&(lat, lon)| self.find(p, lat, lon, radius_m, small_max, sets)).collect()
     }
 }
 
 /// `Grid::find` without the grid: every segment of every piece, for checking the grid.
-pub fn find_brute(p: &Pieces, lat: f64, lon: f64, radius_m: f64, larger_m: f64, sets: &dyn Sets) -> Found {
+pub fn find_brute(p: &Pieces, lat: f64, lon: f64, radius_m: f64, small_max: u32, sets: &dyn Sets) -> Found {
     let local = Local::at(lat, lon);
     let mut f = Found::default();
-    let mut cands: Vec<Candidate> = Vec::new();
+    let mut large: Option<Hit> = None;
     for k in 0..p.len() as u32 {
         if !sets.in_graph(k) {
             continue;
@@ -355,12 +327,14 @@ pub fn find_brute(p: &Pieces, lat: f64, lon: f64, radius_m: f64, larger_m: f64, 
                     if better(&f.nearest) {
                         f.nearest = mk();
                     }
-                    Candidate::add(&mut cands, Candidate { piece: k, dist_m: d, seg: i, t });
+                    if sets.size(k) > small_max && better(&large) {
+                        large = mk();
+                    }
                 }
             }
         }
     }
-    f.servable = f.nearest.and_then(|n| Candidate::choose(&cands, n.dist_m, larger_m, sets, p));
+    f.servable = large.or(f.nearest);
     f
 }
 
@@ -431,16 +405,16 @@ mod tests {
         let (kx, ky) = blobmap_osm::ruler(50f64.to_radians().cos());
         let at = |x: f64, y: f64| (50.0 + y / ky, 3.0 + x / kx);
         let (lat, lon) = at(30.0, 10.0);
-        let f = g.find(&p, lat, lon, 500.0, 0.0, &All);
+        let f = g.find(&p, lat, lon, 500.0, 0, &All);
         assert_eq!(f.any.unwrap().piece, 0);
         assert_eq!(f.eligible.unwrap().piece, 1);
         assert_eq!(f.servable.unwrap().piece, 2);
         assert!((f.any.unwrap().frac - 0.3).abs() < 1e-6 && (f.any.unwrap().dist_m - 10.0).abs() < 1e-3);
-        assert!(g.find(&p, lat, lon, 150.0, 0.0, &All).outcome() == Err((TRAPPED_COMPONENT, f.eligible.unwrap().dist_m as f32)));
+        assert!(g.find(&p, lat, lon, 150.0, 0, &All).outcome() == Err((TRAPPED_COMPONENT, f.eligible.unwrap().dist_m as f32)));
         let (lat, lon) = at(0.0, 0.0);
-        assert_eq!(g.find(&p, lat, lon, 500.0, 0.0, &All).any.unwrap().frac, 0.0);
+        assert_eq!(g.find(&p, lat, lon, 500.0, 0, &All).any.unwrap().frac, 0.0);
         let (lat, lon) = at(5000.0, 0.0);
-        assert_eq!(g.find(&p, lat, lon, 500.0, 0.0, &All).outcome(), Err((NO_ROAD, f32::INFINITY)));
+        assert_eq!(g.find(&p, lat, lon, 500.0, 0, &All).outcome(), Err((NO_ROAD, f32::INFINITY)));
     }
 
     /// Pieces 1 and 2 servable, in components of 10 and 100 nodes.
@@ -462,23 +436,21 @@ mod tests {
     }
 
     #[test]
-    fn a_larger_component_within_delta_wins() {
+    fn a_small_component_yields_within_the_radius() {
         let p = pieces();
         let g = Grid::new(&p);
         let (kx, ky) = blobmap_osm::ruler(50f64.to_radians().cos());
         let at = |x: f64, y: f64| (50.0 + y / ky, 3.0 + x / kx);
-        // 10 m from piece 1; piece 2 is 61 m away (at its start), 51 m beyond.
+        // 10 m from piece 1 (10 nodes); piece 2 (100 nodes) is 61 m away, at its start.
         let (lat, lon) = at(140.0, 10.0);
-        for (delta, want) in [(0.0, 1), (40.0, 1), (60.0, 2), (500.0, 2)] {
-            let f = g.find(&p, lat, lon, 500.0, delta, &TwoComponents);
+        for (small_max, radius, want) in [(0, 500.0, 1), (9, 500.0, 1), (10, 500.0, 2), (99, 500.0, 2), (100, 500.0, 1), (10, 50.0, 1)] {
+            let f = g.find(&p, lat, lon, radius, small_max, &TwoComponents);
             assert_eq!(f.nearest.unwrap().piece, 1);
-            assert_eq!(f.servable.unwrap().piece, want, "Δ {delta}");
-            assert_eq!(f, find_brute(&p, lat, lon, 500.0, delta, &TwoComponents), "Δ {delta}");
+            assert_eq!(f.servable.unwrap().piece, want, "{small_max} {radius}");
+            assert_eq!(f, find_brute(&p, lat, lon, radius, small_max, &TwoComponents), "{small_max} {radius}");
             let s = Snapped::new(&f, u32::MAX);
             assert_eq!(s.moved_from, if want == 2 { 1 } else { u32::MAX });
         }
-        // The radius still bounds the larger piece.
-        assert_eq!(g.find(&p, lat, lon, 50.0, 500.0, &TwoComponents).servable.unwrap().piece, 1);
     }
 
     #[test]

@@ -57,7 +57,9 @@ Place rules (defaults, kept in versioned config; the config hash goes into the m
 Each build writes a data report, outside the model directory (§8): `<model dir>.data-report.json`, next to the model directory.
 - **Place counts** per country and basic category, compared with the previous build's data report and flagging any change above 20 %. The previous report is passed as `--previous-report <file>` (§10); without it there is no comparison.
 - **Trapped components** (§5), which usually point at OSM errors: every one, sorted by size, with its node count, the number of IDs whose nearest eligible piece lies in it, and one OSM way id, so the large ones can be fixed in OSM. Provider score distributions drift between releases, so the rules are reviewed against this report every month.
-- **Fragments moved away from** (§6): per mode, every component that IDs were moved away from by the larger-component rule, sorted by the number of IDs moved, with its node count and one OSM way id, usually an OSM error to fix.
+- **Small components** (§6), per mode, each with its node count and one OSM way id, sorted by IDs:
+  - every component that IDs were moved away from, with the IDs moved and the IDs left on it;
+  - every component other than the largest that still serves IDs: the real islands, and fragments with no larger component in reach, usually OSM errors to fix.
 - **Dead-end restrictions** (§5): every via-way restriction whose prefix copy has no turn out, with its relation id and the copied segment's way, usually a mis-tagged restriction.
 
 ## 4. Modes and profiles
@@ -118,9 +120,9 @@ The only inputs the model accepts are Overture address IDs and Overture place ID
   - A direction the mode may not use has offset ∞. An example is a bike against a one-way it can neither ride nor push along.
   - Offsets are whole seconds (§7).
 - **Snapping happens once, at compile time.** An ID snaps to the nearest eligible road piece within 2 km for car and 500 m for bike and walk. An ID whose closest point falls exactly on a node stands at that node. Pieces in trapped components (§5) are skipped: the ID snaps to the next nearest eligible piece within the radius, or gets the reason code TrappedComponent if there is none. An ACTIVE piece whose two ends lie in different experts lies on no route, and is skipped the same way. Only the result is stored; no geometry or coordinate index ships in the model.
-- **Fragments yield to a larger component, in every mode.** A piece left after the skips above is a candidate. With d the distance to the nearest candidate, the candidates within d + Δ (and within the radius) compete. The ID snaps to the nearest candidate piece of the competing component with the most nodes. Ties go to the nearer piece, then to the smaller piece index. So an ID beside a tiny fragment (a car park, a mapping gap) snaps to the street just beyond it.
-  - Δ is a profile setting per family, chosen from data: larger than the extra distance from most fragment IDs to a larger component, and well below the distance from any real island to the mainland.
-  - Islands stay served whatever their size. A component with no candidate of a larger one within Δ keeps its IDs. Fragments stay in the model and are never dropped.
+- **Small components yield, in every mode.** A component of at most N nodes is never chosen when a piece of a larger component, left after the skips above, lies within the radius: the ID snaps to the nearest such piece. Otherwise the nearest piece wins, as above. N is a profile setting per family, 10 for both, mirroring OSRM's small-component size. So an ID beside a tiny fragment (a car park, a mapping gap) snaps to the street beyond it.
+  - Islands stay served whatever their size; a small one loses its IDs only to a larger component within the radius. Fragments stay in the model and are never dropped.
+  - No other rule applies to fragments. The IDs they keep are reported as OSM errors (§3).
 - **Eligibility:** only road pieces in the mode's graph are eligible. For bike or walk, those are the pieces of the shared graph with at least one direction that mode may use. For car: no motorways, trunk roads, or their links and ramps. For every mode: no bridges, tunnels or covered pieces, so an address never lands on an overpass or in a tunnel. Service roads stay eligible. The exact rules live in the profile config.
 - **Not served:** an ID that fails to snap for a mode keeps a reason code for that mode:
   - `NoRoad`: no piece of the family's graph within the mode's radius;
@@ -262,7 +264,7 @@ Checks:
   - an address on a via segment, reached through a restricted prefix, gets its exact time, in both directions.
 - Re-customization with random metrics on the same hierarchy.
 - The address and place heads, including same-piece pairs and same-ID queries.
-- Snapping re-check: re-snapping, trapped skips and the larger-component rule included, reproduces the stored entries exactly; a fragment beside a street sends its ID to the street, and an island beyond Δ keeps its own.
+- Snapping re-check: re-snapping, trapped skips and the small-component rule included, reproduces the stored entries exactly; an ID beside a fragment snaps to the street, and IDs on a large island within the radius and on a small one beyond it stay on their islands.
 - Experts: components found as expected on synthetic graphs (islands, one-way traps, a footbridge linking two parts for walkers only); cross-expert pairs unreachable.
 - Cells: an expert built as cells gives the same answers as the same expert built in one piece.
 - The cap: synthetic graphs with routes longer than 18 h give `BEYOND`, and routes just under it stay exact; a piece longer than the cap is cut (§7), and an ID on it gets its exact time.

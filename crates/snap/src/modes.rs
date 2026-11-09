@@ -112,9 +112,9 @@ mod tests {
             };
             let Some((lat, lon)) = at(id) else { continue };
             let f = match mode {
-                "car" => cgrid.find(&cp, lat, lon, cfg.car.config.snap.radius_m as f64, cfg.car.config.snap.larger_within_m, &car),
-                "bike" => agrid.find(&ap, lat, lon, cfg.active.config.snap.radius_m as f64, cfg.active.config.snap.larger_within_m, &bike),
-                _ => agrid.find(&ap, lat, lon, cfg.active.config.snap.radius_m as f64, cfg.active.config.snap.larger_within_m, &walk),
+                "car" => cgrid.find(&cp, lat, lon, cfg.car.config.snap.radius_m as f64, cfg.car.config.snap.small_component_max_nodes, &car),
+                "bike" => agrid.find(&ap, lat, lon, cfg.active.config.snap.radius_m as f64, cfg.active.config.snap.small_component_max_nodes, &bike),
+                _ => agrid.find(&ap, lat, lon, cfg.active.config.snap.radius_m as f64, cfg.active.config.snap.small_component_max_nodes, &walk),
             };
             let got = f.outcome().err().map(|(code, _)| match code {
                 NO_ELIGIBLE_ROAD => "NoEligibleRoad",

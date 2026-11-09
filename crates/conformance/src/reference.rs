@@ -62,8 +62,8 @@ pub struct Reference {
     pub points: Vec<(f64, f64)>,
     pub sets: [Membership; 3],
     pub radius: [f64; 3],
-    /// Per mode: Δ, how far beyond the nearest servable piece a larger component wins.
-    pub larger: [f64; 3],
+    /// Per mode: the small-component size (SPEC §6).
+    pub small_max: [u32; 3],
     /// The IDs and the aliases, each sorted, with their internal index.
     sorted_ids: Vec<(Id, u32)>,
     sorted_aliases: Vec<(Id, u32)>,
@@ -91,12 +91,12 @@ impl Reference {
             Membership::active(&active_pieces, &active, &active_experts, 1),
         ];
         let radius = [config.car.config.snap.radius_m as f64, config.active.config.snap.radius_m as f64, config.active.config.snap.radius_m as f64];
-        let (cl, al) = (config.car.config.snap.larger_within_m, config.active.config.snap.larger_within_m);
-        let larger = [cl, al, al];
+        let (cs, a_s) = (config.car.config.snap.small_component_max_nodes, config.active.config.snap.small_component_max_nodes);
+        let small_max = [cs, a_s, a_s];
         let found: Vec<Vec<Snapped>> = (0..3)
             .map(|m| {
                 let (g, p) = if m == 0 { (&cg, &car_pieces) } else { (&ag, &active_pieces) };
-                points.par_iter().map(|&(lat, lon)| Snapped::new(&g.find(p, lat, lon, radius[m], larger[m], &sets[m]), NONE)).collect()
+                points.par_iter().map(|&(lat, lon)| Snapped::new(&g.find(p, lat, lon, radius[m], small_max[m], &sets[m]), NONE)).collect()
             })
             .collect();
         let na = catalog.addresses.len();
@@ -156,7 +156,7 @@ impl Reference {
             points,
             sets,
             radius,
-            larger,
+            small_max,
             sorted_ids,
             sorted_aliases,
         })

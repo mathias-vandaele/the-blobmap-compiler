@@ -83,7 +83,7 @@ fn main() -> Result<()> {
             }
             // The nearest eligible piece, every piece searched: its expert is the trapped one.
             let p = if mode.car { &r.car_pieces } else { &r.active_pieces };
-            let hits: Vec<_> = at.par_iter().map(|&i| find_brute(p, r.points[i].0, r.points[i].1, r.radius[m], r.larger[m], &r.sets[m]).eligible).collect();
+            let hits: Vec<_> = at.par_iter().map(|&i| find_brute(p, r.points[i].0, r.points[i].1, r.radius[m], r.small_max[m], &r.sets[m]).eligible).collect();
             println!("  {}: {} IDs unserved because of their expert (TrappedComponent)", mode.name, at.len());
             println!("  {:>36} {:>21} {:>7} {:>7} {:>6} {:>11}", "ID", "point", "metres", "expert", "nodes", "OSM way");
             for (&i, h) in at.iter().zip(hits) {
