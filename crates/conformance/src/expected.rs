@@ -256,6 +256,9 @@ impl Expected<'_> {
                 Ok(i) => i,
                 Err(r) => return r,
             };
+            if x == y {
+                return json!({"time": 0, "place": null});
+            }
             let (first, second) = (self.column(car, &[(x, 0)], "from"), self.column(walk, &[(y, 0)], "to"));
             let trip = |p: usize| first[p].saturating_add(pen).saturating_add(second[p]);
             return match transfers.iter().map(|&p| (trip(p), self.r.ids[p])).filter(|t| t.0 != INF).min() {
@@ -273,7 +276,11 @@ impl Expected<'_> {
         // The first leg, then the second from (or to) every transfer with its start.
         let first = self.column(m1, &[(i, 0)], a["dir"].as_str().unwrap());
         let src: Vec<(usize, u16)> = transfers.iter().map(|&p| (p, first[p].saturating_add(pen))).filter(|s| s.1 != INF).collect();
-        let col = if src.is_empty() { Arc::new(vec![INF; self.r.n()]) } else { self.column(m2, &src, a["dir"].as_str().unwrap()) };
+        let mut col: Vec<u16> =
+            if src.is_empty() { vec![INF; self.r.n()] } else { self.column(m2, &src, a["dir"].as_str().unwrap()).to_vec() };
+        if self.r.modes[m2].at[i].is_ok() {
+            col[i] = 0;
+        }
         let mut h = Sha256::new();
         for t in col.iter() {
             h.update(t.to_le_bytes());

@@ -129,7 +129,7 @@ The gate passes on a clean commit when all of these hold:
 Decided at approval: trapped components follow SPEC §5 ("Precisely"), and the data report
 compares against `--previous-report` (SPEC §3, §10).
 
-## Milestones 3–7
+## Milestones 3–6
 
 Derived data (city and region extracts, the neighbours `.pbf`) goes in a new directory
 outside the read-only reference folders.
@@ -146,26 +146,31 @@ outside the read-only reference folders.
       - walk: median relative error about 0.06 %, as in the research.
       - bike: median relative error about 5 %, as in the research (the missing turn costs,
         SPEC §4);
-    - every component served: the expert list shows Corsica and the islands, and every
-      non-trapped expert serves IDs.
-- **4. Cells.**
-  - **Build:** France with a memory budget that forces cells, and France in one piece.
+      - the pairs answered `DifferentComponent` are only those a real island or a ferry
+        separates;
+    - no ID unserved because of its expert: the IDs per reason code, Corsica's and the
+      islands' served counts, and the largest experts that serve no ID.
+- **4. Fallback.**
+  - **Build:** Hauts-de-France, France, and one `.pbf` covering France, Belgium,
+    Luxembourg, Switzerland and Germany, each with the coarsening fallback forced, and
+    each in one piece.
+  - **Work, in order, with HdF numbers for each:** flow-based refinement of the lifted
+    coarse separators on a fine band around each separator; then, for CAR, an order from
+    the node-based intersection graph lifted to the turn graph. Keep whichever reaches
+    ≤ 1.25× sweep layers with the lower peak RSS.
   - **Gate:**
-    - both replay the same country golden file (same `inputs_hash`), and full columns from
-      sampled sources are equal;
-    - levels, links, triangles and build time are reported side by side.
-- **5. France and its neighbours.**
-  - **Build:** one `.pbf` covering France, Belgium, Luxembourg, Switzerland and Germany.
-  - **Gate:**
-    - zero mismatches on cross-border pairs and isochrones near the borders;
-    - the data report gives Overture quality per country.
-- **6. Europe.**
+    - zero mismatches at every tier, cross-border golden checks green;
+    - sweep layers (FORMAT's level count) ≤ 1.25× one piece, links and elimination-tree
+      height reported beside them in the build report;
+    - cells cut from the fine order: links and elimination-tree height equal to one piece;
+    - peak RSS ≤ 62 GB.
+- **5. Europe.**
   - **Gate:**
     - built within 62 GB;
     - the build report gives bytes per link, per address and per column, the largest pack
       per family (with Eurasia's top block below 2³² in every count), and an extrapolation
       to each continent.
-- **7. World.**
+- **6. World.**
   - **Gate:**
     - built;
     - experts per continent listed from the expert table;

@@ -542,6 +542,19 @@ pub fn build(a: &Args) -> Result<BuildResult> {
     let wo = run.run(&WriteModel, WriteInput { args: a, inputs: &inputs, families: &families, catalog: &catalog, snaps: &snaps, ids: &ids })?;
     let data = report::data(a, &families, &catalog, &snaps, &ids, &wo.served)?;
     blobmap_format::json::write_file(&a.report_path("data"), &data)?;
+    // Each family's largest expert and every expert built as cells: its links, its sweep
+    // layers (FORMAT's level count) and its elimination tree's height (SPEC §13, milestone 4).
+    let hierarchies: Vec<serde_json::Value> = [("car", &cb), ("active", &ab)]
+        .iter()
+        .flat_map(|(f, b)| {
+            b.experts.iter().enumerate().filter(|(x, e)| *x == 0 || e.h.cells() > 0).map(move |(x, e)| {
+                json!({
+                    "family": f, "expert": x, "nodes": e.h.len(), "links": e.h.links(), "cells": e.h.cells(),
+                    "sweep_layers": e.h.levels(), "tree_levels": e.h.tree_levels(),
+                })
+            })
+        })
+        .collect();
     let build = json!({
         "model_id": wo.manifest.model_id,
         "stages": run.stages.iter().map(|s| json!({"name": s.name, "wall_s": s.wall_s, "peak_rss_bytes": s.peak_rss_bytes})).collect::<Vec<_>>(),
@@ -551,6 +564,7 @@ pub fn build(a: &Args) -> Result<BuildResult> {
             let arcs = if f == "car" { "turns" } else { "roads" };
             (f.clone(), json!({"pack": p.pack, "rows": p.rows, "links": p.links, arcs: p.arcs}))
         }).collect::<serde_json::Map<_, _>>(),
+        "hierarchies": hierarchies,
         "shard_bytes": wo.shard_bytes,
         "shards": wo.manifest.experts.iter().flat_map(|e| e.shards.iter()).collect::<std::collections::BTreeSet<_>>().len(),
     });

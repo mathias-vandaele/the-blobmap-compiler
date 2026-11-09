@@ -228,7 +228,7 @@ be the other endpoint. Equivalently, link (v, u) with v > u is at
 **Limits.** Each pack's row, link, turn (CAR) and road (ACTIVE) counts must each be below
 2³², since they are U32 CSR offsets. The build fails if any count reaches 2³². The build
 report (SPEC §10) gives, per family, the largest pack and each of these counts for it.
-Milestone 6 (SPEC §13) checks these counts for Eurasia's top block.
+Milestone 5 (SPEC §13) checks these counts for Eurasia's top block.
 
 **Tensor names.** A full name is `/`-separated words, and its last word is the tensor. Metric
 tensors are prefixed by the metric name (`car.w`, `bike.up`), so a new metric only adds
@@ -770,7 +770,7 @@ queries_sha256}`.
 | `reachable_from_all`, `reachable_from_any` | `{sources, t, mode}` | `{count, ids_sha256}` |
 | `multi_criteria`, boolean form | `{expr, kind?}` | `{count, ids_sha256}` |
 | `multi_criteria`, weighted form | `{expr, kind?, k}` | `{top: [{id, score}]}` |
-| `chained` | `{a, b, transfer_category, penalty}` | `{time, place}`, or `{time: "BEYOND", place: null}` |
+| `chained` | `{a, b, transfer_category, penalty}` | `{time, place}`; `{time: 0, place: null}` when a = b; or `{time: "BEYOND", place: null}` |
 | `chained_column` | `{id, transfer_category, penalty, dir}` | `{times_sha256, beyond}` |
 
 - **`ids_sha256`:** the SHA-256 over the 16-byte IDs of the answer, ascending.

@@ -189,6 +189,19 @@ impl Hierarchy {
         top + self.blocks.iter().filter(|b| b.kind == Kind::Cell).map(LayoutBlock::levels).max().unwrap_or(0)
     }
 
+    /// The elimination tree's height in levels: the nodes on its longest root-to-leaf path
+    /// (FORMAT §5.2: the parent of v is its largest upper neighbour). It equals `levels`
+    /// for an expert built in one piece, and for one built as cells from the fine order.
+    pub fn tree_levels(&self) -> u32 {
+        let mut h = vec![1u32; self.len()];
+        for v in (0..self.len() as u32).rev() {
+            if let Some(&p) = self.up_head[self.row(v)].last() {
+                h[p as usize] = h[p as usize].max(h[v as usize] + 1);
+            }
+        }
+        h.into_iter().max().unwrap_or(0)
+    }
+
     pub fn cells(&self) -> usize {
         self.blocks.iter().filter(|b| b.kind == Kind::Cell).count()
     }
@@ -294,7 +307,9 @@ mod tests {
         assert!(h.cells() >= 3);
         if nd_max == usize::MAX {
             assert_eq!(pairs(&h), pairs(&whole), "the links of the one-piece hierarchy");
+            assert_eq!(h.tree_levels(), whole.tree_levels());
         }
+        assert_eq!(whole.tree_levels(), whole.levels());
         for v in 0..h.len() as u32 {
             let bv = h.block_of(v);
             for kk in h.row(v) {

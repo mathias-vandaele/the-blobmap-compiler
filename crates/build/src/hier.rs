@@ -13,12 +13,11 @@ use crate::family::Family;
 /// `memory_budget_bytes / BYTES_PER_NODE` nodes.
 pub const BYTES_PER_NODE: u64 = 1024;
 
-/// The memory per node of nested dissection on an expert's whole fine graph (measured: about
-/// 330 bytes for France's CAR expert, 450 for ACTIVE, 770 for Hauts-de-France's, rounded up
-/// for margin): an expert of at most
-/// `MEMORY_LIMIT_BYTES / ND_BYTES_PER_NODE` nodes is cut into cells from its own order, a
-/// larger one from a coarsened graph (SPEC §5).
-pub const ND_BYTES_PER_NODE: u64 = 1024;
+/// The memory per node of nested dissection on an expert's whole fine graph, at the order
+/// stage's peak (measured on France: 10.9 GB for 20.5 M CAR nodes, about 535 bytes): an
+/// expert of at most `MEMORY_LIMIT_BYTES / ND_BYTES_PER_NODE` nodes is cut into cells from
+/// its own order, a larger one from a coarsened graph (SPEC §5).
+pub const ND_BYTES_PER_NODE: u64 = 535;
 
 /// The peak RSS of a build (SPEC §10).
 pub const MEMORY_LIMIT_BYTES: u64 = 62_000_000_000;

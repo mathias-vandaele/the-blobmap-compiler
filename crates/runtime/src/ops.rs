@@ -268,6 +268,10 @@ impl Runtime {
             Ok(i) => i,
             Err(r) => return Ok(reason_json(r, b)),
         };
+        // The same ID (SPEC §9): 0 s, through no transfer place.
+        if ia == ib {
+            return Ok(json!({"time": 0, "place": null}));
+        }
         let drive = self.column(&[Source { id: ia, start: 0 }], car, Dir::From)?;
         let on_foot = self.column(&[Source { id: ib, start: 0 }], walk, Dir::To)?;
         let mut best: Option<(u16, Id)> = None;
@@ -302,7 +306,11 @@ impl Runtime {
             .map(|p| Source { id: p, start: self.faults.add(leg[p as usize], penalty) })
             .filter(|s| s.start != INF)
             .collect();
-        let col = self.column(&src, second, dir)?;
+        let mut col = self.column(&src, second, dir)?;
+        // `id` itself: 0 s by the same-ID rule, when it is served for the other leg too.
+        if self.served(i, second).is_ok() {
+            col[i as usize] = 0;
+        }
         Ok(column_json(&col))
     }
 

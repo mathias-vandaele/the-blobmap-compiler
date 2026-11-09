@@ -193,9 +193,10 @@ The spec defines each operation by its exact result, never by an algorithm. A ru
 - **Point to point:** `chained(a, b, transfer_category, penalty)` = min over transfer places p of car(a, p) + penalty + walk(p, b).
   - `a` must be served for car and `b` for walk; otherwise the answer is that ID's reason.
   - The answer is the time and p, ties to the smallest ID (§7). When no p gives a time below the cap, it is `BEYOND`, with no place.
-  - The formula holds as written, also when a = b: the trip always passes a transfer place.
+  - **Same ID:** when a = b, the answer is 0 s with no place (the same-ID rule above).
 - **Column:** `dir` `from` gives, for every ID y, the chained time from `id` to y; `to` gives, for every y, the chained time from y to `id`. The trip is car then walk in both.
   - `id` must be served for its leg's mode: car for `from`, walk for `to`. An ID not served for the other leg's mode gets `BEYOND`, as in a column.
+  - `id`'s own entry is 0 s when it is served for both modes (the same-ID rule).
 - **Arithmetic:** `penalty` is whole seconds below 65,535, and the sum saturates (§7).
 
 **`multi_criteria`.** The expression is a JSON tree:
@@ -283,11 +284,10 @@ Each milestone ends at a gate, and the next starts only once the gate passes. Th
 
 1. **Spec and FORMAT.md.** This spec approved; FORMAT.md written (every tensor, invariant and version rule) and approved. Gate: both signed off, before any compiler code.
 2. **Toy and synthetic.** The compiler, reference runtime and suite on the toy town and synthetic graphs (islands, one-way traps, the cap, ties, cells). Gate: tiny tier green, byte-identical builds across thread counts.
-3. **France.** A full build from the France `.pbf` within 62 GB. Gate: country tier green; accuracy against OSRM at least as good as the research engine (car MAE about 19 s over France); every component served, Corsica and islands included.
-4. **Cells.** France built with a memory budget small enough to force cells, against France built in one piece. Gate: identical answers; cut from the fine order, identical link and level counts; levels, shortcuts and build time compared and reported.
-5. **France and its neighbours.** A `.pbf` covering France, Belgium, Luxembourg, Switzerland and Germany. Gate: exact cross-border trips and isochrones; Overture data quality reported per country.
-6. **Europe.** Gate: built within 62 GB; measured bytes per link, per address and per column, and the extrapolation to each continent.
-7. **World.** Gate: built; experts per continent listed; the hardware choice for serving made from the measured sizes.
+3. **France.** A full build from the France `.pbf` within 62 GB. Gate: country tier green; accuracy against OSRM at least as good as the research engine (car MAE about 19 s over France), with pairs in different experts only where a real island or a ferry separates them; no ID unserved because of its expert, Corsica and islands served.
+4. **Fallback.** Experts built as cells from the coarsening fallback (§5), forced, on Hauts-de-France, France, and a `.pbf` covering France, Belgium, Luxembourg, Switzerland and Germany. Gate: zero mismatches at every tier; cross-border golden checks green; at most 1.25× the sweep layers of one piece (FORMAT's level count: top block plus deepest cell); peak RSS ≤ 62 GB. Cells cut from the fine order have the one-piece links and elimination-tree height exactly.
+5. **Europe.** Gate: built within 62 GB; measured bytes per link, per address and per column, and the extrapolation to each continent.
+6. **World.** Gate: built; experts per continent listed; the hardware choice for serving made from the measured sizes.
 
 ## 14. Deferred
 
