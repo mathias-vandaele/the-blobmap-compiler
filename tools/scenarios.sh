@@ -1,5 +1,5 @@
 # Sourced by ci.sh and tools/determinism.sh: `build_scenario <inputs dir> <scenario> <config
-# dir> <out>` runs `blobc build` on one fixture scenario written by the fixtures binary.
+# dir> <out>` runs `blobc build` on one fixture scenario written by `blobc fixtures`.
 build_scenario() {
     local in="$1" s="$2" cfg="$3" out="$4" ext=()
     mkdir -p "$(dirname "$out")"

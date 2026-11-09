@@ -12,7 +12,7 @@ SPEC version 2.0.0
 - **Out of scope:** GPU runtimes (CUDA, Metal, wgpu), servers, the BlobMap API, precomputed category fields, runtime benchmarks.
 - **Consumer:** BlobMap servers only for now. The spec is written so it could be published.
 - **Scale:** designed for the world. The compiler compiles exactly the `.pbf` it is given; the first target is France.
-- **The repository stays lean:** one workspace, small crates, no experiments.
+- **The repository stays lean:** one workspace of two crates (§10), no experiments.
 
 ## 2. Concepts
 
@@ -242,7 +242,7 @@ blobc inspect <model dir>
 - **Determinism:** the same inputs, config and compiler version give byte-identical output, with any thread count. CI checks it.
 - **Time:** no target; up to a week for the world is acceptable.
 - **Cadence:** a full rebuild every month. No incremental build machinery is required.
-- **Code:** a Rust workspace of small crates, traits and composition, no inheritance-style hierarchies. Configs (profiles, place rules) are files, not code.
+- **Code:** two crates: blobmap-format and blobc, traits and composition, no inheritance-style hierarchies. Configs (profiles, place rules) are files, not code.
 
 ## 11. Conformance
 

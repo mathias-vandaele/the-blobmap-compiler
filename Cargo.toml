@@ -32,24 +32,14 @@ sha2 = "=0.11.1"
 strsim = "=0.11.1"
 toml = "0.9"
 
-blobmap-format = { path = "crates/format" }
-blobmap-fixtures = { path = "crates/fixtures" }
-blobmap-profile = { path = "crates/profile" }
-blobmap-osm = { path = "crates/osm" }
-blobmap-graph = { path = "crates/graph" }
-blobmap-order = { path = "crates/order" }
-blobmap-cch = { path = "crates/cch" }
-blobmap-overture = { path = "crates/overture" }
-blobmap-snap = { path = "crates/snap" }
-blobmap-build = { path = "crates/build" }
-blobmap-runtime = { path = "crates/runtime" }
-blobmap-conformance = { path = "crates/conformance" }
+blobmap-format = { path = "crates/blobmap-format" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+len_without_is_empty = "allow"
 needless_range_loop = "allow"
 too_many_arguments = "allow"
 type_complexity = "allow"

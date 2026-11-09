@@ -1,0 +1,34 @@
+[package]
+name = "blobc"
+description = "The BlobMap world-model compiler: OSM and Overture in, a FORMAT.md model out; its conformance suite and tools."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "blobc"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+clap.workspace = true
+deunicode.workspace = true
+flate2.workspace = true
+hex.workspace = true
+libc.workspace = true
+osmpbf.workspace = true
+parquet.workspace = true
+rand.workspace = true
+rayon.workspace = true
+routingkit-cch.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+strsim.workspace = true
+toml.workspace = true
+blobmap-format.workspace = true
+
+[lints]
+workspace = true

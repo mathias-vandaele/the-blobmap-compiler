@@ -3,12 +3,12 @@
 # the same SHA-256 for every file of the model directory.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
-cargo build --quiet --release --manifest-path "$root/Cargo.toml" -p blobmap-cli -p blobmap-fixtures
+cargo build --quiet --release --manifest-path "$root/Cargo.toml" -p blobc
 BLOBC="$root/target/release/blobc"
 . "$root/tools/scenarios.sh"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-"$root/target/release/fixtures" "$work/in" >/dev/null
+"$BLOBC" fixtures "$work/in" >/dev/null
 status=0
 for dir in "$work"/in/*/; do
     s="$(basename "$dir")"

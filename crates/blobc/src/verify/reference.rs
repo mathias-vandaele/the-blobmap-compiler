@@ -1,0 +1,181 @@
+//! The reference from the inputs: the original family graphs, their components, the catalog,
+//! and every ID snapped per mode (SPEC §6), computed with the compiler's input modules but
+//! never from the model.
+
+use std::path::PathBuf;
+
+use anyhow::Result;
+use blobmap_format::NONE;
+use rayon::prelude::*;
+
+use crate::build::{ActiveNetwork, CarNetwork, ReadCatalog, Stage};
+use crate::graph::{ActiveGraph, CarGraph, Components, active::METRICS};
+use crate::osm::Pieces;
+use crate::overture::{Catalog, Id, Polygon, Release};
+use crate::profile::config::Config;
+use crate::snap::modes::{active_component, car_component};
+use crate::snap::{FILTERED_PLACE, Grid, Membership, Snapped};
+
+/// The inputs of a build.
+#[derive(Clone, Debug)]
+pub struct Inputs {
+    pub pbf: PathBuf,
+    pub overture: PathBuf,
+    pub config: PathBuf,
+    pub extent: Option<PathBuf>,
+}
+
+/// Where an ID stands for a mode.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Entry {
+    pub component: u32,
+    pub piece: u32,
+    pub frac: f64,
+}
+
+pub struct Mode {
+    pub name: &'static str,
+    pub car: bool,
+    /// The metric's index in its family.
+    pub metric: usize,
+    /// Per ID (internal-index order): the entry, or (code, metres); code 4 for a filtered
+    /// place.
+    pub at: Vec<Result<Entry, (u8, f32)>>,
+}
+
+pub struct Reference {
+    pub car_pieces: Pieces,
+    pub car: CarGraph,
+    pub car_components: Components,
+    pub active_pieces: Pieces,
+    pub active: ActiveGraph,
+    pub active_components: Components,
+    pub catalog: Catalog,
+    /// Every ID of the model in internal-index order: addresses, then places (catalog
+    /// index), each with its point.
+    pub ids: Vec<Id>,
+    pub place_of: Vec<Option<usize>>,
+    /// (alias, internal index).
+    pub aliases: Vec<(Id, u32)>,
+    pub modes: Vec<Mode>,
+    /// Per ID (internal-index order): its point. Per mode: the snapping sets and radius.
+    pub points: Vec<(f64, f64)>,
+    pub sets: [Membership; 3],
+    pub radius: [f64; 3],
+    /// Per mode: the small-component size (SPEC §6).
+    pub small_max: [u32; 3],
+    /// The IDs and the aliases, each sorted, with their internal index.
+    sorted_ids: Vec<(Id, u32)>,
+    sorted_aliases: Vec<(Id, u32)>,
+}
+
+impl Reference {
+    pub fn build(i: &Inputs) -> Result<Reference> {
+        let config = Config::load(&i.config)?;
+        // The catalog first: its reading peaks well above what it keeps, and so do the
+        // networks', so neither peak sits on the other's result.
+        let release = Release::open(&i.overture)?;
+        let polygon = match &i.extent {
+            Some(p) => Some(Polygon::parse_poly(&std::fs::read_to_string(p)?)?),
+            None => None,
+        };
+        let catalog = ReadCatalog.run((&release, &config, polygon.as_ref()))?;
+        crate::build::mem::trim();
+        let (car_pieces, car) = CarNetwork.run((i.pbf.as_path(), &config))?;
+        crate::build::mem::trim();
+        let (active_pieces, active) = ActiveNetwork.run((i.pbf.as_path(), &config))?;
+        crate::build::mem::trim();
+        let (car_components, active_components) = (car.components(), active.components());
+        let points: Vec<(f64, f64)> =
+            catalog.addresses.iter().map(|a| (a.lat, a.lon)).chain(catalog.places.iter().map(|p| (p.lat, p.lon))).collect();
+        let (cg, ag) = (Grid::new(&car_pieces), Grid::new(&active_pieces));
+        let sets = [
+            Membership::car(&car_pieces, &car, &car_components),
+            Membership::active(&active_pieces, &active, &active_components, 0),
+            Membership::active(&active_pieces, &active, &active_components, 1),
+        ];
+        let radius = [config.car.config.snap.radius_m as f64, config.active.config.snap.radius_m as f64, config.active.config.snap.radius_m as f64];
+        let (cs, a_s) = (config.car.config.snap.small_component_max_nodes, config.active.config.snap.small_component_max_nodes);
+        let small_max = [cs, a_s, a_s];
+        let found: Vec<Vec<Snapped>> = (0..3)
+            .map(|m| {
+                let (g, p) = if m == 0 { (&cg, &car_pieces) } else { (&ag, &active_pieces) };
+                points.par_iter().map(|&(lat, lon)| Snapped::new(&g.find(p, lat, lon, radius[m], small_max[m], &sets[m]), NONE)).collect()
+            })
+            .collect();
+        let na = catalog.addresses.len();
+        let inside = |k: usize| polygon.is_some() || found.iter().any(|f| f[k].any);
+        let mut pts: Vec<usize> = (0..na).filter(|&k| inside(k)).collect();
+        let n_addr = pts.len();
+        pts.extend((0..catalog.places.len()).filter(|&p| inside(na + p)).map(|p| na + p));
+        let ids: Vec<Id> = pts.iter().map(|&k| if k < na { catalog.addresses[k].id } else { catalog.places[k - na].id }).collect();
+        let place_of: Vec<Option<usize>> = pts.iter().map(|&k| (k >= na).then(|| k - na)).collect();
+        let index_of_place = |p: u32| pts[n_addr..].binary_search(&(na + p as usize)).ok().map(|i| (n_addr + i) as u32);
+        let aliases: Vec<(Id, u32)> = catalog.aliases.iter().filter_map(|&(a, p)| index_of_place(p).map(|i| (a, i))).collect();
+        let names = ["car", "bike", "walk"];
+        let modes = (0..3)
+            .map(|m| {
+                let at = pts
+                    .iter()
+                    .map(|&k| {
+                        if k >= na && catalog.places[k - na].status != 0 {
+                            return Err((FILTERED_PLACE, 0.0));
+                        }
+                        let (piece, frac) = found[m][k].outcome()?;
+                        let component = if m == 0 {
+                            car_component(&car, &car_components, piece as usize).expect("servable")
+                        } else {
+                            active_component(&active_pieces, &active_components, piece as usize).expect("servable")
+                        };
+                        Ok(Entry { component, piece, frac })
+                    })
+                    .collect();
+                Mode { name: names[m], car: m == 0, metric: if m == 0 { 0 } else { m - 1 }, at }
+            })
+            .collect();
+        debug_assert_eq!(METRICS, ["bike", "walk"]);
+        let points = pts.iter().map(|&k| points[k]).collect();
+        drop(found);
+        crate::build::mem::trim();
+        let sorted = |v: Vec<(Id, u32)>| {
+            let mut v = v;
+            v.sort_unstable();
+            v
+        };
+        let sorted_ids = sorted(ids.iter().enumerate().map(|(i, id)| (*id, i as u32)).collect());
+        let sorted_aliases = sorted(aliases.to_vec());
+        Ok(Reference {
+            car_pieces,
+            car,
+            car_components,
+            active_pieces,
+            active,
+            active_components,
+            catalog,
+            ids,
+            place_of,
+            aliases,
+            modes,
+            points,
+            sets,
+            radius,
+            small_max,
+            sorted_ids,
+            sorted_aliases,
+        })
+    }
+
+    pub fn n(&self) -> usize {
+        self.ids.len()
+    }
+
+    pub fn mode(&self, name: &str) -> &Mode {
+        self.modes.iter().find(|m| m.name == name).expect("mode")
+    }
+
+    /// FORMAT §7.1 lookup on the reference IDs.
+    pub fn lookup(&self, id: &Id) -> Option<u32> {
+        let find = |v: &[(Id, u32)]| v.binary_search_by(|x| x.0.cmp(id)).ok().map(|k| v[k].1);
+        find(&self.sorted_ids).or_else(|| find(&self.sorted_aliases))
+    }
+}

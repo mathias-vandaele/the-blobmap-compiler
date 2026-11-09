@@ -210,82 +210,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
-name = "blobmap-build"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blobmap-cch",
- "blobmap-fixtures",
- "blobmap-format",
- "blobmap-graph",
- "blobmap-order",
- "blobmap-osm",
- "blobmap-overture",
- "blobmap-profile",
- "blobmap-snap",
- "hex",
- "libc",
- "rayon",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "blobmap-cch"
-version = "0.1.0"
-dependencies = [
- "blobmap-format",
- "blobmap-order",
-]
-
-[[package]]
-name = "blobmap-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blobmap-build",
- "blobmap-conformance",
- "blobmap-format",
- "blobmap-runtime",
- "clap",
- "serde_json",
-]
-
-[[package]]
-name = "blobmap-conformance"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blobmap-build",
- "blobmap-fixtures",
- "blobmap-format",
- "blobmap-graph",
- "blobmap-osm",
- "blobmap-overture",
- "blobmap-profile",
- "blobmap-runtime",
- "blobmap-snap",
- "hex",
- "osmpbf",
- "rand",
- "rayon",
- "serde",
- "serde_json",
- "sha2",
- "toml",
-]
-
-[[package]]
-name = "blobmap-fixtures"
+name = "blobc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrow-array",
  "arrow-schema",
+ "blobmap-format",
+ "clap",
+ "deunicode",
  "flate2",
+ "hex",
+ "libc",
  "osmpbf",
  "parquet",
+ "rand",
+ "rayon",
+ "routingkit-cch",
+ "serde",
  "serde_json",
+ "sha2",
+ "strsim",
+ "toml",
 ]
 
 [[package]]
@@ -300,88 +246,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
-]
-
-[[package]]
-name = "blobmap-graph"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blobmap-fixtures",
- "blobmap-format",
- "blobmap-osm",
- "blobmap-profile",
- "rayon",
-]
-
-[[package]]
-name = "blobmap-order"
-version = "0.1.0"
-dependencies = [
- "routingkit-cch",
-]
-
-[[package]]
-name = "blobmap-osm"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blobmap-fixtures",
- "blobmap-profile",
- "osmpbf",
- "rayon",
-]
-
-[[package]]
-name = "blobmap-overture"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow-array",
- "blobmap-fixtures",
- "blobmap-osm",
- "blobmap-profile",
- "deunicode",
- "hex",
- "parquet",
- "rayon",
- "sha2",
- "strsim",
-]
-
-[[package]]
-name = "blobmap-profile"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "hex",
- "serde",
- "serde_json",
- "sha2",
- "toml",
-]
-
-[[package]]
-name = "blobmap-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blobmap-format",
- "hex",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "blobmap-snap"
-version = "0.1.0"
-dependencies = [
- "blobmap-fixtures",
- "blobmap-format",
- "blobmap-graph",
- "blobmap-osm",
- "blobmap-profile",
- "rayon",
 ]
 
 [[package]]

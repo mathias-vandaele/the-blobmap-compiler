@@ -16,8 +16,8 @@
 
 ## Constraints
 
-- One Rust workspace of small crates. Use traits and composition, with no
-  inheritance-style hierarchies. Configs (profiles, place rules) are files, not code.
+- One Rust workspace of two crates, `blobmap-format` and `blobc` (SPEC §10). Use traits
+  and composition, with no inheritance-style hierarchies. Configs (profiles, place rules) are files, not code.
 - Output is deterministic: the same inputs, config and compiler version give
   byte-identical models with any thread count. Never iterate a `HashMap` into output.
 - Peak RSS stays within 62 GB for any input (SPEC §10). Nothing may take a shortcut that
@@ -47,10 +47,15 @@ concept that contradicts SPEC.md.
 
 ## Crate map
 
-Build order (PLAN.md), each crate under `crates/`:
-- `format`: the FORMAT.md writer and validating reader, manifest, hashes.
-- `fixtures`: synthetic `.osm.pbf`, Overture parquet and taxonomy for the tiny tier; the
-  `fixtures` binary writes every scenario's inputs.
+Two crates under `crates/`; `vendor/` holds the patched RoutingKit.
+- `blobmap-format`: the FORMAT.md writer and validating reader, manifest, hashes; and
+  `runtime`, the CPU reference runtime. It never depends on `blobc`.
+- `blobc`: everything else, one module each, and the one `blobc` binary (`main.rs`).
+  Test-only code lives under `tests/` or `cfg(test)`.
+
+`blobc`'s modules, in build order (PLAN.md):
+- `fixtures`: synthetic `.osm.pbf`, Overture parquet and taxonomy for the tiny tier;
+  `blobc fixtures` writes every scenario's inputs.
 - `profile`: car and active profiles, place rules, `build.toml`.
 - `osm`: ways, pieces, restrictions. `graph`: CAR turn graph with via-way copies, ACTIVE
   union graph, rounding, components (and which are trapped).
@@ -58,13 +63,13 @@ Build order (PLAN.md), each crate under `crates/`:
   component at a time.
 - `overture`: release, taxonomy, place rules, aliases, extent. `snap`: IDs onto pieces.
 - `build`: the `Stage`s, packs, vocabulary, model writer, reports.
-- `runtime`: the CPU reference runtime. `conformance`: the SPEC §11 suite, golden files,
-  mutants. `cli`: `blobc build | verify | inspect`.
+- `verify`: the SPEC §11 suite, golden files, mutants, and the tier and milestone 3 tools.
+  `main.rs`: `blobc build | verify | inspect` and the tools as subcommands.
 
 `ci.sh` runs the milestone 2 gate, and the small tier when `BLOBC_DATA` names a data
 directory; `tools/determinism.sh` the thread-count check. Golden
 files live in `golden/<tier>/<inputs>/`. `tiers/<tier>.toml` lists each tier's inputs by
-path and SHA-256 (`blobc verify --data <dir>`); the `tier` binary of `conformance` writes
-them (`tier tiny <dir> tiers/tiny.toml`, `tier add …`). Milestone 3 tools: `fixtures`
-`extract` (city extracts); `conformance` `accuracy` (cached OSRM pairs), `components` (served
-components), `fragments` (what the small-component rule moves).
+path and SHA-256 (`blobc verify --data <dir>`); `blobc tier` writes them (`blobc tier tiny
+<dir> tiers/tiny.toml`, `blobc tier add …`). Milestone 3 tools: `blobc extract` (city
+extracts), `blobc accuracy` (cached OSRM pairs), `blobc components` (served components),
+`blobc fragments` (what the small-component rule moves).

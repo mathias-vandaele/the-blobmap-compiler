@@ -1,0 +1,130 @@
+//! The three sets of SPEC §6 for each mode, from a family's pieces, graph and components.
+//!
+//! - **graph:** the family's graph (NoRoad when none is in the radius): for CAR, the pieces
+//!   with a segment; for ACTIVE, the pieces with a road.
+//! - **eligible:** pieces of the mode's graph that pass the profile's tag rules. A mode's
+//!   graph is the pieces with a road it may use (SPEC §6): a finite master time, which is
+//!   a finite weight since long pieces are cut (SPEC §7).
+//! - **servable:** eligible pieces in a component that is not trapped. An ACTIVE piece whose
+//!   two ends lie in different components never lies on a route (FORMAT §5.4), so it is skipped
+//!   like a trapped one.
+
+use blobmap_format::NONE;
+
+use crate::graph::{ActiveGraph, CarGraph, Components};
+use crate::osm::Pieces;
+use crate::snap::Sets;
+
+pub struct Membership {
+    graph: Vec<bool>,
+    eligible: Vec<bool>,
+    servable: Vec<bool>,
+    /// The node count of each servable piece's component, else 0.
+    size: Vec<u32>,
+}
+
+impl Sets for Membership {
+    fn in_graph(&self, piece: u32) -> bool {
+        self.graph[piece as usize]
+    }
+    fn eligible(&self, piece: u32) -> bool {
+        self.eligible[piece as usize]
+    }
+    fn servable(&self, piece: u32) -> bool {
+        self.servable[piece as usize]
+    }
+    fn size(&self, piece: u32) -> u32 {
+        self.size[piece as usize]
+    }
+}
+
+/// The CAR component an ID on `piece` is served in: the smallest index among the components of
+/// the piece's segments that are not trapped (FORMAT §7.2), or None.
+pub fn car_component(g: &CarGraph, e: &Components, piece: usize) -> Option<u32> {
+    g.seg_of_piece[piece].iter().filter(|&&s| s != NONE).map(|&s| e.of[s as usize]).filter(|&x| !e.trapped[x as usize]).min()
+}
+
+/// The ACTIVE component of `piece`, if both its ends are in the same component and it is not
+/// trapped.
+pub fn active_component(p: &Pieces, e: &Components, piece: usize) -> Option<u32> {
+    let (a, b) = (e.of[p.u[piece] as usize], e.of[p.v[piece] as usize]);
+    (a == b && !e.trapped[a as usize]).then_some(a)
+}
+
+impl Membership {
+    pub fn car(p: &Pieces, g: &CarGraph, e: &Components) -> Membership {
+        let graph: Vec<bool> = g.seg_of_piece.iter().map(|s| s.iter().any(|&x| x != NONE)).collect();
+        let eligible: Vec<bool> = (0..p.len()).map(|k| graph[k] && p.eligible[k]).collect();
+        let component: Vec<Option<u32>> = (0..p.len()).map(|k| car_component(g, e, k).filter(|_| eligible[k])).collect();
+        let servable = component.iter().map(Option::is_some).collect();
+        let size = component.iter().map(|x| x.map_or(0, |x| e.nodes[x as usize])).collect();
+        Membership { graph, eligible, servable, size }
+    }
+
+    /// For ACTIVE metric `m` (an index into `crate::graph::active::METRICS`).
+    pub fn active(p: &Pieces, g: &ActiveGraph, e: &Components, m: usize) -> Membership {
+        let graph: Vec<bool> = g.road_of_piece.iter().map(|r| r.iter().any(|&x| x != NONE)).collect();
+        let usable = |k: usize| g.road_of_piece[k].iter().any(|&r| r != NONE && g.time[m][r as usize].is_finite());
+        let eligible: Vec<bool> = (0..p.len()).map(|k| graph[k] && p.eligible[k] && usable(k)).collect();
+        let component: Vec<Option<u32>> = (0..p.len()).map(|k| active_component(p, e, k).filter(|_| eligible[k])).collect();
+        let servable = component.iter().map(Option::is_some).collect();
+        let size = component.iter().map(|x| x.map_or(0, |x| e.nodes[x as usize])).collect();
+        Membership { graph, eligible, servable, size }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::snap::{Grid, NO_ELIGIBLE_ROAD, NO_ROAD, TRAPPED_COMPONENT};
+    use crate::fixtures::Check;
+    use crate::profile::active::{ActiveMode, ActiveProfile, Mode};
+    use crate::profile::car::{CarProfile, WayAttrs};
+
+    #[test]
+    fn town_reasons() {
+        let s = crate::fixtures::by_name("town").unwrap();
+        let dir = std::env::temp_dir().join(format!("blobmap-snap-{}", std::process::id()));
+        let w = s.write(&dir).unwrap();
+        let cfg = crate::profile::config::Config::load(&w.configs[0].1).unwrap();
+        let car_net = crate::osm::Network::read(&w.pbf, &CarProfile::new(&cfg.car.config), &cfg.car.config.snap).unwrap();
+        let cp = car_net.pieces(&[|a: &WayAttrs| *a]);
+        let (r, _) = crate::osm::restrictions::read(&w.pbf).unwrap();
+        let cg = CarGraph::build(&cp, &cfg.car.config.turns, &r);
+        let ce = cg.components();
+        let prof = ActiveProfile::new(&cfg.active.config);
+        let act_net = crate::osm::Network::read(&w.pbf, &prof, &cfg.active.config.snap).unwrap();
+        let modes: Vec<ActiveMode> = [Mode::Bike, Mode::Walk].map(|mode| ActiveMode { mode, cfg: prof.cfg }).to_vec();
+        let ap = act_net.pieces(&modes);
+        let ag = ActiveGraph::build(&ap);
+        let ae = ag.components();
+        let (cgrid, agrid) = (Grid::new(&cp), Grid::new(&ap));
+        let car = Membership::car(&cp, &cg, &ce);
+        let bike = Membership::active(&ap, &ag, &ae, 0);
+        let walk = Membership::active(&ap, &ag, &ae, 1);
+        let at = |id: &str| s.release.addresses.iter().find(|a| a.id == id).map(|a| (a.lat, a.lon));
+        let mut seen = 0;
+        for c in &s.checks {
+            let (id, mode, want) = match c {
+                Check::Reason { id, mode, reason } => (id, *mode, Some(*reason)),
+                Check::Served { id, mode } => (id, *mode, None),
+                _ => continue,
+            };
+            let Some((lat, lon)) = at(id) else { continue };
+            let f = match mode {
+                "car" => cgrid.find(&cp, lat, lon, cfg.car.config.snap.radius_m as f64, cfg.car.config.snap.small_component_max_nodes, &car),
+                "bike" => agrid.find(&ap, lat, lon, cfg.active.config.snap.radius_m as f64, cfg.active.config.snap.small_component_max_nodes, &bike),
+                _ => agrid.find(&ap, lat, lon, cfg.active.config.snap.radius_m as f64, cfg.active.config.snap.small_component_max_nodes, &walk),
+            };
+            let got = f.outcome().err().map(|(code, _)| match code {
+                NO_ELIGIBLE_ROAD => "NoEligibleRoad",
+                NO_ROAD => "NoRoad",
+                TRAPPED_COMPONENT => "TrappedComponent",
+                _ => "?",
+            });
+            assert_eq!(got, want, "{id} {mode}");
+            seen += 1;
+        }
+        assert!(seen >= 8, "{seen}");
+    }
+}

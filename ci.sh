@@ -18,12 +18,12 @@ cargo test --workspace --quiet >/dev/null 2>&1
 cargo clippy --workspace --all-targets --quiet -- -D warnings
 
 echo "== 2. tiny tier"
-cargo build --quiet --release -p blobmap-cli -p blobmap-fixtures
+cargo build --quiet --release -p blobc
 BLOBC="$root/target/release/blobc"
 . "$root/tools/scenarios.sh"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-target/release/fixtures "$work/in" >/dev/null
+"$BLOBC" fixtures "$work/in" >/dev/null
 : >"$work/mutants"
 fail=0
 for dir in "$work"/in/*/; do
