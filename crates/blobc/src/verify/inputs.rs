@@ -57,7 +57,19 @@ pub fn main(a: Vec<String>) -> Result<()> {
     let mut run = Runner::default();
     let mut read = serde_json::Map::new();
     let osm = run.run(&ReadNodes, (pbf, work, &config))?;
-    read.insert("nodes".into(), json!({"nodes": osm.len(), "car_obstacles": osm.car_obstacles.len(), "active_obstacles": osm.active_obstacles.len()}));
+    // The antimeridian's twins (SPEC §4): each node others are joined to, with them.
+    let mut by_node: Vec<(i64, i64)> = osm.twins.iter().map(|&(from, to)| (to, from)).collect();
+    by_node.sort_unstable();
+    let mut twins: Vec<Value> = Vec::new();
+    for g in by_node.chunk_by(|a, b| a.0 == b.0) {
+        let to = g[0].0;
+        let (lat, lon) = crate::osm::nodes::unpack(osm.coord(to));
+        twins.push(json!({"node": to, "lat": lat, "lon": lon, "joined": g.iter().map(|t| t.1).collect::<Vec<_>>()}));
+    }
+    read.insert(
+        "nodes".into(),
+        json!({"nodes": osm.len(), "car_obstacles": osm.car_obstacles.len(), "active_obstacles": osm.active_obstacles.len(), "twins": twins}),
+    );
     let car = run.run(
         &Step("car-pieces", || {
             let net = Network::read(&osm, &osm.car_obstacles, &CarProfile::new(&config.car.config), &config.car.config.snap, Some(&osm.dir().join("car")))?;
@@ -69,7 +81,7 @@ pub fn main(a: Vec<String>) -> Result<()> {
     read.insert("car".into(), car);
     let restrictions = run.run(
         &Step("restrictions", || {
-            let (r, _) = crate::osm::restrictions::read(&osm.pbf)?;
+            let (r, _) = osm.restrictions()?;
             Ok(json!({"restrictions": r.len()}))
         }),
         (),

@@ -224,7 +224,7 @@ impl Stage<(&Osm, &Config)> for CarNetwork {
         let net = Network::read(osm, &osm.car_obstacles, &CarProfile::new(&c.car.config), &c.car.config.snap, Some(&osm.dir().join("car")))?;
         let p = net.pieces(&[|a: &WayAttrs| *a])?;
         drop(net);
-        let (r, _) = crate::osm::restrictions::read(&osm.pbf)?;
+        let (r, _) = osm.restrictions()?;
         let g = CarGraph::build(&p, &c.car.config.turns, &r);
         Ok((p, g))
     }

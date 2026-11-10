@@ -128,3 +128,21 @@ config = "cells/config"
 "cells/overture/tiny-2026-11/taxonomy/basic_categories.csv" = "52bff7f5d1d8980f6975e3a2d485ab6b117604275b7a8377f79a40b276b81d0f"
 "cells/overture/tiny-2026-11/taxonomy/mapping_sheet.csv" = "35c9de341882d8ae7d7e18cc8794718ef7f1d797895d87dc83525970aefac537"
 "cells/overture/tiny-2026-11/taxonomy/taxonomy.csv" = "0a2ca652286c11e557e0230676bde41c8090eefb4b89b038caef06f6dd6ad806"
+
+[[inputs]]
+name = "meridian"
+pbf = "meridian/meridian.osm.pbf"
+overture = "meridian/overture/tiny-2026-11"
+config = "meridian/config"
+
+[inputs.files]
+"meridian/config/active.toml" = "80ae190a7a6e92fcaa17941ae6ffc9aee52e0d490972bc8aa4bf7f065d4ca0ce"
+"meridian/config/build.toml" = "a56f337440881582a30da7b661142c8aa6a925ec32cbad39686125270bf1ec28"
+"meridian/config/car.toml" = "02f791c132715dfdb012fc37a798612e2ddc5315c980536b9b4f4234e99547fe"
+"meridian/config/places.toml" = "c37fcad0881de6bf6d43ae60198a3e31704937a5afefacdbd7889407c1ced449"
+"meridian/meridian.osm.pbf" = "8d73c16e8e2bd64235d74fd3a672a19d66dbb4067b78644020c0e1da1146f007"
+"meridian/overture/tiny-2026-11/raw/address.parquet" = "9ba2dbaa3ee1c161517a09b9aa0ef760d041781028424edae28a6e19301faefc"
+"meridian/overture/tiny-2026-11/raw/place.parquet" = "48d44f17afa51b6ed1fdcb30d3fbd60569785a992b3b59a2aeb49e739a51b8c9"
+"meridian/overture/tiny-2026-11/taxonomy/basic_categories.csv" = "52bff7f5d1d8980f6975e3a2d485ab6b117604275b7a8377f79a40b276b81d0f"
+"meridian/overture/tiny-2026-11/taxonomy/mapping_sheet.csv" = "35c9de341882d8ae7d7e18cc8794718ef7f1d797895d87dc83525970aefac537"
+"meridian/overture/tiny-2026-11/taxonomy/taxonomy.csv" = "0a2ca652286c11e557e0230676bde41c8090eefb4b89b038caef06f6dd6ad806"

@@ -27,10 +27,10 @@ impl Frame {
     }
 
     /// (lat, lon) of the point (x, y), on the PBF's grid of 1e-7 degrees, so that an
-    /// Overture point placed on a node is exactly on it.
+    /// Overture point placed on a node is exactly on it; east of 180° it is west of -180°.
     pub fn ll(&self, x: f64, y: f64) -> (f64, f64) {
         let q = |d: f64| (d * 1e7).round() / 1e7;
-        (q(self.lat0 + y / self.ky), q(self.lon0 + x / self.kx))
+        (q(self.lat0 + y / self.ky), crate::osm::geo::lon_wrap(q(self.lon0 + x / self.kx)))
     }
 }
 
@@ -78,6 +78,11 @@ impl Builder {
 
     pub fn node_tags(&mut self, x: f64, y: f64, t: &[(&str, &str)]) -> i64 {
         let (lat, lon) = self.frame.ll(x, y);
+        self.node_at(lat, lon, t)
+    }
+
+    /// A node at exactly (lat, lon), such as one on the antimeridian.
+    pub fn node_at(&mut self, lat: f64, lon: f64, t: &[(&str, &str)]) -> i64 {
         let id = self.next_node;
         self.next_node += 1;
         self.osm.nodes.push(Node { id, lat, lon, tags: tags(t) });

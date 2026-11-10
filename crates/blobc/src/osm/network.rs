@@ -242,8 +242,9 @@ impl<A> Network<'_, A> {
 type Block<A> = (Vec<Way<A>>, Vec<i64>, Vec<u32>);
 
 /// The profile's ways in file order, which must be by id, with their node ids as one
-/// column (CSR: `first`).
-fn read_ways<P: WayProfile>(path: &Path, profile: &P, rules: &SnapRules, dir: Option<&Path>) -> Result<(Vec<Way<P::Attrs>>, Column<i64>, Vec<u64>)> {
+/// column (CSR: `first`), each node as it routes (`Osm::joined`, across the antimeridian).
+fn read_ways<P: WayProfile>(osm: &Osm, profile: &P, rules: &SnapRules, dir: Option<&Path>) -> Result<(Vec<Way<P::Attrs>>, Column<i64>, Vec<u64>)> {
+    let path = &osm.pbf;
     let (mut ways, mut first) = (Vec::new(), vec![0u64]);
     let mut refs = ColumnWriter::new(dir, "way_nodes.bin")?;
     let mut blobs = BlobReader::from_path(path)?;
@@ -263,7 +264,7 @@ fn read_ways<P: WayProfile>(path: &Path, profile: &P, rules: &SnapRules, dir: Op
                             let tags: Vec<(&str, &str)> = w.tags().collect();
                             if let Some(attrs) = profile.way_attrs(tags.iter().copied()) {
                                 let start = refs.len();
-                                for r in w.refs() {
+                                for r in w.refs().map(|r| osm.joined(r)) {
                                     if refs.len() == start || refs.last() != Some(&r) {
                                         refs.push(r);
                                     }
@@ -333,7 +334,7 @@ impl<'o, A: Copy + Send + Sync + Speeds> Network<'o, A> {
     /// The profile's ways of the file and their nodes, with the profile's obstacles (one of
     /// the lists of `osm`). With `dir`, the way nodes and the pieces go to files there.
     pub fn read<P: WayProfile<Attrs = A>>(osm: &'o Osm, obstacles: &[(i64, Obstacle)], profile: &P, rules: &SnapRules, dir: Option<&Path>) -> Result<Network<'o, A>> {
-        let (mut ways, refs, first) = read_ways(&osm.pbf, profile, rules, dir)?;
+        let (mut ways, refs, first) = read_ways(osm, profile, rules, dir)?;
         let nodes = NodeSet::new(&refs)?;
         let n = nodes.len();
         // A node is routing when it ends a way or is met twice along the ways.

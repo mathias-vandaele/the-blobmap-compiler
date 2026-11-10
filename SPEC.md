@@ -81,6 +81,7 @@ Three metrics exist in this version, car, bike and walk, in two mode families. P
 
 - **Delays** are part of the time of the road that arrives at them, in the direction they apply to (§7).
 - **Driving side:** as OSRM v6 given its location-dependent data. A way keeps left when its `driving_side` tag says `left`; without the tag, when its last node lies in one of OSRM v6's left-hand polygons (`data/driving_side.geojson`, held in the car profile). Elsewhere traffic keeps right. A turn takes the side of the road it arrives by, and keeping left inverts the turn bias, so right turns cost what left turns cost elsewhere.
+- **The 180° meridian:** OSM splits ways at the antimeridian by convention, so a road across it ends at one node at longitude +180° and goes on from another at −180°. Nodes at exactly +180° and exactly −180° with the same stored latitude (OSM's integer of 1e-7°, so the same point, not a tolerance) are one routing node in both families: the one with the smallest OSM id, which also takes their obstacles and their turn restrictions. When several nodes share such a latitude, all of them are that one node. Everything that uses coordinates (lengths, angles, snapping, island polygons, nested dissection) takes longitudes across the meridian the short way, so a component on both sides is one region.
 - **Ferries and car shuttles:** excluded in this version. The format reserves a `ferry` link type (fixed crossing time plus an average wait) so they can be added later as a profile change.
 - **Format room:** a mode family may carry more than its current metrics later (e-bike, slow walker), without a format change. This version defines exactly three.
 
@@ -268,6 +269,7 @@ Checks:
 - The address and place heads, including same-piece pairs and same-ID queries.
 - Snapping re-check: re-snapping, trapped skips and the small-component rule included, reproduces the stored entries exactly; an ID beside a fragment snaps to the street, and IDs on a large island within the radius and on a small one beyond it stay on their islands.
 - Components: found as expected on synthetic graphs (islands, one-way traps, a footbridge linking two parts for walkers only); pairs in different components unreachable.
+- The 180° meridian (§4): on a synthetic graph across it, joined only at a pair of twin nodes, every mode goes across; on every input, the twins found in the `.pbf` route as one node in each family.
 - Cells: a component built as cells gives the same answers as the same component built in one piece.
 - The cap: synthetic graphs with routes longer than 18 h give `BEYOND`, and routes just under it stay exact; a piece longer than the cap is cut (§7), and an ID on it gets its exact time.
 - Car `to` queries (from each ID to the sources):

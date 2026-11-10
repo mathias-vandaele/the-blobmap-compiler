@@ -90,7 +90,7 @@ mod tests {
         let osm = crate::osm::Osm::open(&w.pbf, &dir.join("nodes"), &cfg).unwrap();
         let car_net = crate::osm::Network::read(&osm, &osm.car_obstacles, &CarProfile::new(&cfg.car.config), &cfg.car.config.snap, None).unwrap();
         let cp = car_net.pieces(&[|a: &WayAttrs| *a]).unwrap();
-        let (r, _) = crate::osm::restrictions::read(&w.pbf).unwrap();
+        let (r, _) = osm.restrictions().unwrap();
         let cg = CarGraph::build(&cp, &cfg.car.config.turns, &r);
         let ce = cg.components();
         let prof = ActiveProfile::new(&cfg.active.config);

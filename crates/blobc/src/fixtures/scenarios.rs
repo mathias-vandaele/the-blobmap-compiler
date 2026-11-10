@@ -12,7 +12,7 @@ const WALK: f64 = 5.0 / 3.6;
 const RESIDENTIAL: f64 = 25.0 / 3.6;
 
 pub fn all() -> Vec<Scenario> {
-    vec![toy(), town(), cap(), viaway(), deadend(), fragment(), cells()]
+    vec![toy(), town(), cap(), viaway(), deadend(), fragment(), cells(), meridian()]
 }
 
 fn build_toml(target: u64, budget: u64, pack: u64, order: Option<&[i64]>) -> String {
@@ -535,5 +535,50 @@ fn cells() -> Scenario {
             Variant { name: "cells", build_toml: build_toml(1 << 20, 256 << 10, 0, None) },
         ],
         checks: vec![Check::Cells { family: "car" }, Check::Cells { family: "active" }],
+    }
+}
+
+/// Two street grids on either side of the 180° meridian, joined as OSM joins roads there
+/// (SPEC §4): the way from the west ends at a node at +180°, the way to the east starts at
+/// another node at -180° on the same latitude. The two are one routing node, so every mode
+/// goes across, from an ID beside the meridian too.
+fn meridian() -> Scenario {
+    let mut b = Builder::new(Frame::new(-16.79, 180.0), 8);
+    let res = [("highway", "residential")];
+    // A 4 × 3 grid, 100 m apart, from x0 eastwards: 12 nodes, more than any profile's
+    // small-component size.
+    let streets = |b: &mut Builder, x0: f64| {
+        let g = grid(b, x0, 0.0, 4, 3, 100.0);
+        for row in &g {
+            b.way(row, &res);
+        }
+        for j in 0..3 {
+            b.way(&g.iter().map(|c| c[j]).collect::<Vec<i64>>(), &res);
+        }
+        g
+    };
+    let west = streets(&mut b, -400.0);
+    let east = streets(&mut b, 100.0);
+    let lat = b.frame.ll(0.0, 0.0).0;
+    let (w, e) = (b.node_at(lat, 180.0, &[]), b.node_at(lat, -180.0, &[]));
+    b.way(&[west[3][0], w], &res);
+    b.way(&[e, east[0][0]], &res);
+    taxonomy(&mut b);
+    let a = b.address(-250.0, 5.0);
+    let z = b.address(250.0, 5.0);
+    let beside = b.address(3.0, 5.0);
+    let mut checks = Vec::new();
+    for mode in ["car", "bike", "walk"] {
+        checks.push(Check::Reachable { mode, a: a.clone(), b: z.clone() });
+        checks.push(Check::Reachable { mode, a: z.clone(), b: a.clone() });
+        checks.push(Check::Reachable { mode, a: a.clone(), b: beside.clone() });
+    }
+    Scenario {
+        name: "meridian",
+        osm: b.osm,
+        release: b.release,
+        extent: None,
+        variants: vec![Variant { name: "default", build_toml: build_toml(1 << 20, 1 << 30, 0, None) }],
+        checks,
     }
 }

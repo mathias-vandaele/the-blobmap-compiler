@@ -163,7 +163,9 @@ outside the read-only reference folders.
     (`--tiers tiers/any`), apart from the small tier that CI builds on every commit.
     - Great Britain and Japan: left-hand traffic. Turn penalties follow the driving side as
       in OSRM v6 (`turn_bias` inverted where traffic keeps left).
-    - Fiji: the 180° meridian (extent, snapping grid, island polygons, ordering).
+    - Fiji: the 180° meridian (extent, snapping grid, island polygons, ordering), and roads
+      joined at the twin nodes OSM leaves on either side of it (SPEC §4): Taveuni's road is
+      one component. The planet input pass lists every twin.
     - Norway: ferries excluded, so fjord crossings split components; the data report and
       `blobc components` show which.
     - India: sparse tagging (untagged speeds, missing one-ways, unconnected ways).

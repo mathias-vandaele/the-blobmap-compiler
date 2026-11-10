@@ -30,6 +30,47 @@ pub fn components(rt: &Runtime, r: &Reference, rep: &mut Report) {
     }
 }
 
+/// The antimeridian's twins (SPEC §4): in each family held, no twin but the smallest of its
+/// group is a routing node; the twin nodes that join roads from both sides are counted.
+pub fn twins(r: &Reference, rep: &mut Report) {
+    for (fam, p) in [(Fam::Car, &r.car_pieces), (Fam::Active, &r.active_pieces)].into_iter().filter(|f| r.has(f.0)) {
+        let ids = &p.node_osm[..p.osm_nodes];
+        let mut wrong = Vec::new();
+        let mut joined: BTreeMap<u32, [bool; 2]> = BTreeMap::new();
+        for g in &r.twins {
+            let routing: Vec<i64> = g.iter().copied().filter(|id| ids.binary_search(id).is_ok()).collect();
+            if routing.iter().any(|&id| id != g[0]) {
+                wrong.push(format!("twins {g:?} route as {routing:?}, not as {} alone", g[0]));
+            }
+            if let Ok(k) = ids.binary_search(&g[0]) {
+                joined.insert(k as u32, [false; 2]);
+            }
+        }
+        // The side of the meridian each piece at a twin node leaves towards.
+        for k in 0..p.len() {
+            let pts = p.points(k);
+            for (end, next) in [(p.u[k], pts.start + 1), (p.v[k], pts.end - 2)] {
+                if let Some(side) = joined.get_mut(&end) {
+                    side[(p.pt_lon[next] > 0.0) as usize] = true;
+                }
+            }
+        }
+        let both = joined.values().filter(|s| s[0] && s[1]).count();
+        let o = rep.check(&format!(
+            "{}: antimeridian twins, one routing node per group (SPEC §4; {} groups in the .pbf, {both} of the {} routing twin nodes join roads from both sides)",
+            fam.name(),
+            r.twins.len(),
+            joined.len()
+        ));
+        for _ in &r.twins {
+            o.count();
+        }
+        for w in wrong {
+            o.fail(w);
+        }
+    }
+}
+
 /// Expected stored entry of an ID: per slot the road key (way, seq, dir), and the offsets
 /// in the runtime's common shape.
 fn expected_entry(r: &Reference, m: usize, piece: usize, frac: f64) -> ([Option<(i64, u32, u8)>; 2], [u16; 4]) {

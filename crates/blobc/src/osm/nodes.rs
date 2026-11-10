@@ -13,12 +13,16 @@ use memmap2::{Mmap, UncheckedAdvice};
 use osmpbf::{BlobDecode, BlobReader};
 use rayon::prelude::*;
 
+use crate::osm::restrictions::{self, Restriction, RestrictionStats, Via};
 use crate::profile::active::ActiveProfile;
 use crate::profile::car::{CarProfile, Obstacle};
 use crate::profile::config::Config;
 
 /// A node absent from the file.
 pub const MISSING: u64 = u64::MAX;
+
+/// 180° in decimicro-degrees: a node at +`MERIDIAN` or -`MERIDIAN` stands on the antimeridian.
+const MERIDIAN: i32 = 1_800_000_000;
 
 /// Ids per page of the id file: the directory's step.
 const STEP: usize = 512;
@@ -52,6 +56,25 @@ pub struct Osm {
     /// Nodes with an obstacle, by OSM id, for CAR and for ACTIVE.
     pub car_obstacles: Vec<(i64, Obstacle)>,
     pub active_obstacles: Vec<(i64, Obstacle)>,
+    /// The antimeridian's twins (SPEC §4): each node joined to another, and the node it is
+    /// joined to, by id.
+    pub twins: Vec<(i64, i64)>,
+}
+
+/// The antimeridian's twins (SPEC §4) among its nodes: where nodes stand at both +180° and
+/// -180° on one latitude (OSM's integer, so the same point), they are one node, the one with
+/// the smallest id. Each other node and that one, by id.
+fn twins(mut meridian: Vec<(i32, bool, i64)>) -> Vec<(i64, i64)> {
+    meridian.sort_unstable();
+    let mut out = Vec::new();
+    for at in meridian.chunk_by(|a, b| a.0 == b.0) {
+        if at.iter().any(|x| x.1) && at.iter().any(|x| !x.1) {
+            let to = at.iter().map(|x| x.2).min().unwrap();
+            out.extend(at.iter().filter(|x| x.2 != to).map(|x| (x.2, to)));
+        }
+    }
+    out.sort_unstable();
+    out
 }
 
 /// What one blob gives: its nodes in order, and their obstacles per family.
@@ -61,6 +84,8 @@ struct Block {
     coords: Vec<u64>,
     car: Vec<(i64, Obstacle)>,
     active: Vec<(i64, Obstacle)>,
+    /// Nodes on the antimeridian: (latitude, sign of the longitude, id).
+    meridian: Vec<(i32, bool, i64)>,
 }
 
 impl Osm {
@@ -74,7 +99,7 @@ impl Osm {
         let mut coords_out = BufWriter::with_capacity(1 << 22, File::create(&coords_path)?);
         let (mut n, mut last) = (0usize, i64::MIN);
         let mut directory = Vec::new();
-        let (mut car_obstacles, mut active_obstacles) = (Vec::new(), Vec::new());
+        let (mut car_obstacles, mut active_obstacles, mut meridian) = (Vec::new(), Vec::new(), Vec::new());
         let mut blobs = BlobReader::from_path(pbf).with_context(|| format!("opening {}", pbf.display()))?;
         loop {
             let batch: Vec<_> = blobs.by_ref().take(BATCH).collect::<std::result::Result<_, _>>()?;
@@ -90,6 +115,9 @@ impl Osm {
                         let mut node = |id: i64, lat: i32, lon: i32, tags: Vec<(&str, &str)>| {
                             b.ids.push(id);
                             b.coords.push(pack(lat, lon));
+                            if lon.abs() == MERIDIAN {
+                                b.meridian.push((lat, lon > 0, id));
+                            }
                             if !tags.is_empty() {
                                 if let Some(o) = car.obstacle(tags.iter().copied()) {
                                     b.car.push((id, o));
@@ -124,6 +152,7 @@ impl Osm {
                 }
                 car_obstacles.extend(b.car);
                 active_obstacles.extend(b.active);
+                meridian.extend(b.meridian);
             }
         }
         ids_out.flush()?;
@@ -132,7 +161,37 @@ impl Osm {
         // SAFETY: the files were written above, are owned by this process's work directory,
         // and are not changed while mapped.
         let (ids, coords) = unsafe { (Mmap::map(&File::open(&ids_path)?)?, Mmap::map(&File::open(&coords_path)?)?) };
-        Ok(Osm { pbf: pbf.to_path_buf(), dir: dir.to_path_buf(), ids, coords, n, directory, car_obstacles, active_obstacles })
+        let twins = twins(meridian);
+        let mut osm = Osm { pbf: pbf.to_path_buf(), dir: dir.to_path_buf(), ids, coords, n, directory, car_obstacles, active_obstacles, twins };
+        // An obstacle on a twin is on the node it joins; of two, the joined node's own.
+        if !osm.twins.is_empty() {
+            for obstacles in [&mut osm.car_obstacles, &mut osm.active_obstacles] {
+                let mut joined: Vec<(i64, Obstacle)> = obstacles.iter().map(|&(id, o)| (osm.twins.binary_search_by_key(&id, |t| t.0).map_or(id, |k| osm.twins[k].1), o)).collect();
+                joined.sort_by_key(|x| x.0);
+                joined.dedup_by_key(|x| x.0);
+                *obstacles = joined;
+            }
+        }
+        Ok(osm)
+    }
+
+    /// The node `id` routes as: the one its antimeridian twin joins it to, else itself.
+    pub fn joined(&self, id: i64) -> i64 {
+        if self.twins.is_empty() {
+            return id;
+        }
+        self.twins.binary_search_by_key(&id, |t| t.0).map_or(id, |k| self.twins[k].1)
+    }
+
+    /// The car turn restrictions of the file, their via nodes joined across the antimeridian.
+    pub fn restrictions(&self) -> Result<(Vec<Restriction>, RestrictionStats)> {
+        let (mut r, st) = restrictions::read(&self.pbf)?;
+        for x in &mut r {
+            if let Via::Node(n) = &mut x.via {
+                *n = self.joined(*n);
+            }
+        }
+        Ok((r, st))
     }
 
     /// The work directory, where the families' columns go too.

@@ -155,7 +155,9 @@ pub fn order(f: &dyn Family, max_cell: usize, nd_max: usize, fixed: Option<&Fixe
             let k = nodes.len();
             let tail: Vec<u32> = edges.iter().map(|e| e.0).collect();
             let head: Vec<u32> = edges.iter().map(|e| e.1).collect();
-            let (lat, lon): (Vec<f32>, Vec<f32>) = nodes.iter().map(|&v| f.coord(v)).unzip();
+            let (lat, mut lon): (Vec<f32>, Vec<f32>) = nodes.iter().map(|&v| f.coord(v)).unzip();
+            // A component across the antimeridian is cut as one region (SPEC §4).
+            crate::osm::geo::unwrap_lons(&mut lon);
             let g = Graph { n: k, tail: &tail, head: &head, lat: &lat, lon: &lon };
             Ok(match fixed {
                 Some(rank) => {

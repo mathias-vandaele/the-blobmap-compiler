@@ -40,9 +40,10 @@ pub fn main(a: Vec<String>) -> Result<()> {
         let t = &rt.tables[&fam];
         ensure!((0..t.components() as u32).map(|x| t.nodes(x)).eq(e.nodes.iter().copied()), "{}: the model's components differ from the reference's", fam.name());
         let modes: Vec<usize> = (0..r.modes.len()).filter(|&m| r.modes[m].car == (fam == Fam::Car)).collect();
-        // Per component: IDs per mode, and the sums of their points.
+        // Per component: IDs per mode, and the sums of their latitudes and of their longitudes
+        // as unit vectors (so that a centroid across the antimeridian stays on it).
         let mut ids = vec![vec![0u64; modes.len()]; e.len()];
-        let mut sum = vec![(0.0f64, 0.0f64, 0u64); e.len()];
+        let mut sum = vec![(0.0f64, 0.0f64, 0.0f64, 0u64); e.len()];
         for i in 0..r.n() {
             let mut seen = None;
             for (k, &m) in modes.iter().enumerate() {
@@ -53,9 +54,11 @@ pub fn main(a: Vec<String>) -> Result<()> {
             }
             if let Some(x) = seen {
                 let s = &mut sum[x as usize];
+                let (sin, cos) = r.points[i].1.to_radians().sin_cos();
                 s.0 += r.points[i].0;
-                s.1 += r.points[i].1;
-                s.2 += 1;
+                s.1 += sin;
+                s.2 += cos;
+                s.3 += 1;
             }
         }
         let served: Vec<usize> = (0..e.len()).filter(|&x| !e.trapped[x]).collect();
@@ -106,7 +109,7 @@ pub fn main(a: Vec<String>) -> Result<()> {
         }
         let row = |x: usize| {
             let s = sum[x];
-            let at = if s.2 > 0 { format!("{:.4}, {:.4}", s.0 / s.2 as f64, s.1 / s.2 as f64) } else { "–".into() };
+            let at = if s.3 > 0 { format!("{:.4}, {:.4}", s.0 / s.3 as f64, s.1.atan2(s.2).to_degrees()) } else { "–".into() };
             let c: Vec<String> = ids[x].iter().map(u64::to_string).collect();
             println!("  {x:>6} {:>10} {:>28}  {at}", e.nodes[x], c.join(", "));
         };

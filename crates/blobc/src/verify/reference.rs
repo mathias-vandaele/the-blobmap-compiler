@@ -75,6 +75,9 @@ pub struct Reference {
     pub modes: Vec<Mode>,
     /// Per ID (internal-index order): its point.
     pub points: Vec<(f64, f64)>,
+    /// The antimeridian's twin groups (SPEC §4), found in the `.pbf` apart from the input
+    /// modules: per latitude with nodes at both +180° and -180°, their ids ascending.
+    pub twins: Vec<Vec<i64>>,
     /// The IDs and the aliases, each sorted, with their internal index.
     sorted_ids: Vec<(Id, u32)>,
     sorted_aliases: Vec<(Id, u32)>,
@@ -89,6 +92,34 @@ struct Snapping {
     components: Components,
     modes: Vec<(&'static str, usize, Membership, f64, u32)>,
     found: Vec<Vec<Snapped>>,
+}
+
+/// The `.pbf`'s nodes on the antimeridian, grouped by latitude where both signs of longitude
+/// occur.
+fn twin_groups(pbf: &std::path::Path) -> Result<Vec<Vec<i64>>> {
+    let at = |id: i64, lat: i32, lon: i32| if lon.abs() == 1_800_000_000 { vec![(lat, lon > 0, id)] } else { Vec::new() };
+    let mut nodes = osmpbf::ElementReader::from_path(pbf)?.par_map_reduce(
+        |e| match e {
+            osmpbf::Element::DenseNode(n) => at(n.id(), n.decimicro_lat(), n.decimicro_lon()),
+            osmpbf::Element::Node(n) => at(n.id(), n.decimicro_lat(), n.decimicro_lon()),
+            _ => Vec::new(),
+        },
+        Vec::new,
+        |mut a, b| {
+            a.extend(b);
+            a
+        },
+    )?;
+    nodes.sort_unstable();
+    Ok(nodes
+        .chunk_by(|a, b| a.0 == b.0)
+        .filter(|g| g.iter().any(|x| x.1) && g.iter().any(|x| !x.1))
+        .map(|g| {
+            let mut ids: Vec<i64> = g.iter().map(|x| x.2).collect();
+            ids.sort_unstable();
+            ids
+        })
+        .collect())
 }
 
 fn snapping(osm: &Osm, config: &Config, fam: Fam, points: &[(f64, f64)]) -> Result<Snapping> {
@@ -167,6 +198,7 @@ impl Reference {
             aliases,
             modes: Vec::new(),
             points: pts.iter().map(|&k| points[k]).collect(),
+            twins: phase("  twins", || twin_groups(&i.pbf))?,
             sorted_ids: Vec::new(),
             sorted_aliases: Vec::new(),
         };

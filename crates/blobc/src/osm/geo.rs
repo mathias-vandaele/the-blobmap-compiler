@@ -77,6 +77,26 @@ pub fn lon_wrap(lon: f64) -> f64 {
     }
 }
 
+/// Longitudes of points that may lie on both sides of the antimeridian, made continuous for
+/// geometry that does not wrap (nested dissection): the widest gap between them, going round
+/// the globe, becomes the seam, and the points west of it move on by 360°. Points whose widest
+/// gap spans ±180° are left as they are.
+pub fn unwrap_lons(lon: &mut [f32]) {
+    let mut s: Vec<f32> = lon.to_vec();
+    s.sort_by(f32::total_cmp);
+    s.dedup();
+    let (Some(&lo), Some(&hi)) = (s.first(), s.last()) else { return };
+    let mut widest = (lo + 360.0 - hi, None);
+    for w in s.windows(2) {
+        if w[1] - w[0] > widest.0 {
+            widest = (w[1] - w[0], Some(w[1]));
+        }
+    }
+    if let Some(east) = widest.1 {
+        lon.iter_mut().filter(|x| **x < east).for_each(|x| *x += 360.0);
+    }
+}
+
 /// Rings of (lat, lon) that may cross the antimeridian, for point-in-polygon tests: each
 /// ring is unwrapped so that consecutive longitudes differ by at most 180°, and a point is
 /// tested at its longitude and at ±360° of it. A ring that does not cross is unchanged.
@@ -116,6 +136,12 @@ mod tests {
         let mut r = vec![(0.0, 179.0), (0.0, -179.0), (1.0, -179.0), (1.0, 179.0), (0.0, 179.0)];
         unwrap_ring(&mut r);
         assert_eq!(r[1].1, 181.0);
+        let mut l = [179.5f32, -179.5, 180.0, -180.0, 179.75];
+        unwrap_lons(&mut l);
+        assert_eq!(l, [179.5, 180.5, 180.0, 180.0, 179.75]);
+        let mut l = [2.0f32, -1.0, 3.0];
+        unwrap_lons(&mut l);
+        assert_eq!(l, [2.0, -1.0, 3.0]);
         assert_eq!(lon_shifts(-179.5, 179.0, 181.0).collect::<Vec<_>>(), vec![180.5]);
     }
 }

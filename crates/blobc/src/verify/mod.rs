@@ -146,6 +146,10 @@ fn reference_checks(rt: &Runtime, ex: &Expected, s: &Facts, n: &Samples, rep: &m
         checks::components(rt, ex.r, rep);
         Ok(())
     })?;
+    released(rt, &p("twins"), rep, |rep| {
+        checks::twins(ex.r, rep);
+        Ok(())
+    })?;
     released(rt, &p("snapping"), rep, |rep| checks::snapping(rt, ex.r, rep))?;
     released(rt, &p("snapping brute"), rep, |rep| {
         checks::snapping_brute(ex.r, n.brute, rep);
