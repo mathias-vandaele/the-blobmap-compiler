@@ -1,0 +1,7 @@
+{
+  "format": "blobmap-golden",
+  "format_version": "2.0.0",
+  "inputs_hash": "7a7431de5d8ee621dc28df5350480b1c593109d50f141dfc24b4dc104f5180f5",
+  "queries_sha256": "f861363b06122d62c5496132bd0b0b40e544bb8b4436555508638cff08aa176f",
+  "tier": "small"
+}

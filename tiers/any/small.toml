@@ -2,6 +2,26 @@
 tier = "small"
 
 [[inputs]]
+name = "california"
+pbf = "osm/california.osm.pbf"
+overture = "overture-california/2026-10-21.0"
+config = "config"
+extent = "poly/california.poly"
+
+[inputs.files]
+"config/active.toml" = "80ae190a7a6e92fcaa17941ae6ffc9aee52e0d490972bc8aa4bf7f065d4ca0ce"
+"config/build.toml" = "245143b17c43f1d9eb43e3f611c59a15563f2f9b164fc0467d711ef7135fcf4a"
+"config/car.toml" = "6456347d9f330fe92d03b39f3b67cda252dee462e6697bf3a7cab473b653da57"
+"config/places.toml" = "c37fcad0881de6bf6d43ae60198a3e31704937a5afefacdbd7889407c1ced449"
+"osm/california.osm.pbf" = "a57cd1265bf249be047839a694402b726ad9c3b3698d3eb19a762913b0c87cf8"
+"overture-california/2026-10-21.0/raw/address.parquet" = "d94f07bc2e2c9fa827201f6c4510267b4093d6060bf3de15dea00cac634fb457"
+"overture-california/2026-10-21.0/raw/place.parquet" = "695c40d20cb8185179a499b25dd4e703bacf467322bd1816491262e2447c43e1"
+"overture-california/2026-10-21.0/taxonomy/basic_categories.csv" = "c0aed53113a825240d71b981746f5296b88a2bb20005528b104045c3c97b7afc"
+"overture-california/2026-10-21.0/taxonomy/mapping_sheet.csv" = "5dfb038fb8fbadfb31bbb51e577b53eb4488140bc93e1d32b005edba2f212ce6"
+"overture-california/2026-10-21.0/taxonomy/taxonomy.csv" = "59eecbf9e24859bcdab459e8efeea673b7fcbab06b45bd1c7067f215b3bc25d4"
+"poly/california.poly" = "5c1531044f1559a584f1435035d7bc7a81c0a72a33677f422e9fb64b2c91fcbf"
+
+[[inputs]]
 name = "fiji"
 pbf = "osm/fiji.osm.pbf"
 overture = "overture-fiji/2026-10-21.0"
@@ -20,6 +40,66 @@ extent = "poly/fiji.poly"
 "overture-fiji/2026-10-21.0/taxonomy/mapping_sheet.csv" = "5dfb038fb8fbadfb31bbb51e577b53eb4488140bc93e1d32b005edba2f212ce6"
 "overture-fiji/2026-10-21.0/taxonomy/taxonomy.csv" = "59eecbf9e24859bcdab459e8efeea673b7fcbab06b45bd1c7067f215b3bc25d4"
 "poly/fiji.poly" = "c54661a8e0ebc18c4b158870c4a67ff81f2bf2b7f2d40c272c1483f5a113e4df"
+
+[[inputs]]
+name = "great-britain"
+pbf = "osm/great-britain.osm.pbf"
+overture = "overture-great-britain/2026-10-21.0"
+config = "config"
+extent = "poly/great-britain.poly"
+
+[inputs.files]
+"config/active.toml" = "80ae190a7a6e92fcaa17941ae6ffc9aee52e0d490972bc8aa4bf7f065d4ca0ce"
+"config/build.toml" = "245143b17c43f1d9eb43e3f611c59a15563f2f9b164fc0467d711ef7135fcf4a"
+"config/car.toml" = "6456347d9f330fe92d03b39f3b67cda252dee462e6697bf3a7cab473b653da57"
+"config/places.toml" = "c37fcad0881de6bf6d43ae60198a3e31704937a5afefacdbd7889407c1ced449"
+"osm/great-britain.osm.pbf" = "17efc7b0c640bbffae7b846959ced2861ef4cf15f019640c23bd51e20e208865"
+"overture-great-britain/2026-10-21.0/raw/address.parquet" = "d7580f6c9f908710c7f3dfdd0183355dcf71b007b25cdff22165c44285f0958c"
+"overture-great-britain/2026-10-21.0/raw/place.parquet" = "267f326b1a13130e58bd0ca3e08f08b544028e98021a6241532479fc57075dcf"
+"overture-great-britain/2026-10-21.0/taxonomy/basic_categories.csv" = "c0aed53113a825240d71b981746f5296b88a2bb20005528b104045c3c97b7afc"
+"overture-great-britain/2026-10-21.0/taxonomy/mapping_sheet.csv" = "5dfb038fb8fbadfb31bbb51e577b53eb4488140bc93e1d32b005edba2f212ce6"
+"overture-great-britain/2026-10-21.0/taxonomy/taxonomy.csv" = "59eecbf9e24859bcdab459e8efeea673b7fcbab06b45bd1c7067f215b3bc25d4"
+"poly/great-britain.poly" = "7c07d7950683d58db41ee0d8eb472e33f4d314016e24ce1fc879e0fb41613fde"
+
+[[inputs]]
+name = "india"
+pbf = "osm/india.osm.pbf"
+overture = "overture-india/2026-10-21.0"
+config = "config"
+extent = "poly/india.poly"
+
+[inputs.files]
+"config/active.toml" = "80ae190a7a6e92fcaa17941ae6ffc9aee52e0d490972bc8aa4bf7f065d4ca0ce"
+"config/build.toml" = "245143b17c43f1d9eb43e3f611c59a15563f2f9b164fc0467d711ef7135fcf4a"
+"config/car.toml" = "6456347d9f330fe92d03b39f3b67cda252dee462e6697bf3a7cab473b653da57"
+"config/places.toml" = "c37fcad0881de6bf6d43ae60198a3e31704937a5afefacdbd7889407c1ced449"
+"osm/india.osm.pbf" = "f3b721a3d8a03f815caeb69d8c14fb19c6c61b35f48355422e2e3863253bbe34"
+"overture-india/2026-10-21.0/raw/address.parquet" = "d5f3a911814c08ee4e992300bd10874d894cb49149062ba82d056ca6a8835c12"
+"overture-india/2026-10-21.0/raw/place.parquet" = "9f818aaf8636d9883b0f5221fbf2b5e500b9bf048e592bb90482c482ce548648"
+"overture-india/2026-10-21.0/taxonomy/basic_categories.csv" = "c0aed53113a825240d71b981746f5296b88a2bb20005528b104045c3c97b7afc"
+"overture-india/2026-10-21.0/taxonomy/mapping_sheet.csv" = "5dfb038fb8fbadfb31bbb51e577b53eb4488140bc93e1d32b005edba2f212ce6"
+"overture-india/2026-10-21.0/taxonomy/taxonomy.csv" = "59eecbf9e24859bcdab459e8efeea673b7fcbab06b45bd1c7067f215b3bc25d4"
+"poly/india.poly" = "390ed656b14d3eff5ea6dbb8138239de57a5c812ea251c81271ce58c33938a47"
+
+[[inputs]]
+name = "japan"
+pbf = "osm/japan.osm.pbf"
+overture = "overture-japan/2026-10-21.0"
+config = "config"
+extent = "poly/japan.poly"
+
+[inputs.files]
+"config/active.toml" = "80ae190a7a6e92fcaa17941ae6ffc9aee52e0d490972bc8aa4bf7f065d4ca0ce"
+"config/build.toml" = "245143b17c43f1d9eb43e3f611c59a15563f2f9b164fc0467d711ef7135fcf4a"
+"config/car.toml" = "6456347d9f330fe92d03b39f3b67cda252dee462e6697bf3a7cab473b653da57"
+"config/places.toml" = "c37fcad0881de6bf6d43ae60198a3e31704937a5afefacdbd7889407c1ced449"
+"osm/japan.osm.pbf" = "bd57442a0281a16c427fed312a2aa08ad75c3fa8db01419931503838fa841bcf"
+"overture-japan/2026-10-21.0/raw/address.parquet" = "257f509398cac5d928009b0cd6819d6de548fde7992ec9ce452ce2dac49133ad"
+"overture-japan/2026-10-21.0/raw/place.parquet" = "5ae224c63b5b2cbf3b76b71284ece6cf632e22c014ef09c4f5ba266d39ebc44a"
+"overture-japan/2026-10-21.0/taxonomy/basic_categories.csv" = "c0aed53113a825240d71b981746f5296b88a2bb20005528b104045c3c97b7afc"
+"overture-japan/2026-10-21.0/taxonomy/mapping_sheet.csv" = "5dfb038fb8fbadfb31bbb51e577b53eb4488140bc93e1d32b005edba2f212ce6"
+"overture-japan/2026-10-21.0/taxonomy/taxonomy.csv" = "59eecbf9e24859bcdab459e8efeea673b7fcbab06b45bd1c7067f215b3bc25d4"
+"poly/japan.poly" = "15756ecc52aa6aad3d96071f6909700ed155ddd6b04c6fe94ad0ffa3abcf3146"
 
 [[inputs]]
 name = "norway"
