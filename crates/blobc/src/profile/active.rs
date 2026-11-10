@@ -368,9 +368,6 @@ impl WayProfile for ActiveProfile {
     fn way_attrs<'a>(&self, tags: impl Iterator<Item = (&'a str, &'a str)>) -> Option<ActiveAttrs> {
         ActiveProfile::way_attrs(self, tags)
     }
-    fn obstacle<'a>(&self, tags: impl Iterator<Item = (&'a str, &'a str)>) -> Option<Obstacle> {
-        ActiveProfile::obstacle(self, tags)
-    }
 }
 
 #[cfg(test)]

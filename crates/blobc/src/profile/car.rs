@@ -8,6 +8,8 @@
 //! - maxspeed: the first of `maxspeed:advisory` / `maxspeed` / `source:maxspeed` /
 //!   `maxspeed:type` (with :forward/:backward variants), parsed like `parse_maxspeed`:
 //!   leading digits (mph scaled), else `maxspeed_table`, else the `xx:<class>` zone defaults.
+//! - The driving side, as `WayHandlers.driving_side` given OSRM's location-dependent data:
+//!   a way's `driving_side` tag, else whether its last node lies in a `left` polygon.
 //! - Not modelled here (other stages, or not at all): turn costs (`graph::car`),
 //!   barriers, ferries, routability weights, the 10 km/h speed of otherwise-untyped ways
 //!   with explicit car access.
@@ -75,6 +77,54 @@ pub struct CarProfile {
     stop_s: f32,
     stop_minor_s: f32,
     give_way_s: f32,
+    pub left_polygons: Polygons,
+}
+
+/// Polygons of [lon, lat] rings, tested as OSRM's `LocationDependentData` tests a point: a
+/// crossing count, a point on a ring's edge counting as inside.
+#[derive(Clone, Debug, Default)]
+pub struct Polygons {
+    /// Per ring: its box (lon min, lat min, lon max, lat max) and its points.
+    rings: Vec<([f64; 4], Vec<[f64; 2]>)>,
+}
+
+impl Polygons {
+    pub fn new(rings: &[Vec<[f64; 2]>]) -> Polygons {
+        let bbox = |r: &[[f64; 2]]| {
+            r.iter().fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |b, p| [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])])
+        };
+        Polygons { rings: rings.iter().map(|r| (bbox(r), r.clone())).collect() }
+    }
+
+    pub fn contains(&self, lat: f64, lon: f64) -> bool {
+        self.rings.iter().any(|(b, r)| lon >= b[0] && lat >= b[1] && lon <= b[2] && lat <= b[3] && ring_contains(r, lon, lat))
+    }
+}
+
+/// OSRM v6 `LocationDependentData::GetPropertyIndexes`, over one ring's segments.
+fn ring_contains(r: &[[f64; 2]], x: f64, y: f64) -> bool {
+    let mut inside = false;
+    for s in r.windows(2) {
+        let ([fx, fy], [tx_, ty_]) = (s[0], s[1]);
+        if ty_ == fy {
+            // A horizontal segment: on it is inside, else it is skipped.
+            if ty_ == y && (fx == x || (tx_ > x) != (fx > x)) {
+                return true;
+            }
+            continue;
+        }
+        if (ty_ > y) != (fy > y) {
+            let (ax, ay, tx, ty) = (tx_ - fx, ty_ - fy, x - fx, y - fy);
+            let cross = tx * ay - ax * ty;
+            if cross == 0.0 {
+                return true;
+            }
+            if (ay > 0.0) == (cross > 0.0) {
+                inside = !inside;
+            }
+        }
+    }
+    inside
 }
 
 /// The repository's car profile file, built in (tests and defaults).
@@ -110,7 +160,14 @@ impl CarProfile {
             stop_s: f.obstacles.stop_s,
             stop_minor_s: f.obstacles.stop_minor_s,
             give_way_s: f.obstacles.give_way_s,
+            left_polygons: Polygons::new(&f.driving_side.left),
         }
+    }
+
+    /// The way's `driving_side` tag, as `WayHandlers.driving_side`: `left` keeps left, any
+    /// other value right; None without the tag, so that the location decides.
+    pub fn driving_side(&self, tags: &[(&str, &str)]) -> Option<bool> {
+        tags.iter().find(|(k, _)| *k == "driving_side").map(|&(_, v)| v == "left")
     }
 
     /// The built-in `config/car.toml`.
@@ -248,6 +305,25 @@ impl CarProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn driving_side() {
+        let p = CarProfile::osrm_v6();
+        // London, Tokyo, Suva and Viti Levu across the meridian keep left; Paris, Calais,
+        // New York and Honolulu keep right.
+        for (lat, lon) in [(51.5, -0.12), (35.68, 139.76), (-18.14, 178.44), (-16.6, -179.9)] {
+            assert!(p.left_polygons.contains(lat, lon), "{lat} {lon}");
+        }
+        for (lat, lon) in [(48.86, 2.35), (50.95, 1.85), (40.71, -74.0), (21.3, -157.86)] {
+            assert!(!p.left_polygons.contains(lat, lon), "{lat} {lon}");
+        }
+        // A point on an edge is inside, as in OSRM.
+        let sq = Polygons::new(&[vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]]]);
+        assert!(sq.contains(0.0, 0.5) && sq.contains(0.5, 1.0) && sq.contains(0.5, 0.5) && !sq.contains(1.5, 0.5));
+        assert_eq!(p.driving_side(&[("highway", "primary"), ("driving_side", "left")]), Some(true));
+        assert_eq!(p.driving_side(&[("driving_side", "right")]), Some(false));
+        assert_eq!(p.driving_side(&[("highway", "primary")]), None);
+    }
 
     /// The research `profile.rs` tables (commit 9f8c060), as it hard-codes them.
     const RESEARCH_HIGHWAY: &[(&str, f32)] = &[

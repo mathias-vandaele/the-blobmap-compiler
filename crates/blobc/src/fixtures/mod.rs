@@ -15,9 +15,19 @@ use anyhow::{Context, Result};
 /// The Overture release name of every scenario (its directory name).
 pub const RELEASE: &str = "tiny-2026-11";
 
-/// The repository's place rules; every scenario uses them unchanged, as it does the car
-/// and active profiles (`profile::car::CAR_TOML`, `profile::active::ACTIVE_TOML`).
+/// The repository's place rules; every scenario uses them unchanged, as it does the active
+/// profile (`profile::active::ACTIVE_TOML`).
 pub const PLACES_TOML: &str = include_str!("../../../../config/places.toml");
+
+/// The repository's car profile (`profile::car::CAR_TOML`) with the small-component size
+/// of the active one: the synthetic graphs have tens of nodes, so at OSRM's 1000 every
+/// component would be small and the rule's cases (fragments, islands) could not be told
+/// apart.
+pub fn car_toml() -> String {
+    let (from, to) = ("small_component_max_nodes = 1000\n", "small_component_max_nodes = 10\n");
+    assert!(crate::profile::car::CAR_TOML.contains(from), "config/car.toml sets the car size to 1000");
+    crate::profile::car::CAR_TOML.replace(from, to)
+}
 
 /// One way of building a scenario: its `build.toml` (build options never change answers).
 pub struct Variant {
@@ -160,7 +170,7 @@ impl Scenario {
         for v in &self.variants {
             let c = root.join(if v.name == "default" { "config".to_string() } else { format!("config-{}", v.name) });
             std::fs::create_dir_all(&c)?;
-            std::fs::write(c.join("car.toml"), crate::profile::car::CAR_TOML)?;
+            std::fs::write(c.join("car.toml"), car_toml())?;
             std::fs::write(c.join("active.toml"), crate::profile::active::ACTIVE_TOML)?;
             std::fs::write(c.join("places.toml"), PLACES_TOML)?;
             std::fs::write(c.join("build.toml"), &v.build_toml)?;

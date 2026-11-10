@@ -57,7 +57,8 @@ Two crates under `crates/`; `vendor/` holds the patched RoutingKit.
 - `fixtures`: synthetic `.osm.pbf`, Overture parquet and taxonomy for the tiny tier;
   `blobc fixtures` writes every scenario's inputs.
 - `profile`: car and active profiles, place rules, `build.toml`.
-- `osm`: ways, pieces, restrictions. `graph`: CAR turn graph with via-way copies, ACTIVE
+- `osm`: node locations in a disk-backed index (`nodes`), columns in memory or mapped from
+  a work directory (`column`), ways, pieces, restrictions. `graph`: CAR turn graph with via-way copies, ACTIVE
   union graph, rounding, components (and which are trapped).
 - `order`: `Orderer` (inertial flow, fixed) and cells. `cch`: the hierarchy, built one
   component at a time.
@@ -72,4 +73,5 @@ files live in `golden/<tier>/<inputs>/`. `tiers/<tier>.toml` lists each tier's i
 path and SHA-256 (`blobc verify --data <dir>`); `blobc tier` writes them (`blobc tier tiny
 <dir> tiers/tiny.toml`, `blobc tier add …`). Milestone 3 tools: `blobc extract` (city
 extracts), `blobc accuracy` (cached OSRM pairs), `blobc components` (served components),
-`blobc fragments` (what the small-component rule moves).
+`blobc fragments` (what the small-component rule moves). Milestone 4: `blobc inputs` (the
+input stages alone, any `.pbf` the planet included, peak RSS per stage).

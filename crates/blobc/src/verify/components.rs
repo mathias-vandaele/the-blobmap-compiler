@@ -31,8 +31,11 @@ pub fn main(a: Vec<String>) -> Result<()> {
     };
     let rt = Runtime::open(Path::new(model))?;
     let tf = TierFile::read(Path::new(tier_file))?;
-    let inputs = tf.find(&rt.manifest)?.check(Path::new(data), &rt.manifest)?;
-    let r = Reference::build(&inputs, &[Fam::Car, Fam::Active])?;
+    let work = crate::verify::work_dir(Path::new(model), "components");
+    let inputs = tf.find(&rt.manifest)?.check(Path::new(data), &rt.manifest, &work)?;
+    let r = Reference::build(&inputs, &[Fam::Car, Fam::Active]);
+    let _ = std::fs::remove_dir_all(&work);
+    let r = r?;
     for (fam, e) in [(Fam::Car, &r.car_components), (Fam::Active, &r.active_components)] {
         let t = &rt.tables[&fam];
         ensure!((0..t.components() as u32).map(|x| t.nodes(x)).eq(e.nodes.iter().copied()), "{}: the model's components differ from the reference's", fam.name());

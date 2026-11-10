@@ -26,7 +26,7 @@ use crate::build::hier::{Built, FixedRanks};
 use crate::build::layout::Layout;
 use crate::build::vocab::{Families, Ids, ModeSnap};
 use crate::graph::{ActiveGraph, CarGraph};
-use crate::osm::{Network, Pieces};
+use crate::osm::{Network, Osm, Pieces};
 use crate::overture::{Catalog, Polygon, Release};
 use crate::profile::active::{ActiveMode, ActiveProfile, Mode};
 use crate::profile::car::{CarProfile, WayAttrs};
@@ -64,6 +64,13 @@ impl Args {
     pub fn report_path(&self, kind: &str) -> PathBuf {
         let name = self.out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "model".into());
         self.out.with_file_name(format!("{name}.{kind}-report.json"))
+    }
+
+    /// The build's scratch files (the node locations), next to the model directory and
+    /// removed when the build ends.
+    pub fn work_dir(&self) -> PathBuf {
+        let name = self.out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "model".into());
+        self.out.with_file_name(format!("{name}.work"))
     }
 }
 
@@ -193,17 +200,31 @@ impl Stage<&Args> for ReadInputs {
     }
 }
 
+/// The `.pbf`'s node locations, on disk in a work directory (SPEC §10, memory).
+pub struct ReadNodes;
+
+impl Stage<(&Path, &Path, &Config)> for ReadNodes {
+    type Output = Osm;
+    fn name(&self) -> &'static str {
+        "nodes"
+    }
+    fn run(&self, (pbf, work, c): (&Path, &Path, &Config)) -> Result<Osm> {
+        Osm::open(pbf, work, c)
+    }
+}
+
 pub struct CarNetwork;
 
-impl Stage<(&Path, &Config)> for CarNetwork {
+impl Stage<(&Osm, &Config)> for CarNetwork {
     type Output = (Pieces, CarGraph);
     fn name(&self) -> &'static str {
         "car-network"
     }
-    fn run(&self, (pbf, c): (&Path, &Config)) -> Result<(Pieces, CarGraph)> {
-        let net = Network::read(pbf, &CarProfile::new(&c.car.config), &c.car.config.snap)?;
-        let p = net.pieces(&[|a: &WayAttrs| *a]);
-        let (r, _) = crate::osm::restrictions::read(pbf)?;
+    fn run(&self, (osm, c): (&Osm, &Config)) -> Result<(Pieces, CarGraph)> {
+        let net = Network::read(osm, &osm.car_obstacles, &CarProfile::new(&c.car.config), &c.car.config.snap, Some(&osm.dir().join("car")))?;
+        let p = net.pieces(&[|a: &WayAttrs| *a])?;
+        drop(net);
+        let (r, _) = crate::osm::restrictions::read(&osm.pbf)?;
         let g = CarGraph::build(&p, &c.car.config.turns, &r);
         Ok((p, g))
     }
@@ -211,16 +232,17 @@ impl Stage<(&Path, &Config)> for CarNetwork {
 
 pub struct ActiveNetwork;
 
-impl Stage<(&Path, &Config)> for ActiveNetwork {
+impl Stage<(&Osm, &Config)> for ActiveNetwork {
     type Output = (Pieces, ActiveGraph);
     fn name(&self) -> &'static str {
         "active-network"
     }
-    fn run(&self, (pbf, c): (&Path, &Config)) -> Result<(Pieces, ActiveGraph)> {
+    fn run(&self, (osm, c): (&Osm, &Config)) -> Result<(Pieces, ActiveGraph)> {
         let prof = ActiveProfile::new(&c.active.config);
-        let net = Network::read(pbf, &prof, &c.active.config.snap)?;
+        let net = Network::read(osm, &osm.active_obstacles, &prof, &c.active.config.snap, Some(&osm.dir().join("active")))?;
         let modes: Vec<ActiveMode> = [Mode::Bike, Mode::Walk].map(|mode| ActiveMode { mode, cfg: prof.cfg }).to_vec();
-        let p = net.pieces(&modes);
+        let p = net.pieces(&modes)?;
+        drop(net);
         let g = ActiveGraph::build(&p);
         Ok((p, g))
     }
@@ -291,13 +313,13 @@ impl Stage<(&Families<'_>, &Catalog, bool)> for Snap {
 /// The island polygons of the `.pbf`, for the data report (SPEC §3).
 pub struct ReadIslands;
 
-impl Stage<&Path> for ReadIslands {
+impl Stage<&Osm> for ReadIslands {
     type Output = Islands;
     fn name(&self) -> &'static str {
         "islands"
     }
-    fn run(&self, pbf: &Path) -> Result<Islands> {
-        Islands::read(pbf)
+    fn run(&self, osm: &Osm) -> Result<Islands> {
+        Islands::read(osm)
     }
 }
 
@@ -500,11 +522,12 @@ pub fn build(a: &Args) -> Result<BuildResult> {
     let mut run = Runner::default();
     let inputs = run.run(&ReadInputs, a)?;
     let c = &inputs.config;
-    let (cp, cg) = run.run(&CarNetwork, (a.pbf.as_path(), c))?;
+    let osm = run.run(&ReadNodes, (a.pbf.as_path(), a.work_dir().as_path(), c))?;
+    let (cp, cg) = run.run(&CarNetwork, (&osm, c))?;
     let car = Car::new(&cp, &cg);
     let co = run.run(&Orders("car-order"), (&car as &dyn Family, c, None))?;
     let (cb, cl) = run.run(&Hierarchies("car-hierarchy"), (&car as &dyn Family, c, co))?;
-    let (ap, ag) = run.run(&ActiveNetwork, (a.pbf.as_path(), c))?;
+    let (ap, ag) = run.run(&ActiveNetwork, (&osm, c))?;
     let act = Active::new(&ap, &ag);
     let fixed = fixed_ranks(&ap, &c.build.order.active)?;
     let ao = run.run(&Orders("active-order"), (&act as &dyn Family, c, fixed.as_ref()))?;
@@ -524,7 +547,7 @@ pub fn build(a: &Args) -> Result<BuildResult> {
     };
     let (snaps, ids) = run.run(&Snap, (&families, &catalog, inputs.polygon.is_some()))?;
     let wo = run.run(&WriteModel, WriteInput { args: a, inputs: &inputs, families: &families, catalog: &catalog, snaps: &snaps, ids: &ids })?;
-    let islands = run.run(&ReadIslands, a.pbf.as_path())?;
+    let islands = run.run(&ReadIslands, &osm)?;
     let data = report::data(a, &families, &catalog, &snaps, &ids, &wo.served, &islands)?;
     blobmap_format::json::write_file(&a.report_path("data"), &data)?;
     // Each family's largest component and every component built as cells: its links, its sweep
@@ -556,6 +579,8 @@ pub fn build(a: &Args) -> Result<BuildResult> {
         "layout_ids": wo.manifest.families.iter().map(|(f, x)| (f.clone(), json!({"nodes": x.nodes, "bound": NONE as u64}))).collect::<serde_json::Map<_, _>>(),
     });
     blobmap_format::json::write_file(&a.report_path("build"), &build)?;
+    // The pieces' files are unlinked under their maps, which end with this function.
+    let _ = std::fs::remove_dir_all(a.work_dir());
     Ok(BuildResult { manifest: wo.manifest })
 }
 

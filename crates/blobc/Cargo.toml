@@ -18,6 +18,7 @@ deunicode.workspace = true
 flate2.workspace = true
 hex.workspace = true
 libc.workspace = true
+memmap2.workspace = true
 osmpbf.workspace = true
 parquet.workspace = true
 rand.workspace = true

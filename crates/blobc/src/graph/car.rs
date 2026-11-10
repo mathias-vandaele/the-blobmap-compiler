@@ -25,15 +25,18 @@ pub struct Turn {
     /// Roads (piece ends) at the via node.
     pub roads: usize,
     pub u_turn: bool,
+    /// Traffic keeps left on the road arriving (OSRM takes the incoming edge's flag).
+    pub left: bool,
 }
 
 /// OSRM v6.0.0 car.lua `process_turn`, the duration part: a sigmoid of the angle when the
-/// node has more than two roads or the turn is a u-turn, plus the u-turn penalty.
+/// node has more than two roads or the turn is a u-turn, plus the u-turn penalty. Where
+/// traffic keeps left the bias is inverted, so right turns cost what left ones do elsewhere.
 pub fn turn_seconds(c: &CarTurns, t: &Turn) -> f64 {
     if !(t.roads > 2 || t.u_turn) {
         return 0.0;
     }
-    let (p, b) = (c.turn_penalty_s, c.turn_bias);
+    let (p, b) = (c.turn_penalty_s, if t.left { 1.0 / c.turn_bias } else { c.turn_bias });
     let mut s = if t.angle >= 0.0 {
         p / (1.0 + (-((13.0 / b) * t.angle / 180.0 - 6.5 * b)).exp())
     } else {
@@ -48,6 +51,8 @@ pub fn turn_seconds(c: &CarTurns, t: &Turn) -> f64 {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CarStats {
     pub segments: usize,
+    /// Original segments on roads where traffic keeps left.
+    pub left_segments: usize,
     pub copies: usize,
     pub turns: usize,
     pub u_turns_dropped: usize,
@@ -195,6 +200,7 @@ impl CarGraph {
         let s = g.piece.len();
         g.originals = s;
         g.stats.segments = s;
+        g.stats.left_segments = g.piece[..s].iter().filter(|&&q| p.left[q as usize]).count();
         let members: Vec<Member> = (0..s).map(|k| Member { way: g.way[k], dir: g.dir[k], seq: g.seq[k], time: g.time[k] }).collect();
         g.w = round_all(&members);
         g.copy_of = vec![NONE; s];
@@ -228,7 +234,7 @@ impl CarGraph {
                 if u_turn {
                     angle = 180.0;
                 }
-                let c = turn_seconds(turns, &Turn { angle, roads: roads[x], u_turn }).round();
+                let c = turn_seconds(turns, &Turn { angle, roads: roads[x], u_turn, left: p.left[g.piece[a] as usize] }).round();
                 ta.push((b, c.min(65534.0) as u16));
             }
         }
@@ -496,11 +502,23 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("blobmap-graph-car-{}-{name}", std::process::id()));
         let w = crate::fixtures::by_name(name).unwrap().write(&dir).unwrap();
         let cfg = crate::profile::config::Config::load(&w.configs[0].1).unwrap();
-        let net = crate::osm::Network::read(&w.pbf, &CarProfile::new(&cfg.car.config), &cfg.car.config.snap).unwrap();
-        let p = net.pieces(&[|a: &WayAttrs| *a]);
+        let osm = crate::osm::Osm::open(&w.pbf, &dir.join("nodes"), &cfg).unwrap();
+        let net = crate::osm::Network::read(&osm, &osm.car_obstacles, &CarProfile::new(&cfg.car.config), &cfg.car.config.snap, None).unwrap();
+        let p = net.pieces(&[|a: &WayAttrs| *a]).unwrap();
         let (r, _) = crate::osm::restrictions::read(&w.pbf).unwrap();
         let g = CarGraph::build(&p, &cfg.car.config.turns, &r);
         (p, g)
+    }
+
+    #[test]
+    fn left_hand_turns_mirror() {
+        let c = crate::profile::CarTurns { turn_penalty_s: 7.5, turn_bias: 1.075, u_turn_penalty_s: 20.0 };
+        let t = |angle: f64, left: bool| turn_seconds(&c, &Turn { angle, roads: 3, u_turn: false, left });
+        for a in [10.0, 45.0, 90.0, 135.0, 170.0] {
+            assert!((t(a, false) - t(-a, true)).abs() < 1e-12 && (t(-a, false) - t(a, true)).abs() < 1e-12);
+        }
+        // Keeping right, a right turn is the cheaper; keeping left, a left one.
+        assert!(t(90.0, false) < t(-90.0, false) && t(-90.0, true) < t(90.0, true));
     }
 
     #[test]

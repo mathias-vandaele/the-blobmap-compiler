@@ -25,8 +25,8 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
     for &p in &ids.places {
         let p = &c.places[p];
         if p.status == 0 {
-            let country = if p.country.is_empty() { "none".to_string() } else { p.country.clone() };
-            *places.entry(country).or_default().entry(p.basic_key.clone().unwrap_or_else(|| "none".into())).or_default() += 1;
+            let country = c.str(p.country).unwrap_or("none").to_string();
+            *places.entry(country).or_default().entry(c.str(p.basic_key).unwrap_or("none").to_string()).or_default() += 1;
         }
     }
     let mut trapped = serde_json::Map::new();
@@ -148,6 +148,7 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
         "served_components": left,
         "islands_emptied": emptied,
         "dead_end_restrictions": dead_ends,
+        "car_segments": {"all": g.stats.segments, "keeping_left": g.stats.left_segments},
         "previous": previous,
     }))
 }

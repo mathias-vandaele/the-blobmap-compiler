@@ -59,7 +59,7 @@ Each build writes a data report, outside the model directory (§8): `<model dir>
 - **Small components** (§6), per mode, each with its node count and one OSM way id, sorted by IDs:
   - every component that IDs were moved away from, with the IDs moved and the IDs left on it;
   - every component other than the largest that still serves IDs: the real islands, and fragments with no larger component in reach, usually OSM errors to fix;
-  - every real island the rule emptied: a small island within the radius of a larger component loses its IDs to it (§6), as two Seine islands do for car in France.
+  - every real island the rule emptied: a small island within the radius of a larger component loses its IDs to it (§6), as Île de la Dérivation, Île Callot and Île des Embiez do for car in France.
   - Each component listed is marked with the real island it stands on, if any: the smallest OSM island polygon (`place=island|islet`, or a closed coastline way) around one of its pieces, when that polygon holds no servable piece of a larger component.
 - **Dead-end restrictions** (§5): every via-way restriction whose prefix copy has no turn out, with its relation id and the copied segment's way, usually a mis-tagged restriction.
 
@@ -73,13 +73,14 @@ Three metrics exist in this version, car, bike and walk, in two mode families. P
 | Graph | edge-based: nodes are directed road segments, arcs are allowed turns | node-based: nodes are intersections, arcs are road pieces |
 | Network | ways usable by cars | union of the ways usable by bike or on foot |
 | Speeds | OSRM v6 car profile: speeds by road class, `maxspeed`, access and one-way rules | bike 15 km/h, walk 5 km/h, flat |
-| Turns | OSRM v6-style turn penalties (angle, u-turns) | none |
+| Turns | OSRM v6-style turn penalties (angle, u-turns), mirrored where traffic keeps left | none |
 | Restrictions | all OSM turn restrictions, `no_*` and `only_*`, via a node and via one or more ways | access per mode; steps for walk only; bike contraflow (`oneway:bicycle=no`) |
 | Delays | traffic signals, stops and give-ways, as in OSRM v6 car | traffic signals and crossings, as node costs |
 | Forbidden for a mode | arc absent | arc weight ∞ for that metric |
 | Reference accuracy | OSRM v6 car | OSRM bike and foot (bike differs by its missing turn costs, about 5 %, accepted) |
 
 - **Delays** are part of the time of the road that arrives at them, in the direction they apply to (§7).
+- **Driving side:** as OSRM v6 given its location-dependent data. A way keeps left when its `driving_side` tag says `left`; without the tag, when its last node lies in one of OSRM v6's left-hand polygons (`data/driving_side.geojson`, held in the car profile). Elsewhere traffic keeps right. A turn takes the side of the road it arrives by, and keeping left inverts the turn bias, so right turns cost what left turns cost elsewhere.
 - **Ferries and car shuttles:** excluded in this version. The format reserves a `ferry` link type (fixed crossing time plus an average wait) so they can be added later as a profile change.
 - **Format room:** a mode family may carry more than its current metrics later (e-bike, slow walker), without a format change. This version defines exactly three.
 
@@ -121,7 +122,7 @@ The only inputs the model accepts are Overture address IDs and Overture place ID
   - A direction the mode may not use has offset ∞. An example is a bike against a one-way it can neither ride nor push along.
   - Offsets are whole seconds (§7).
 - **Snapping happens once, at compile time.** An ID snaps to the nearest eligible road piece within 2 km for car and 500 m for bike and walk. An ID whose closest point falls exactly on a node stands at that node. Pieces in trapped components (§5) are skipped: the ID snaps to the next nearest eligible piece within the radius, or gets the reason code TrappedComponent if there is none. An ACTIVE piece whose two ends lie in different components lies on no route, and is skipped the same way. Only the result is stored; no geometry or coordinate index ships in the model.
-- **Small components yield, in every mode.** A component of at most N nodes is never chosen when a piece of a larger component, left after the skips above, lies within the radius: the ID snaps to the nearest such piece. Otherwise the nearest piece wins, as above. N is a profile setting per family, 10 for both, mirroring OSRM's small-component size. So an ID beside a tiny fragment (a car park, a mapping gap) snaps to the street beyond it.
+- **Small components yield, in every mode.** A component of at most N nodes is never chosen when a piece of a larger component, left after the skips above, lies within the radius: the ID snaps to the nearest such piece. Otherwise the nearest piece wins, as above. So an ID beside a tiny fragment (a car park, a mapping gap) snaps to the street beyond it. N is a profile setting per family. For CAR it is 1000, mirroring OSRM's default small-component size, so an ID in an enclave that access tags cut off (a gated estate, a pedestrian old town) also snaps to the street beyond; no access tag is a special case. For ACTIVE it is 10, since on foot a small network is the real one. The tiny-tier fixtures keep 10 for CAR, to fit their synthetic scale.
   - Islands stay served whatever their size; a small one loses its IDs only to a larger component within the radius. Fragments stay in the model and are never dropped.
   - No other rule applies to fragments. The IDs they keep are reported as OSM errors (§3).
 - **Eligibility:** only road pieces in the mode's graph are eligible. For bike or walk, those are the pieces of the shared graph with at least one direction that mode may use. For car: no motorways, trunk roads, or their links and ramps. For every mode: no bridges, tunnels or covered pieces, so an address never lands on an overpass or in a tunnel. Service roads stay eligible. The exact rules live in the profile config.
@@ -292,9 +293,9 @@ Each milestone ends at a gate, and the next starts only once the gate passes. Th
 1. **Spec and FORMAT.md.** This spec approved; FORMAT.md written (every tensor, invariant and version rule) and approved. Gate: both signed off, before any compiler code.
 2. **Toy and synthetic.** The compiler, reference runtime and suite on the toy town and synthetic graphs (islands, one-way traps, the cap, ties, cells). Gate: tiny tier green, byte-identical builds across thread counts.
 3. **France.** A full build from the France `.pbf` within 62 GB. Gate: country tier green; accuracy against OSRM at least as good as the research engine (car MAE about 19 s over France), with pairs in different components only where a real island or a ferry separates them; no ID unserved because of its component, Corsica and islands served.
-4. **Fallback.** Components built as cells from the coarsening fallback (§5), forced, on Hauts-de-France, France, and a `.pbf` covering France, Belgium, Luxembourg, Switzerland and Germany. Gate: zero mismatches at every tier; cross-border golden checks green; at most 1.25× the sweep layers of one piece (FORMAT's level count: top block plus deepest cell); peak RSS ≤ 62 GB. Cells cut from the fine order have the one-piece links and elimination-tree height exactly.
-5. **Europe.** Gate: built within 62 GB; measured bytes per link, per address and per column, and the extrapolation to each continent.
-6. **World.** Gate: built; components per continent listed; the hardware choice for serving made from the measured sizes.
+4. **Any pbf.** Extracts that stress what France does not: Great Britain and Japan (left-hand traffic: turn penalties follow the driving side as in OSRM v6), Fiji (the 180° meridian), Norway (ferries excluded), India (sparse tagging) and a large US state (California). Each is built and verified with the small-tier checks, the via-way copy check exhaustive. The planet runs through the input stages only (the planet `.pbf` and all of Overture), with node locations in a disk-backed, memory-mapped index, measuring peak RSS per stage. Gate: every extract at zero mismatches, its data report reviewed; the planet input stages within 62 GB.
+5. **Continent.** The coarsening fallback (§5) at most 1.25× the sweep layers of one piece (FORMAT's level count: top block plus deepest cell), forced on Hauts-de-France, France, and a `.pbf` covering France, Belgium, Luxembourg, Switzerland and Germany. Attempts, in order: flow-based refinement of the lifted separators; then, for CAR, an order from the node-based graph. Verify split per component on disk, so it scales past 1.5× France. Then Europe. Gate: the fallback within 1.25× at zero mismatches and peak RSS ≤ 62 GB; Europe built within 62 GB and verified, with its bytes per link, per address and per column and the extrapolation to the world.
+6. **World.** Gate: the planet built within 62 GB, verified at the tiers that apply, and its sizes reported for choosing the serving hardware.
 
 ## 14. Deferred
 

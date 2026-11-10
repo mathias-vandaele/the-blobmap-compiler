@@ -12,9 +12,9 @@ use blobmap_format::NONE;
 use blobmap_format::runtime::Fam;
 use rayon::prelude::*;
 
-use crate::build::{ActiveNetwork, CarNetwork, ReadCatalog, Stage};
+use crate::build::{ActiveNetwork, CarNetwork, ReadCatalog, ReadNodes, Stage};
 use crate::graph::{ActiveGraph, CarGraph, Components, active::METRICS};
-use crate::osm::Pieces;
+use crate::osm::{Osm, Pieces};
 use crate::overture::{Catalog, Id, Polygon, Release};
 use crate::profile::config::Config;
 use crate::snap::modes::{active_component, car_component};
@@ -28,6 +28,8 @@ pub struct Inputs {
     pub overture: PathBuf,
     pub config: PathBuf,
     pub extent: Option<PathBuf>,
+    /// Scratch space for the node locations (on disk, not in memory).
+    pub work: PathBuf,
 }
 
 /// Where an ID stands for a mode.
@@ -89,13 +91,13 @@ struct Snapping {
     found: Vec<Vec<Snapped>>,
 }
 
-fn snapping(i: &Inputs, config: &Config, fam: Fam, points: &[(f64, f64)]) -> Result<Snapping> {
+fn snapping(osm: &Osm, config: &Config, fam: Fam, points: &[(f64, f64)]) -> Result<Snapping> {
     let car = fam == Fam::Car;
     let (pieces, cg, ag) = if car {
-        let (p, g) = phase("  car network", || CarNetwork.run((i.pbf.as_path(), config)))?;
+        let (p, g) = phase("  car network", || CarNetwork.run((osm, config)))?;
         (p, g, ActiveGraph::default())
     } else {
-        let (p, g) = phase("  active network", || ActiveNetwork.run((i.pbf.as_path(), config)))?;
+        let (p, g) = phase("  active network", || ActiveNetwork.run((osm, config)))?;
         (p, CarGraph::default(), g)
     };
     let components = if car { cg.components() } else { ag.components() };
@@ -126,6 +128,7 @@ impl Reference {
             None => None,
         };
         let mut catalog = phase("  catalog", || ReadCatalog.run((&release, &config, polygon.as_ref())))?;
+        let osm = phase("  nodes", || ReadNodes.run((i.pbf.as_path(), i.work.join("nodes").as_path(), &config)))?;
         let points: Vec<(f64, f64)> =
             catalog.addresses.iter().map(|a| (a.lat, a.lon)).chain(catalog.places.iter().map(|p| (p.lat, p.lon))).collect();
         // Without an extent, an ID is in the model when some mode has a road within its
@@ -133,11 +136,11 @@ impl Reference {
         let mut near = vec![polygon.is_some(); points.len()];
         if polygon.is_none() {
             for fam in [Fam::Car, Fam::Active].into_iter().filter(|f| !fams.contains(f)) {
-                let s = snapping(i, &config, fam, &points)?;
+                let s = snapping(&osm, &config, fam, &points)?;
                 s.found.iter().for_each(|f| near.iter_mut().zip(f).for_each(|(n, x)| *n |= x.any));
             }
         }
-        let held: Vec<Snapping> = [Fam::Car, Fam::Active].into_iter().filter(|f| fams.contains(f)).map(|f| snapping(i, &config, f, &points)).collect::<Result<_>>()?;
+        let held: Vec<Snapping> = [Fam::Car, Fam::Active].into_iter().filter(|f| fams.contains(f)).map(|f| snapping(&osm, &config, f, &points)).collect::<Result<_>>()?;
         for s in &held {
             s.found.iter().for_each(|f| near.iter_mut().zip(f).for_each(|(n, x)| *n |= x.any));
         }

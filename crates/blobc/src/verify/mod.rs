@@ -10,6 +10,7 @@ pub mod dijkstra;
 pub mod expected;
 pub mod fragments;
 pub mod golden;
+pub mod inputs;
 pub mod invariants;
 pub mod mutants;
 pub mod reference;
@@ -159,6 +160,13 @@ fn reference_checks(rt: &Runtime, ex: &Expected, s: &Facts, n: &Samples, rep: &m
     Ok(())
 }
 
+/// Scratch space for a model's checks, next to its directory: the node locations go to
+/// disk there (a temporary directory may be held in memory).
+pub fn work_dir(model: &Path, what: &str) -> PathBuf {
+    let name = model.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "model".into());
+    model.with_file_name(format!("{name}.{what}-work"))
+}
+
 /// Runs a check suite, turning an error into a mismatch of its own.
 fn guarded(rep: &mut Report, name: &str, f: impl FnOnce(&mut Report) -> Result<()>) {
     if let Err(e) = f(rep) {
@@ -171,7 +179,7 @@ pub fn verify(model: &Path, o: &Options) -> Result<Verified> {
     let tf = tier::TierFile::read(&o.tier_file)?;
     anyhow::ensure!(tf.tier == o.tier, "{}: a tier file for {}, not {}", o.tier_file.display(), tf.tier, o.tier);
     let set = tf.find(&rt.manifest)?;
-    let inputs = set.check(&o.data, &rt.manifest)?;
+    let inputs = set.check(&o.data, &rt.manifest, &o.work)?;
     // The tiny tier's sets are fixture scenarios, with facts of their own.
     let scenario = if o.tier == "tiny" { crate::fixtures::by_name(&set.name) } else { None };
     let budget = format!("memory_budget_bytes = {}\n", rt.manifest.build.memory_budget_bytes);

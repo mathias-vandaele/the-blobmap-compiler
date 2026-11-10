@@ -199,7 +199,7 @@ pub fn unit(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash:
     let mut alt_first = vec![0u32];
     let mut alt = Vec::new();
     for p in &places {
-        alt.extend_from_slice(&p.alt);
+        alt.extend_from_slice(c.alt(p));
         alt_first.push(alt.len() as u32);
     }
     u.put("vocab/places/alt_first", Tensor::vec(&alt_first));

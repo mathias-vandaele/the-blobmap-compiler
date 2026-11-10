@@ -11,11 +11,12 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, bail, ensure};
 use blobmap_format::NONE16;
+use rayon::prelude::*;
 
 use crate::profile::config::PlaceRules;
 
 pub use extent::Polygon;
-pub use release::Release;
+pub use release::{NO_STR, Release};
 pub use taxonomy::Taxonomy;
 
 /// An Overture ID: a UUID in canonical lower-case text form, as its 16 bytes in text order
@@ -56,15 +57,18 @@ pub struct Place {
     pub id: Id,
     pub lat: f64,
     pub lon: f64,
-    pub country: String,
+    /// Its first address's country, as a number in `Catalog::strings` (`NO_STR` if none).
+    pub country: u32,
     /// 0 kept, 4 `FilteredPlace` (FORMAT §7.4).
     pub status: u8,
     pub primary: u16,
     pub basic: u16,
-    /// Ascending, without the primary.
-    pub alt: Vec<u16>,
-    /// The basic category's key as Overture gives it (the data report counts by it).
-    pub basic_key: Option<String>,
+    /// The basic category's key as Overture gives it, as a number in `Catalog::strings`
+    /// (the data report counts by it).
+    pub basic_key: u32,
+    /// The alternate categories are `Catalog::alts[alt_first..][..alt_len]`.
+    pub alt_first: u32,
+    pub alt_len: u16,
     /// Index of the row's source licences in `Catalog::license_sets`.
     pub license: u32,
 }
@@ -89,6 +93,10 @@ pub struct Catalog {
     pub addresses: Vec<Address>,
     /// Kept and filtered places, sorted by ID.
     pub places: Vec<Place>,
+    /// The places' alternate categories: per place ascending, without the primary.
+    pub alts: Vec<u16>,
+    /// The country codes and category keys places point to.
+    pub strings: Vec<String>,
     /// Merged duplicates and the index in `places` of the place kept, sorted by ID.
     pub aliases: Vec<(Id, u32)>,
     /// The source licences of each alias's own row, as `license_sets` indices.
@@ -100,73 +108,104 @@ pub struct Catalog {
 
 impl Catalog {
     /// Reads the release, keeping the points `keep` accepts (the extent polygon, if any).
+    /// The places come first, so that their rows as read are dropped before the addresses,
+    /// the larger table, are read.
     pub fn read(release: &Release, rules: &PlaceRules, keep: &(dyn Fn(f64, f64) -> bool + Sync)) -> Result<Catalog> {
         let taxonomy = Taxonomy::read(&release.taxonomy_dir())?;
         let lic = release::Licenses::default();
-        let raw_a = release.read_addresses(keep, &lic)?;
-        let raw_p = release.read_places(keep, &lic)?;
-        let mut stats = CatalogStats { addresses: raw_a.len() as u64, places: raw_p.len() as u64, ..CatalogStats::default() };
-        // Licence sets, in sorted order.
-        let (license_sets, license_at) = lic.sorted();
-        let license = |n: u32| license_at[n as usize];
-        let mut addresses: Vec<Address> = raw_a.into_iter().map(|a| Address { id: a.id, lat: a.lat, lon: a.lon, license: license(a.license) }).collect();
-        addresses.sort_by_key(|a| a.id);
+        let raw = release.read_places(keep, &lic)?;
+        let mut stats = CatalogStats { places: raw.rows.len() as u64, ..CatalogStats::default() };
         // A place's keys go through the redirects, like query keys (SPEC §6).
-        let key = |k: &Option<String>, stats: &mut CatalogStats| -> u16 {
-            match k {
-                None => NONE16,
-                Some(k) => taxonomy.resolve(k).unwrap_or_else(|| {
-                    *stats.missing_keys.entry(k.clone()).or_default() += 1;
-                    NONE16
-                }),
+        let resolved: Vec<Option<u16>> = raw.strings.iter().map(|k| taxonomy.resolve(k)).collect();
+        let key = |k: u32, stats: &mut CatalogStats| -> u16 {
+            if k == NO_STR {
+                return NONE16;
             }
+            resolved[k as usize].unwrap_or_else(|| {
+                *stats.missing_keys.entry(raw.strings[k as usize].clone()).or_default() += 1;
+                NONE16
+            })
         };
-        let mut places: Vec<(Place, usize)> = Vec::with_capacity(raw_p.len());
-        for (i, p) in raw_p.iter().enumerate() {
-            let id = parse_uuid(&p.id)?;
-            let primary = key(&p.primary, &mut stats);
-            let basic = key(&p.basic, &mut stats);
-            let mut alt: Vec<u16> = p.alternates.iter().filter_map(|k| taxonomy.resolve(k)).filter(|&a| a != primary).collect();
+        let mut places: Vec<Place> = Vec::with_capacity(raw.rows.len());
+        let mut alts: Vec<u16> = Vec::new();
+        let mut alt: Vec<u16> = Vec::new();
+        for (i, p) in raw.rows.iter().enumerate() {
+            let primary = key(p.primary, &mut stats);
+            let basic = key(p.basic, &mut stats);
+            alt.clear();
+            alt.extend(raw.alternates(i).iter().filter_map(|&k| resolved[k as usize]).filter(|&a| a != primary));
             alt.sort_unstable();
             alt.dedup();
-            let status = if places::filtered(p, rules, &taxonomy) { 4 } else { 0 };
+            let status = if places::filtered(raw.str(p.status), (primary != NONE16).then_some(primary), p.confidence, rules, &taxonomy) { 4 } else { 0 };
             stats.filtered += (status == 4) as u64;
             stats.primary_none += (primary == NONE16) as u64;
-            let license = license(p.license);
-            places.push((
-                Place { id, lat: p.lat, lon: p.lon, country: p.country.clone(), status, primary, basic, alt, basic_key: p.basic.clone(), license },
-                i,
-            ));
+            let alt_first = u32::try_from(alts.len())?;
+            alts.extend_from_slice(&alt);
+            places.push(Place {
+                id: p.id,
+                lat: p.lat,
+                lon: p.lon,
+                country: p.country,
+                status,
+                primary,
+                basic,
+                basic_key: p.basic,
+                alt_first,
+                alt_len: u16::try_from(alt.len())?,
+                license: p.license,
+            });
         }
         // Duplicates among the kept places.
-        let kept: Vec<usize> = (0..places.len()).filter(|&k| places[k].0.status == 0).collect();
-        let kept_raw: Vec<&release::RawPlace> = kept.iter().map(|&k| &raw_p[places[k].1]).collect();
-        let merges = places::dedup(&kept_raw, rules.duplicates.radius_m);
+        let kept: Vec<u32> = (0..places.len() as u32).filter(|&k| places[k as usize].status == 0).collect();
+        let merges = places::dedup(&raw, &kept, rules.duplicates.radius_m);
         stats.merged = merges.len() as u64;
-        let merged: std::collections::HashMap<usize, usize> = merges.iter().map(|&(m, k)| (kept[m as usize], kept[k as usize])).collect();
-        let mut out: Vec<(Place, usize)> = Vec::new();
-        let mut alias_raw: Vec<(Id, Id, u32)> = Vec::new();
-        for (k, p) in places.into_iter().enumerate() {
-            match merged.get(&k) {
-                Some(&to) => alias_raw.push((p.0.id, parse_uuid(&raw_p[to].id)?, p.0.license)),
-                None => out.push(p),
+        let strings = raw.strings.clone();
+        drop(raw);
+        let mut to = vec![u32::MAX; places.len()];
+        for &(m, k) in &merges {
+            to[kept[m as usize] as usize] = kept[k as usize];
+        }
+        let mut alias_raw: Vec<(Id, Id, u32)> = Vec::with_capacity(merges.len());
+        for (k, &t) in to.iter().enumerate() {
+            if t != u32::MAX {
+                alias_raw.push((places[k].id, places[t as usize].id, places[k].license));
             }
         }
-        out.sort_by_key(|a| a.0.id);
-        let places: Vec<Place> = out.into_iter().map(|p| p.0).collect();
+        let mut k = 0;
+        places.retain(|_| {
+            k += 1;
+            to[k - 1] == u32::MAX
+        });
+        drop(to);
+        places.par_sort_unstable_by_key(|p| p.id);
         let index = |id: &Id| places.binary_search_by(|p| p.id.cmp(id)).ok().map(|i| i as u32);
         let mut aliases: Vec<(Id, u32, u32)> = alias_raw.iter().map(|(a, k, l)| (*a, index(k).expect("kept place"), *l)).collect();
-        aliases.sort();
-        let alias_license = aliases.iter().map(|a| a.2).collect();
+        drop(alias_raw);
+        aliases.par_sort_unstable();
+        let mut addresses = release.read_addresses(keep, &lic)?;
+        stats.addresses = addresses.len() as u64;
+        // Licence sets, in sorted order.
+        let (license_sets, license_at) = lic.sorted();
+        addresses.par_iter_mut().for_each(|a| a.license = license_at[a.license as usize]);
+        places.par_iter_mut().for_each(|p| p.license = license_at[p.license as usize]);
+        addresses.par_sort_unstable_by_key(|a| a.id);
+        let alias_license = aliases.iter().map(|a| license_at[a.2 as usize]).collect();
         let aliases: Vec<(Id, u32)> = aliases.into_iter().map(|a| (a.0, a.1)).collect();
         // No ID twice across the three tables (FORMAT §7.1).
-        let mut all: Vec<&Id> =
-            addresses.iter().map(|a| &a.id).chain(places.iter().map(|p| &p.id)).chain(aliases.iter().map(|a| &a.0)).collect();
-        all.sort_unstable();
-        if let Some(w) = all.windows(2).find(|w| w[0] == w[1]) {
-            bail!("Overture ID {} appears twice in the release", uuid_string(w[0]));
+        if let Some(id) = twice([&mut addresses.iter().map(|a| &a.id), &mut places.iter().map(|p| &p.id), &mut aliases.iter().map(|a| &a.0)]) {
+            bail!("Overture ID {} appears twice in the release", uuid_string(&id));
         }
-        Ok(Catalog { release: release.name.clone(), taxonomy, addresses, places, aliases, alias_license, license_sets, stats })
+        Ok(Catalog { release: release.name.clone(), taxonomy, addresses, places, alts, strings, aliases, alias_license, license_sets, stats })
+    }
+
+    /// A place's alternate categories.
+    pub fn alt(&self, p: &Place) -> &[u16] {
+        &self.alts[p.alt_first as usize..][..p.alt_len as usize]
+    }
+
+    /// A number in `strings`, `None` for `NO_STR`.
+    pub fn str(&self, k: u32) -> Option<&str> {
+        (k != NO_STR).then(|| self.strings[k as usize].as_str())
     }
 
     /// Source licences with the number of rows carrying each, over the given rows: address
@@ -186,6 +225,21 @@ impl Catalog {
             }
         }
         out
+    }
+}
+
+/// The smallest ID that two of the sorted lists hold, or one holds twice.
+fn twice<const N: usize>(mut lists: [&mut dyn Iterator<Item = &Id>; N]) -> Option<Id> {
+    let mut head: [Option<&Id>; N] = std::array::from_fn(|k| lists[k].next());
+    let mut last: Option<&Id> = None;
+    loop {
+        let k = (0..N).filter(|&k| head[k].is_some()).min_by_key(|&k| head[k])?;
+        let x = head[k];
+        if last == x {
+            return x.copied();
+        }
+        last = x;
+        head[k] = lists[k].next();
     }
 }
 
@@ -218,7 +272,7 @@ mod tests {
         assert_eq!(t.resolve("gone_category"), None);
         assert!(t.is_under(t.id("pizza_restaurant").unwrap(), t.id("eat_and_drink").unwrap()));
         let pizza = c.places.iter().find(|p| p.primary == t.id("pizza_restaurant").unwrap()).unwrap();
-        assert_eq!(pizza.alt, [t.id("cafe").unwrap()]);
+        assert_eq!(c.alt(pizza), [t.id("cafe").unwrap()]);
         assert_eq!(pizza.basic, t.id("restaurant").unwrap());
     }
 }

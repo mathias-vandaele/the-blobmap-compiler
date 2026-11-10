@@ -11,6 +11,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::profile::config::Config;
+
 use anyhow::{Context, Result, bail, ensure};
 use rayon::prelude::*;
 
@@ -49,8 +51,9 @@ pub fn main(a: Vec<String>) -> Result<()> {
         overture: data.join(&set.overture),
         config: data.join(&set.config),
         extent: set.extent.as_ref().map(|e| data.join(e)),
+        work: data.join(format!("{name}.fragments-work")),
     };
-    let islands = Islands::read(&inputs.pbf)?;
+    let islands = Islands::read(&crate::osm::Osm::open(&inputs.pbf, &inputs.work.join("islands"), &Config::load(&inputs.config)?)?)?;
     println!("{} island polygons", islands.all.len());
     let r = Reference::build(&inputs, &[Fam::Car, Fam::Active])?;
     let (cgrid, agrid) = (Grid::new(&r.car_pieces), Grid::new(&r.active_pieces));

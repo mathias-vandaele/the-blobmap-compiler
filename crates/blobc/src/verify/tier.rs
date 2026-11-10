@@ -85,7 +85,7 @@ impl InputSet {
 
     /// Checks every file under `data` and the config against the model's manifest, and gives
     /// the inputs' paths.
-    pub fn check(&self, data: &Path, m: &Manifest) -> Result<Inputs> {
+    pub fn check(&self, data: &Path, m: &Manifest, work: &Path) -> Result<Inputs> {
         for (p, want) in &self.files {
             let got = sha256_file(&data.join(p))?.0;
             ensure!(&got == want, "{}: SHA-256 {got}, the tier file lists {want}", data.join(p).display());
@@ -104,6 +104,7 @@ impl InputSet {
             overture: data.join(&self.overture),
             config: data.join(&self.config),
             extent: self.extent.as_ref().map(|e| data.join(e)),
+            work: work.to_path_buf(),
         })
     }
 }

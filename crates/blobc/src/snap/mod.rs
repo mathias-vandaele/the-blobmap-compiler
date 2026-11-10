@@ -368,7 +368,7 @@ mod tests {
         // Three straight pieces along a parallel at 50°N: 0 → 1 → 2 → 3, 100 m each.
         let (kx, _) = crate::osm::ruler(50f64.to_radians().cos());
         let lon = |x: f64| 3.0 + x / kx;
-        let mut p = Pieces { pt_first: vec![0], ..Pieces::default() };
+        let mut p = Pieces { pt_first: vec![0].into(), ..Pieces::default() };
         for k in 0..3 {
             p.way.push(1);
             p.seq.push(k);

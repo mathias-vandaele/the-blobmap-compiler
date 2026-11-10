@@ -71,6 +71,7 @@ pub struct CarFile {
     pub obstacles: CarObstacles,
     pub turns: CarTurns,
     pub snap: SnapRules,
+    pub driving_side: CarDrivingSide,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -122,6 +123,14 @@ pub struct CarTurns {
     pub u_turn_penalty_s: f64,
 }
 
+/// Where traffic keeps left (SPEC §4, turns): polygons, each an outer ring of [lon, lat]
+/// points, closed (the last point repeats the first).
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CarDrivingSide {
+    pub left: Vec<Vec<[f64; 2]>>,
+}
+
 /// Snapping (SPEC §6): the radius, the small-component size, and which pieces an ID may
 /// stand on. A piece is ineligible if its `highway` is in `exclude_highways`, or if it has a
 /// key of `exclude_keys` with a value not in `keep_values` (`bridge=no` is no bridge). A
@@ -166,6 +175,9 @@ impl ProfileConfig for CarFile {
         }
         ensure!(s.maxspeed_table.keys().all(|k| *k == k.to_lowercase()), "speeds.maxspeed_table keys must be lower case");
         ensure!(self.snap.radius_m > 0, "snap.radius_m must be positive");
+        for (i, r) in self.driving_side.left.iter().enumerate() {
+            ensure!(r.len() >= 4 && r[0] == r[r.len() - 1], "driving_side.left[{i}]: a ring needs 4 points or more, the last equal to the first");
+        }
         Ok(())
     }
 }

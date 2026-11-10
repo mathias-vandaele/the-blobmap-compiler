@@ -3,8 +3,10 @@
 //! (delays included, SPEC §4), snapping eligibility (SPEC §6), and the car turn
 //! restrictions, via nodes and via ways.
 
+pub mod column;
 pub mod geo;
 pub mod network;
+pub mod nodes;
 pub mod restrictions;
 
 use std::path::Path;
@@ -12,6 +14,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 pub use network::{Network, Pieces};
+pub use nodes::Osm;
 pub use restrictions::{Restriction, Via};
 
 /// The `osmosis_replication_timestamp` of the file's header, seconds since the epoch.
@@ -23,10 +26,11 @@ pub fn header_timestamp(path: &Path) -> Result<Option<i64>> {
 }
 
 /// Length of a straight segment as OSRM measures it: the cheap ruler on the WGS84
-/// ellipsoid at the segment's mean latitude.
+/// ellipsoid at the segment's mean latitude, longitudes taken across the antimeridian the
+/// short way.
 pub fn cheap_ruler_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let (kx, ky) = ruler(((lat1 + lat2) / 2.0).to_radians().cos());
-    ((lon2 - lon1) * kx).hypot((lat2 - lat1) * ky)
+    (geo::lon_diff(lon2, lon1) * kx).hypot((lat2 - lat1) * ky)
 }
 
 /// Metres per degree of longitude and of latitude where cos(latitude) = `cl`.

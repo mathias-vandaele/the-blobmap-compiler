@@ -1,5 +1,5 @@
 //! `blobc build | verify | inspect` (SPEC §10), thin over the `build` and `verify` modules
-//! and `blobmap_format`; and the tools of the tiers and of milestone 3, each with its own
+//! and `blobmap_format`; and the tools of the tiers and of milestones 3 and 4, each with its own
 //! arguments.
 
 use std::path::PathBuf;
@@ -64,6 +64,8 @@ enum Cmd {
     Components(Tool),
     /// What the small-component rule moves, and whether off an island (SPEC §6).
     Fragments(Tool),
+    /// The build's input stages alone, with their peak RSS (PLAN, milestone 4).
+    Inputs(Tool),
 }
 
 /// A tool's own arguments, passed through as given.
@@ -94,7 +96,7 @@ fn run() -> Result<bool> {
             Ok(true)
         }
         Cmd::Verify { model, tier, data, tiers, golden, mutants } => {
-            let work = std::env::temp_dir().join(format!("blobc-verify-{}", std::process::id()));
+            let work = blobc::verify::work_dir(&model, "verify");
             let tier_file = tiers.join(format!("{tier}.toml"));
             let o = blobc::verify::Options { tier, tier_file, data, golden, mutants, work: work.clone() };
             let v = blobc::verify::verify(&model, &o);
@@ -126,6 +128,7 @@ fn run() -> Result<bool> {
         Cmd::Accuracy(t) => blobc::verify::accuracy::main(t.args).map(|()| true),
         Cmd::Components(t) => blobc::verify::components::main(t.args).map(|()| true),
         Cmd::Fragments(t) => blobc::verify::fragments::main(t.args).map(|()| true),
+        Cmd::Inputs(t) => blobc::verify::inputs::main(t.args).map(|()| true),
         Cmd::Inspect { model } => {
             let m = blobmap_format::Model::open(&model)?;
             let mf = blobmap_format::manifest::Manifest::from_value(&m.manifest)?;

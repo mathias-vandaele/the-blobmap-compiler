@@ -203,7 +203,7 @@ impl Expected<'_> {
         }
         match *c {
             Cat::Basic(b) => p.basic == b,
-            Cat::Taxonomy(x) => t.is_under(p.primary, x) || p.alt.iter().any(|&a| t.is_under(a, x)),
+            Cat::Taxonomy(x) => t.is_under(p.primary, x) || self.r.catalog.alt(p).iter().any(|&a| t.is_under(a, x)),
         }
     }
 

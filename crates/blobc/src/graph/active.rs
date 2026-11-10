@@ -97,9 +97,10 @@ mod tests {
         let w = crate::fixtures::by_name("town").unwrap().write(&dir).unwrap();
         let cfg = crate::profile::config::Config::load(&w.configs[0].1).unwrap();
         let prof = ActiveProfile::new(&cfg.active.config);
-        let net = crate::osm::Network::read(&w.pbf, &prof, &cfg.active.config.snap).unwrap();
+        let osm = crate::osm::Osm::open(&w.pbf, &dir.join("nodes"), &cfg).unwrap();
+        let net = crate::osm::Network::read(&osm, &osm.active_obstacles, &prof, &cfg.active.config.snap, None).unwrap();
         let modes: Vec<ActiveMode> = [Mode::Bike, Mode::Walk].map(|mode| ActiveMode { mode, cfg: prof.cfg }).to_vec();
-        let g = ActiveGraph::build(&net.pieces(&modes));
+        let g = ActiveGraph::build(&net.pieces(&modes).unwrap());
         // Walk 100 m at 5 km/h: 72 s on every piece of row 0 (way 1).
         let row0: Vec<u16> = (0..g.len()).filter(|&r| g.way[r] == 1).map(|r| g.w[1][r]).collect();
         assert_eq!(row0, [72; 10]);

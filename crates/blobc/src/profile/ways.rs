@@ -3,13 +3,18 @@
 
 use crate::profile::car::{CarProfile, Obstacle, ObstacleDir, WayAttrs};
 
-/// Which ways a network keeps and what it records of them (`Attrs`), and the node
-/// obstacles that delay them.
+/// Which ways a network keeps and what it records of them (`Attrs`), and where traffic keeps
+/// left on them. (The node obstacles come with the node locations, `osm::Osm`.)
 pub trait WayProfile: Sync {
     type Attrs: Copy + Send + Sync + Speeds;
     fn way_attrs<'a>(&self, tags: impl Iterator<Item = (&'a str, &'a str)>) -> Option<Self::Attrs>;
-    fn obstacle<'a>(&self, _tags: impl Iterator<Item = (&'a str, &'a str)>) -> Option<Obstacle> {
-        None
+    /// Whether traffic keeps left on a way, from its tags alone: None when its location
+    /// decides (`keeps_left_at` of its last node). A profile without turn costs keeps right.
+    fn driving_side(&self, _tags: &[(&str, &str)]) -> Option<bool> {
+        Some(false)
+    }
+    fn keeps_left_at(&self, _lat: f64, _lon: f64) -> bool {
+        false
     }
 }
 
@@ -57,7 +62,10 @@ impl WayProfile for CarProfile {
     fn way_attrs<'a>(&self, tags: impl Iterator<Item = (&'a str, &'a str)>) -> Option<WayAttrs> {
         CarProfile::way_attrs(self, tags)
     }
-    fn obstacle<'a>(&self, tags: impl Iterator<Item = (&'a str, &'a str)>) -> Option<Obstacle> {
-        CarProfile::obstacle(self, tags)
+    fn driving_side(&self, tags: &[(&str, &str)]) -> Option<bool> {
+        CarProfile::driving_side(self, tags)
+    }
+    fn keeps_left_at(&self, lat: f64, lon: f64) -> bool {
+        self.left_polygons.contains(lat, lon)
     }
 }

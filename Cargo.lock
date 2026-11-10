@@ -222,6 +222,7 @@ dependencies = [
  "flate2",
  "hex",
  "libc",
+ "memmap2 0.9.12",
  "osmpbf",
  "parquet",
  "rand",

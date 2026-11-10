@@ -58,6 +58,39 @@ impl Local {
     }
 }
 
+/// `a - b` in degrees of longitude, across the antimeridian the short way: the IEEE
+/// remainder by 360, as OSRM's cheap ruler takes it (`longDiff`). Exact, and `a - b` itself
+/// whenever |a - b| ≤ 180.
+pub fn lon_diff(a: f64, b: f64) -> f64 {
+    let d = a - b;
+    d - 360.0 * (d / 360.0).round_ties_even()
+}
+
+/// A longitude brought into [-180, 180].
+pub fn lon_wrap(lon: f64) -> f64 {
+    if lon > 180.0 {
+        lon - 360.0
+    } else if lon < -180.0 {
+        lon + 360.0
+    } else {
+        lon
+    }
+}
+
+/// Rings of (lat, lon) that may cross the antimeridian, for point-in-polygon tests: each
+/// ring is unwrapped so that consecutive longitudes differ by at most 180°, and a point is
+/// tested at its longitude and at ±360° of it. A ring that does not cross is unchanged.
+pub fn unwrap_ring(ring: &mut [(f64, f64)]) {
+    for i in 1..ring.len() {
+        ring[i].1 = ring[i - 1].1 + lon_diff(ring[i].1, ring[i - 1].1);
+    }
+}
+
+/// The longitudes to test a point at against unwrapped rings spanning `lo ..= hi`.
+pub fn lon_shifts(lon: f64, lo: f64, hi: f64) -> impl Iterator<Item = f64> {
+    [lon, lon - 360.0, lon + 360.0].into_iter().filter(move |&x| x >= lo && x <= hi)
+}
+
 /// Distance between two (lat, lon) points, metres (in the tangent plane at their midpoint).
 pub fn dist_m(a: (f64, f64), b: (f64, f64)) -> f64 {
     let l = Local::at(0.5 * (a.0 + b.0), a.1);
@@ -69,4 +102,20 @@ pub fn dist_m(a: (f64, f64), b: (f64, f64)) -> f64 {
 pub fn bearing_deg(a: (f64, f64), b: (f64, f64)) -> f64 {
     let (x, y) = Local::at(a.0, a.1).xy(b.0, b.1);
     x.atan2(y).to_degrees()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn antimeridian() {
+        assert_eq!((lon_diff(-179.9, 179.9), lon_diff(179.9, -179.9), lon_diff(2.5, 1.25)), (-359.8 + 360.0, 359.8 - 360.0, 1.25));
+        let (a, b) = (crate::osm::cheap_ruler_m(-17.0, 179.999, -17.0, -179.999), crate::osm::cheap_ruler_m(-17.0, -179.999, -17.0, 179.999));
+        assert!(a == b && a > 200.0 && a < 220.0, "{a}");
+        let mut r = vec![(0.0, 179.0), (0.0, -179.0), (1.0, -179.0), (1.0, 179.0), (0.0, 179.0)];
+        unwrap_ring(&mut r);
+        assert_eq!(r[1].1, 181.0);
+        assert_eq!(lon_shifts(-179.5, 179.0, 181.0).collect::<Vec<_>>(), vec![180.5]);
+    }
 }

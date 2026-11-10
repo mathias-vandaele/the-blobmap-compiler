@@ -1,7 +1,8 @@
 # PLAN
 
 How the milestones of SPEC §13 get built. SPEC.md says what; FORMAT.md says the bytes; this
-file only orders the work. Status: approved 2026-11-08; milestone 2 in progress.
+file only orders the work. Status: approved 2026-11-08; milestones 2 and 3 closed (3 on
+2026-11-10); milestone 4 in progress.
 
 ## Milestone 2: toy and synthetic
 
@@ -155,28 +156,46 @@ outside the read-only reference folders.
         separates;
     - no ID unserved because of its component: the IDs per reason code, Corsica's and the
       islands' served counts, and the largest components that serve no ID.
-- **4. Fallback.**
-  - **Build:** Hauts-de-France, France, and one `.pbf` covering France, Belgium,
+- **4. Any pbf.**
+  - **Extracts** (Geofabrik, with their `.poly` as the extent), each built, then verified
+    with the small-tier checks and samples, the via-way copy check exhaustive (every
+    prefix), and golden files written and replayed. Their tier file is `tiers/any/small.toml`
+    (`--tiers tiers/any`), apart from the small tier that CI builds on every commit.
+    - Great Britain and Japan: left-hand traffic. Turn penalties follow the driving side as
+      in OSRM v6 (`turn_bias` inverted where traffic keeps left).
+    - Fiji: the 180° meridian (extent, snapping grid, island polygons, ordering).
+    - Norway: ferries excluded, so fjord crossings split components; the data report and
+      `blobc components` show which.
+    - India: sparse tagging (untagged speeds, missing one-ways, unconnected ways).
+    - California: a large US state.
+  - **Planet, input stages only:** the planet `.pbf` and all of Overture, with node
+    locations in a disk-backed, memory-mapped index; peak RSS per stage in the build
+    report.
+  - **Gate:**
+    - every extract at zero mismatches, its data report reviewed (components, islands
+      emptied, reason codes, `NONE16` places);
+    - the planet input stages within 62 GB.
+- **5. Continent.**
+  - **Fallback:** Hauts-de-France, France, and one `.pbf` covering France, Belgium,
     Luxembourg, Switzerland and Germany, each with the coarsening fallback forced, and
     each in one piece.
   - **Work, in order, with HdF numbers for each:** flow-based refinement of the lifted
     coarse separators on a fine band around each separator; then, for CAR, an order from
     the node-based intersection graph lifted to the turn graph. Keep whichever reaches
     ≤ 1.25× sweep layers with the lower peak RSS.
+  - **Verify split per component on disk,** so that it scales past 1.5× France.
+  - **Europe:** built and verified.
   - **Gate:**
-    - zero mismatches at every tier, cross-border golden checks green;
-    - sweep layers (FORMAT's level count) ≤ 1.25× one piece, links and elimination-tree
-      height reported beside them in the build report;
-    - cells cut from the fine order: links and elimination-tree height equal to one piece;
-    - peak RSS ≤ 62 GB.
-- **5. Europe.**
-  - **Gate:**
-    - built within 62 GB;
-    - the build report gives bytes per link, per address and per column, the largest pack
-      per family (with Eurasia's top block below 2³² in every count), and an extrapolation
-      to each continent.
+    - the fallback: zero mismatches at every tier, cross-border golden checks green; sweep
+      layers (FORMAT's level count) ≤ 1.25× one piece, links and elimination-tree height
+      reported beside them in the build report; cells cut from the fine order give links
+      and elimination-tree height equal to one piece; peak RSS ≤ 62 GB;
+    - Europe built within 62 GB and verified; the build report gives bytes per link, per
+      address and per column, the largest pack per family (with Eurasia's top block below
+      2³² in every count), and the extrapolation to the world.
 - **6. World.**
   - **Gate:**
-    - built;
-    - components per continent listed from the component tensor;
-    - the hardware choice for serving written down from the measured sizes.
+    - the planet built within 62 GB;
+    - verified at the tiers that apply;
+    - sizes reported (components per continent from the component tensor, bytes per part)
+      for choosing the serving hardware.

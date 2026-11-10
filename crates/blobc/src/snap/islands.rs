@@ -7,7 +7,6 @@
 //! component; a fragment on it is no island.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -15,7 +14,9 @@ use anyhow::Result;
 use osmpbf::{BlobDecode, BlobReader, RelMemberType};
 use rayon::prelude::*;
 
-use crate::osm::Pieces;
+use crate::osm::nodes::MISSING;
+use crate::osm::{Osm, Pieces};
+use crate::osm::geo::{lon_shifts, unwrap_ring};
 use crate::snap::Sets;
 
 /// Cell size of the polygon index, in degrees.
@@ -31,7 +32,9 @@ pub struct Island {
 }
 
 impl Island {
-    fn new(ring: Vec<(f64, f64)>, label: String) -> Island {
+    /// The ring is unwrapped across the antimeridian (`geo::unwrap_ring`).
+    fn new(mut ring: Vec<(f64, f64)>, label: String) -> Island {
+        unwrap_ring(&mut ring);
         let mut b = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
         for &(la, lo) in &ring {
             b = (b.0.min(la), b.1.min(lo), b.2.max(la), b.3.max(lo));
@@ -43,9 +46,10 @@ impl Island {
 
     pub fn contains(&self, (la, lo): (f64, f64)) -> bool {
         let b = self.bbox;
-        if la < b.0 || la > b.2 || lo < b.1 || lo > b.3 {
-            return false;
-        }
+        lon_shifts(lo, b.1, b.3).any(|lo| la >= b.0 && la <= b.2 && self.contains_at(la, lo))
+    }
+
+    fn contains_at(&self, la: f64, lo: f64) -> bool {
         let mut inside = false;
         for w in self.ring.windows(2) {
             let ((ya, xa), (yb, xb)) = (w[0], w[1]);
@@ -57,8 +61,22 @@ impl Island {
     }
 }
 
+/// Index cells per turn of longitude.
+const TURN: i32 = (360.0 / CELL) as i32;
+
 fn cell(la: f64, lo: f64) -> (i32, i32) {
     ((la / CELL).floor() as i32, (lo / CELL).floor() as i32)
+}
+
+/// The index cell of a point.
+fn cell_of(pt: (f64, f64)) -> (i32, i32) {
+    let (y, x) = cell(pt.0, pt.1);
+    (y, wrap_col(x))
+}
+
+/// A cell's column brought into the turn of [-180, 180), for rings past the antimeridian.
+fn wrap_col(x: i32) -> i32 {
+    (x + TURN / 2).rem_euclid(TURN) - TURN / 2
 }
 
 /// The islands of a `.pbf`, with an index by cell (looked up only, never iterated).
@@ -90,7 +108,8 @@ fn rings(mut parts: Vec<Vec<i64>>) -> Vec<Vec<i64>> {
 }
 
 impl Islands {
-    pub fn read(pbf: &Path) -> Result<Islands> {
+    pub fn read(osm: &Osm) -> Result<Islands> {
+        let pbf = osm.pbf.as_path();
         let is_island = |k: &str, v: &str| k == "place" && (v == "island" || v == "islet");
         // Pass 1: closed island and coastline ways; island multipolygons' outer ways.
         let found: Mutex<(Vec<(i64, String, Vec<i64>)>, Vec<(i64, String, Vec<i64>)>)> = Mutex::new(Default::default());
@@ -168,38 +187,19 @@ impl Islands {
             let parts: Vec<Vec<i64>> = outer.into_iter().filter_map(refs_of).filter(|r| r.len() >= 2).collect();
             polys.extend(rings(parts).into_iter().map(|r| (label.clone(), r)));
         }
-        // Pass 3: node coordinates.
+        // The rings' node coordinates.
         let mut nodes: Vec<i64> = polys.iter().flat_map(|p| p.1.iter().copied()).collect();
         nodes.par_sort_unstable();
         nodes.dedup();
-        let at: Vec<AtomicU32> = (0..2 * nodes.len()).map(|_| AtomicU32::new(u32::MAX)).collect();
-        let store = |id: i64, la: i32, lo: i32| {
-            if let Ok(i) = nodes.binary_search(&id) {
-                at[2 * i].store(la as u32, Ordering::Relaxed);
-                at[2 * i + 1].store(lo as u32, Ordering::Relaxed);
-            }
-        };
-        BlobReader::from_path(pbf)?.par_bridge().try_for_each(|blob| -> Result<()> {
-            if let BlobDecode::OsmData(block) = blob?.decode()? {
-                for g in block.groups() {
-                    for n in g.dense_nodes() {
-                        store(n.id(), n.decimicro_lat(), n.decimicro_lon());
-                    }
-                    for n in g.nodes() {
-                        store(n.id(), n.decimicro_lat(), n.decimicro_lon());
-                    }
-                }
-            }
-            Ok(())
-        })?;
-        let deg = |a: &AtomicU32| a.load(Ordering::Relaxed) as i32 as f64 * 1e-7;
+        let at = osm.coords(&nodes);
+        let deg = |x: u32| x as i32 as f64 * 1e-7;
         let mut all = Vec::new();
         for (label, refs) in polys {
             let ring: Option<Vec<(f64, f64)>> = refs
                 .iter()
                 .map(|r| {
-                    let i = nodes.binary_search(r).ok()?;
-                    (at[2 * i].load(Ordering::Relaxed) != u32::MAX).then(|| (deg(&at[2 * i]), deg(&at[2 * i + 1])))
+                    let c = at[nodes.binary_search(r).ok()?];
+                    (c != MISSING).then(|| (deg((c >> 32) as u32), deg(c as u32)))
                 })
                 .collect();
             if let Some(ring) = ring {
@@ -211,7 +211,7 @@ impl Islands {
             let (a, b) = (cell(p.bbox.0, p.bbox.1), cell(p.bbox.2, p.bbox.3));
             for y in a.0..=b.0 {
                 for x in a.1..=b.1 {
-                    by_cell.entry((y, x)).or_default().push(k as u32);
+                    by_cell.entry((y, wrap_col(x))).or_default().push(k as u32);
                 }
             }
         }
@@ -220,7 +220,7 @@ impl Islands {
 
     /// The islands around a point.
     fn around(&self, pt: (f64, f64)) -> impl Iterator<Item = u32> + '_ {
-        self.by_cell.get(&cell(pt.0, pt.1)).into_iter().flatten().copied().filter(move |&k| self.all[k as usize].contains(pt))
+        self.by_cell.get(&cell_of(pt)).into_iter().flatten().copied().filter(move |&k| self.all[k as usize].contains(pt))
     }
 
     /// The smallest island around a point, ties to the first read.
@@ -238,7 +238,7 @@ impl Islands {
         let largest: Vec<AtomicU32> = (0..self.all.len()).map(|_| AtomicU32::new(0)).collect();
         (0..p.len() as u32).into_par_iter().filter(|&k| sets.servable(k)).for_each(|k| {
             let (size, pt) = (sets.size(k), first_point(p, k));
-            for &j in self.by_cell.get(&cell(pt.0, pt.1)).into_iter().flatten() {
+            for &j in self.by_cell.get(&cell_of(pt)).into_iter().flatten() {
                 let j = j as usize;
                 if wanted[j] && size > largest[j].load(Ordering::Relaxed) && self.all[j].contains(pt) {
                     largest[j].fetch_max(size, Ordering::Relaxed);

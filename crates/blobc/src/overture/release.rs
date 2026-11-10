@@ -2,7 +2,7 @@
 //! `raw/address.parquet` and `raw/place.parquet`, row groups decoded in parallel and put
 //! back in file order.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -15,7 +15,7 @@ use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rayon::prelude::*;
 
-use crate::overture::{Id, parse_uuid};
+use crate::overture::{Address, Id, parse_uuid};
 
 pub struct Release {
     pub dir: PathBuf,
@@ -23,32 +23,105 @@ pub struct Release {
     pub name: String,
 }
 
-/// An address row as read: its ID parsed, and its licence set interned (`Licenses`), so a
-/// release of many millions of rows is held compactly.
+/// No string: a NULL, or an empty category key or country.
+pub const NO_STR: u32 = u32::MAX;
+
+/// A place row as read, compact: its ID parsed, the strings a release repeats (category
+/// keys, statuses, countries) as numbers in `RawPlaces::strings`, and its name and
+/// alternate categories in pools, so that the planet's places are held in a few bytes each.
 #[derive(Clone, Debug, PartialEq)]
-pub struct RawAddress {
+pub struct RawPlace {
     pub id: Id,
     pub lat: f64,
     pub lon: f64,
+    /// NULL is 0.
+    pub confidence: f64,
+    pub primary: u32,
+    pub basic: u32,
+    pub status: u32,
+    pub country: u32,
     /// The licence set's number in the reading's `Licenses`.
     pub license: u32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct RawPlace {
-    pub id: String,
-    pub lat: f64,
-    pub lon: f64,
-    pub primary: Option<String>,
-    pub alternates: Vec<String>,
-    pub basic: Option<String>,
-    /// NULL is 0.
-    pub confidence: f64,
-    pub status: Option<String>,
-    pub name: String,
-    pub country: String,
-    /// The licence set's number in the reading's `Licenses`.
-    pub license: u32,
+/// The place rows read, with the strings and pools their numbers point into.
+#[derive(Debug)]
+pub struct RawPlaces {
+    pub rows: Vec<RawPlace>,
+    /// Numbered as first met in file order.
+    pub strings: Vec<String>,
+    /// Row i's alternate categories are `alts[alt_first[i]..alt_first[i + 1]]`.
+    alt_first: Vec<u64>,
+    alts: Vec<u32>,
+    /// Row i's primary name is `names[name_first[i]..name_first[i + 1]]`.
+    name_first: Vec<u64>,
+    names: Vec<u8>,
+}
+
+impl RawPlaces {
+    fn new() -> RawPlaces {
+        RawPlaces { rows: Vec::new(), strings: Vec::new(), alt_first: vec![0], alts: Vec::new(), name_first: vec![0], names: Vec::new() }
+    }
+
+    pub fn str(&self, k: u32) -> Option<&str> {
+        (k != NO_STR).then(|| self.strings[k as usize].as_str())
+    }
+
+    pub fn alternates(&self, i: usize) -> &[u32] {
+        &self.alts[self.alt_first[i] as usize..self.alt_first[i + 1] as usize]
+    }
+
+    pub fn name(&self, i: usize) -> &str {
+        // SAFETY: the pool holds whole UTF-8 strings, cut at their ends.
+        unsafe { std::str::from_utf8_unchecked(&self.names[self.name_first[i] as usize..self.name_first[i + 1] as usize]) }
+    }
+
+    /// Appends a batch, its local string numbers turned into this table's.
+    fn append(&mut self, b: RawPlaces, index: &mut HashMap<String, u32>) {
+        let global: Vec<u32> = b
+            .strings
+            .into_iter()
+            .map(|s| {
+                let next = self.strings.len() as u32;
+                *index.entry(s).or_insert_with_key(|s| {
+                    self.strings.push(s.clone());
+                    next
+                })
+            })
+            .collect();
+        let g = |k: u32| if k == NO_STR { NO_STR } else { global[k as usize] };
+        self.rows.extend(b.rows.into_iter().map(|r| RawPlace { primary: g(r.primary), basic: g(r.basic), status: g(r.status), country: g(r.country), ..r }));
+        let (a0, n0) = (self.alts.len() as u64, self.names.len() as u64);
+        self.alts.extend(b.alts.into_iter().map(g));
+        self.alt_first.extend(b.alt_first[1..].iter().map(|&x| a0 + x));
+        self.names.extend_from_slice(&b.names);
+        self.name_first.extend(b.name_first[1..].iter().map(|&x| n0 + x));
+    }
+}
+
+/// An empty category key or country is none.
+fn key(x: Option<&str>) -> Option<&str> {
+    x.filter(|x| !x.is_empty())
+}
+
+/// A batch's own string numbers, as first met.
+#[derive(Default)]
+struct Local(HashMap<String, u32>, Vec<String>);
+
+impl Local {
+    fn number(&mut self, s: &str) -> u32 {
+        if let Some(&k) = self.0.get(s) {
+            return k;
+        }
+        let k = self.1.len() as u32;
+        self.0.insert(s.to_string(), k);
+        self.1.push(s.to_string());
+        k
+    }
+
+    fn of(&mut self, s: Option<&str>) -> u32 {
+        s.map_or(NO_STR, |s| self.number(s))
+    }
 }
 
 /// The distinct licence sets met while reading, numbered as first met: the numbers depend
@@ -103,8 +176,10 @@ impl Release {
         [self.addresses(), self.places()]
     }
 
-    pub fn read_addresses(&self, keep: &(dyn Fn(f64, f64) -> bool + Sync), lic: &Licenses) -> Result<Vec<RawAddress>> {
-        let groups = read_groups(&self.addresses(), &["id", "geometry", "sources"], |b, first| {
+    /// The address rows `keep` accepts, in file order, each licence set as its number in
+    /// `lic`.
+    pub fn read_addresses(&self, keep: &(dyn Fn(f64, f64) -> bool + Sync), lic: &Licenses) -> Result<Vec<Address>> {
+        let batches = read_groups(&self.addresses(), &["id", "geometry", "sources"], |b, first| {
             let id = b.column(0).as_string::<i32>();
             let geom = b.column(1).as_binary::<i32>();
             let sources = b.column(2).as_list::<i32>();
@@ -112,17 +187,22 @@ impl Release {
             for i in 0..b.num_rows() {
                 let (lat, lon) = wkb_point(geom.value(i)).with_context(|| format!("address row {}", first + i))?;
                 if keep(lat, lon) {
-                    out.push(RawAddress { id: parse_uuid(id.value(i))?, lat, lon, license: lic.number(licenses(sources, i)?) });
+                    out.push(Address { id: parse_uuid(id.value(i))?, lat, lon, license: lic.number(licenses(sources, i)?) });
                 }
             }
             Ok(out)
         })?;
-        Ok(groups.into_iter().flatten().collect())
+        let mut out = Vec::with_capacity(batches.iter().map(Vec::len).sum());
+        for b in batches {
+            out.extend(b);
+        }
+        Ok(out)
     }
 
-    pub fn read_places(&self, keep: &(dyn Fn(f64, f64) -> bool + Sync), lic: &Licenses) -> Result<Vec<RawPlace>> {
+    /// The place rows `keep` accepts, in file order, each licence set as its number in `lic`.
+    pub fn read_places(&self, keep: &(dyn Fn(f64, f64) -> bool + Sync), lic: &Licenses) -> Result<RawPlaces> {
         let cols = ["id", "geometry", "taxonomy", "basic_category", "confidence", "operating_status", "names", "sources", "addresses"];
-        let groups = read_groups(&self.places(), &cols, |b, first| {
+        let batches = read_groups(&self.places(), &cols, |b, first| {
             let id = b.column(0).as_string::<i32>();
             let geom = b.column(1).as_binary::<i32>();
             let tax = b.column(2).as_struct();
@@ -141,44 +221,49 @@ impl Release {
             let addrs = b.column(8).as_list::<i32>();
             let addr_country = field(addrs.values().as_struct(), "country")?;
             let addr_country = addr_country.as_string::<i32>();
-            let mut out = Vec::new();
+            let mut out = RawPlaces::new();
+            let mut local = Local::default();
             for i in 0..b.num_rows() {
                 let (lat, lon) = wkb_point(geom.value(i)).with_context(|| format!("place row {}", first + i))?;
                 if !keep(lat, lon) {
                     continue;
                 }
                 let tax_ok = tax.is_valid(i);
-                let mut alts = Vec::new();
                 if tax_ok && alternates.is_valid(i) {
                     let o = alternates.value_offsets();
                     for k in o[i] as usize..o[i + 1] as usize {
                         if let Some(a) = s(alt_values, k) {
-                            alts.push(a.to_string());
+                            out.alts.push(local.number(a));
                         }
                     }
                 }
-                let country = if addrs.is_valid(i) && addrs.value_length(i) > 0 {
-                    s(addr_country, addrs.value_offsets()[i] as usize).unwrap_or("").to_string()
-                } else {
-                    String::new()
-                };
-                out.push(RawPlace {
-                    id: id.value(i).to_string(),
+                out.alt_first.push(out.alts.len() as u64);
+                let country = if addrs.is_valid(i) && addrs.value_length(i) > 0 { s(addr_country, addrs.value_offsets()[i] as usize) } else { None };
+                if names.is_valid(i) {
+                    out.names.extend_from_slice(s(name, i).unwrap_or("").as_bytes());
+                }
+                out.name_first.push(out.names.len() as u64);
+                out.rows.push(RawPlace {
+                    id: parse_uuid(id.value(i))?,
                     lat,
                     lon,
-                    primary: if tax_ok { s(primary, i).filter(|x| !x.is_empty()).map(String::from) } else { None },
-                    alternates: alts,
-                    basic: s(basic, i).filter(|x| !x.is_empty()).map(String::from),
                     confidence: if conf.is_valid(i) { conf.value(i) } else { 0.0 },
-                    status: s(status, i).map(String::from),
-                    name: if names.is_valid(i) { s(name, i).unwrap_or("").to_string() } else { String::new() },
-                    country,
+                    primary: local.of(if tax_ok { key(s(primary, i)) } else { None }),
+                    basic: local.of(key(s(basic, i))),
+                    status: local.of(s(status, i)),
+                    country: local.of(key(country)),
                     license: lic.number(licenses(sources, i)?),
                 });
             }
+            out.strings = local.1;
             Ok(out)
         })?;
-        Ok(groups.into_iter().flatten().collect())
+        let mut out = RawPlaces::new();
+        let mut index = HashMap::new();
+        for b in batches {
+            out.append(b, &mut index);
+        }
+        Ok(out)
     }
 }
 
@@ -229,7 +314,7 @@ pub fn wkb_point(b: &[u8]) -> Result<(f64, f64)> {
 
 /// Decodes the named root columns of every row group in parallel: `f(batch, first row)`
 /// per batch, the results in file order.
-fn read_groups<T: Send>(path: &Path, cols: &[&str], f: impl Fn(&RecordBatch, usize) -> Result<Vec<T>> + Sync) -> Result<Vec<Vec<T>>> {
+fn read_groups<T: Send>(path: &Path, cols: &[&str], f: impl Fn(&RecordBatch, usize) -> Result<T> + Sync) -> Result<Vec<T>> {
     let open = || File::open(path).with_context(|| path.display().to_string());
     let meta = ParquetRecordBatchReaderBuilder::try_new(open()?)?;
     let schema = meta.parquet_schema().clone();
@@ -246,9 +331,9 @@ fn read_groups<T: Send>(path: &Path, cols: &[&str], f: impl Fn(&RecordBatch, usi
         starts.push(starts.last().unwrap() + rg.num_rows() as usize);
     }
     drop(meta);
-    let per: Vec<Vec<Vec<T>>> = (0..starts.len() - 1)
+    let per: Vec<Vec<T>> = (0..starts.len() - 1)
         .into_par_iter()
-        .map(|g| -> Result<Vec<Vec<T>>> {
+        .map(|g| -> Result<Vec<T>> {
             let b = ParquetRecordBatchReaderBuilder::try_new(open()?)?;
             let mask = ProjectionMask::roots(b.parquet_schema(), roots.iter().copied());
             let reader = b.with_row_groups(vec![g]).with_projection(mask).with_batch_size(65536).build()?;
