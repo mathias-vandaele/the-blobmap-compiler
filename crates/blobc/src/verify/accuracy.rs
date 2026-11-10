@@ -5,15 +5,20 @@
 //! answered pairs give the MAE, the p95 of |diff|, the bias (mean of ours − OSRM) and the
 //! median relative error |diff| / OSRM, in all and by OSRM duration; the others are counted
 //! by answer. With `--components`, no time is computed: the pairs whose ends are served in
-//! different components are counted by their two components.
+//! different components are counted by their two components, each with the real island it
+//! stands on (from the data report next to the model) and, with `--pbf`, whether one of its
+//! ways shares a node with a `route=ferry` way. A pair is explained when one of its ends is
+//! on a real island or at a ferry (SPEC §13, milestone 3); the others are counted apart.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
 use blobmap_format::INF;
 use blobmap_format::runtime::query::Source;
 use blobmap_format::runtime::{Dir, Runtime};
+use osmpbf::{BlobDecode, BlobReader};
 use rayon::prelude::*;
 
 const BUCKETS: [(&str, f64); 6] = [("0–15 min", 900.0), ("15–30 min", 1800.0), ("30–60 min", 3600.0), ("1–2 h", 7200.0), ("2–4 h", 14400.0), ("> 4 h", f64::INFINITY)];
@@ -35,9 +40,10 @@ fn stats(d: &[(f64, f64)]) -> String {
 
 pub fn main(a: Vec<String>) -> Result<()> {
     let by_components = a.iter().any(|x| x == "--components");
-    let a: Vec<&String> = a.iter().filter(|x| *x != "--components").collect();
+    let pbf = a.iter().position(|x| x == "--pbf").map(|i| a.get(i + 1).cloned().context("--pbf takes a file")).transpose()?;
+    let a: Vec<&String> = a.iter().filter(|x| *x != "--components" && Some(*x) != pbf.as_ref() && *x != "--pbf").collect();
     let [model, pairs, mode, oc, dc, tc] = a[..] else {
-        bail!("usage: blobc accuracy <model> <pairs.csv> <mode> <origin column> <dest column> <osrm column> [--components]");
+        bail!("usage: blobc accuracy <model> <pairs.csv> <mode> <origin column> <dest column> <osrm column> [--components [--pbf <file>]]");
     };
     let rt = Runtime::open(Path::new(model))?;
     let m = rt.mode(mode)?;
@@ -66,12 +72,42 @@ pub fn main(a: Vec<String>) -> Result<()> {
             }
         }
         println!("{mode}: {} pairs served in different components", apart.values().sum::<u64>());
-        // One OSM way of each component but the largest, which would take long to load.
-        let way = |x: u32| -> Result<String> { Ok(if x == 0 { "–".into() } else { rt.component(mv.info.fam, x)?.way[0].to_string() }) };
-        println!("  {:>7} {:>9} {:>11}  {:>7} {:>9} {:>11}  {:>6}", "origin", "nodes", "OSM way", "dest", "nodes", "OSM way", "pairs");
-        for ((x, y), k) in apart {
-            println!("  {x:>7} {:>9} {:>11}  {y:>7} {:>9} {:>11}  {k:>6}", t.nodes(x), way(x)?, t.nodes(y), way(y)?);
+        // The ways of each component but the largest, which would take long to load.
+        let mut ways: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
+        for &x in apart.keys().flat_map(|(x, y)| [x, y]).filter(|&&x| x != 0) {
+            let mut w = rt.component(mv.info.fam, x)?.way.clone();
+            w.sort_unstable();
+            w.dedup();
+            ways.insert(x, w);
         }
+        let report = format!("{}.data-report.json", model.trim_end_matches('/'));
+        let report = blobmap_format::json::read_file(Path::new(&report)).with_context(|| format!("reading {report}"))?;
+        let island: BTreeMap<u64, String> = report["served_components"][mode.as_str()]
+            .as_array()
+            .context("the data report has no served components for the mode")?
+            .iter()
+            .filter_map(|r| Some((r["component"].as_u64()?, r["island"].as_str()?.to_string())))
+            .collect();
+        let ferry = match &pbf {
+            Some(f) => at_ferry(Path::new(f), &ways)?,
+            None => Default::default(),
+        };
+        let tag = |x: u32| match island.get(&(x as u64)) {
+            Some(l) => l.clone(),
+            None if ferry.contains(&x) => "ferry".into(),
+            None => "–".into(),
+        };
+        println!("  {:>7} {:>9} {:>11}  {:>7} {:>9} {:>11}  {:>6}  why", "origin", "nodes", "OSM way", "dest", "nodes", "OSM way", "pairs");
+        let way = |x: u32| ways.get(&x).map_or("–".into(), |w| w[0].to_string());
+        let mut unexplained = 0;
+        for ((x, y), k) in apart {
+            let why = [x, y].into_iter().filter(|&x| x != 0).map(tag).filter(|t| t != "–").collect::<Vec<_>>().join("; ");
+            if why.is_empty() {
+                unexplained += k;
+            }
+            println!("  {x:>7} {:>9} {:>11}  {y:>7} {:>9} {:>11}  {k:>6}  {}", t.nodes(x), way(x), t.nodes(y), way(y), if why.is_empty() { "UNEXPLAINED" } else { &why });
+        }
+        println!("  {unexplained} pairs neither on a real island nor at a ferry");
         return Ok(());
     }
     let mut by_origin: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
@@ -125,4 +161,38 @@ pub fn main(a: Vec<String>) -> Result<()> {
         println!("  not answered: {n} {why}");
     }
     Ok(())
+}
+
+/// The components, of those given with their ways, one of whose ways shares a node with a
+/// `route=ferry` way of the `.pbf`.
+fn at_ferry(pbf: &Path, ways: &BTreeMap<u32, Vec<i64>>) -> Result<BTreeSet<u32>> {
+    let found: Mutex<(Vec<i64>, Vec<(i64, Vec<i64>)>)> = Mutex::new(Default::default());
+    BlobReader::from_path(pbf)?.par_bridge().try_for_each(|blob| -> Result<()> {
+        let (mut ferry, mut mine) = (Vec::new(), Vec::new());
+        if let BlobDecode::OsmData(block) = blob?.decode()? {
+            for g in block.groups() {
+                for w in g.ways() {
+                    if w.tags().any(|(k, v)| k == "route" && v == "ferry") {
+                        ferry.extend(w.refs());
+                    }
+                    if ways.values().any(|v| v.binary_search(&w.id()).is_ok()) {
+                        mine.push((w.id(), w.refs().collect()));
+                    }
+                }
+            }
+        }
+        let mut f = found.lock().unwrap();
+        f.0.extend(ferry);
+        f.1.extend(mine);
+        Ok(())
+    })?;
+    let (mut ferry, mut mine) = found.into_inner().unwrap();
+    ferry.sort_unstable();
+    mine.sort_unstable();
+    let nodes: BTreeMap<i64, Vec<i64>> = mine.into_iter().collect();
+    Ok(ways
+        .iter()
+        .filter(|(_, w)| w.iter().filter_map(|id| nodes.get(id)).flatten().any(|n| ferry.binary_search(n).is_ok()))
+        .map(|(&x, _)| x)
+        .collect())
 }

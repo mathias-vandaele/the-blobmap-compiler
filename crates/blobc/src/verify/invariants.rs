@@ -6,10 +6,11 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 use blobmap_format::hash::{Hasher, ROAD_TAG, VOCAB_TAG, inputs_hash, model_id, of_hashes};
-use blobmap_format::runtime::{Fam, Runtime};
+use blobmap_format::runtime::model::ModeVocab;
+use blobmap_format::runtime::{Component, Fam, Runtime};
 use blobmap_format::{Hash, INF, NONE, NONE16};
 
-use crate::verify::report::Report;
+use crate::verify::report::{Outcome, Report};
 
 pub fn structure(rt: &Runtime, rep: &mut Report) -> Result<()> {
     for fam in [Fam::Car, Fam::Active] {
@@ -114,6 +115,8 @@ pub fn structure(rt: &Runtime, rep: &mut Report) -> Result<()> {
                     o.expect(ok, || format!("component {x} road {r} metric {m}: time {ti}, weight {wi}"));
                 }
             }
+            // One component at a time.
+            rt.release();
         }
         // The manifest's counts (FORMAT §3); every pack holds some block.
         let packs = t.b_pack.iter().max().map_or(0, |&p| p as u64 + 1);
@@ -141,7 +144,9 @@ fn vocab(rt: &Runtime, rep: &mut Report) {
     o.expect(all.windows(2).all(|w| w[0] != w[1]), || "an ID appears twice".into());
     let na = v.address.len();
     o.expect(v.alias_to.iter().all(|&i| (i as usize) >= na && (i as usize) < v.n() && v.status[i as usize - na] == 0), || "alias_to names no kept place".into());
-    for mv in &v.modes {
+    // Served IDs, checked one component at a time: (family, component, mode, ID).
+    let mut served: Vec<(Fam, u32, usize, u32)> = Vec::new();
+    for (k, mv) in v.modes.iter().enumerate() {
         let mode = &mv.info.name;
         o.expect(mv.reasons.windows(2).all(|w| w[0].0 < w[1].0), || format!("{mode}: reasons not sorted"));
         let mut reasons = mv.reasons.iter().peekable();
@@ -160,59 +165,17 @@ fn vocab(rt: &Runtime, rep: &mut Report) {
                 continue;
             }
             o.expect(!filtered && reason.is_none(), || format!("{mode} id {i}: served and filtered or with a reason"));
-            let Ok(e) = rt.component(mv.info.fam, x) else {
-                o.fail(format!("{mode} id {i}: component {x} does not load"));
-                continue;
-            };
-            let (nd, off) = (mv.node[i], mv.off[i]);
-            let ok_node = |n: u32| (n as usize) < e.n;
-            match mv.info.fam {
-                Fam::Car => {
-                    o.expect(nd.iter().any(|&s| s != NONE), || format!("car id {i}: no segment"));
-                    for k in 0..2 {
-                        if nd[k] == NONE {
-                            o.expect(off[2 * k] == INF && off[2 * k + 1] == INF, || format!("car id {i}: offsets on a NONE slot"));
-                            continue;
-                        }
-                        let s = nd[k] as usize;
-                        o.expect(ok_node(nd[k]) && e.kind[s] != 2, || format!("car id {i}: slot {k} is not an original segment"));
-                        if ok_node(nd[k]) {
-                            let w = e.w[0][s];
-                            let sum = if w == INF { off[2 * k] == INF && off[2 * k + 1] == INF } else { off[2 * k] as u32 + off[2 * k + 1] as u32 == w as u32 };
-                            o.expect(sum, || format!("car id {i}: slot {k} parts do not sum to the weight"));
-                        }
-                    }
-                    if nd[0] != NONE && nd[1] != NONE && ok_node(nd[0]) && ok_node(nd[1]) {
-                        let (a, b) = (nd[0] as usize, nd[1] as usize);
-                        o.expect(e.way[a] == e.way[b] && e.way_seq[a] == e.way_seq[b] && e.way_dir[a] != e.way_dir[b] && e.way_dir[a] == 0, || format!("car id {i}: slots are not the piece's [A→B, B→A]"));
-                    }
-                }
-                Fam::Active => {
-                    let m = mv.info.metric;
-                    o.expect(ok_node(nd[0]) && ok_node(nd[1]), || format!("{mode} id {i}: nodes out of range"));
-                    if !(ok_node(nd[0]) && ok_node(nd[1])) {
-                        continue;
-                    }
-                    let uv = e.arcs(nd[0]).find(|&a| e.arc_local[a] == mv.road[i] && e.arc_head[a] == nd[1]);
-                    o.expect(uv.is_some(), || format!("{mode} id {i}: road U → V does not exist"));
-                    let Some(uv) = uv else { continue };
-                    let w = e.w[m][uv];
-                    let ok = if w == INF { off[0] == INF && off[3] == INF } else { off[0] as u32 + off[3] as u32 == w as u32 };
-                    o.expect(ok, || format!("{mode} id {i}: U → V parts do not sum"));
-                    let vu = e.arcs(nd[1]).find(|&a| e.arc_head[a] == nd[0] && e.way[a] == e.way[uv] && e.way_seq[a] == e.way_seq[uv] && e.way_dir[a] != e.way_dir[uv]);
-                    match vu {
-                        Some(vu) => {
-                            let w = e.w[m][vu];
-                            let ok = if w == INF { off[2] == INF && off[1] == INF } else { off[2] as u32 + off[1] as u32 == w as u32 };
-                            o.expect(ok, || format!("{mode} id {i}: V → U parts do not sum"));
-                        }
-                        None => o.expect(off[2] == INF && off[1] == INF, || format!("{mode} id {i}: offsets on an absent road")),
-                    }
-                    let usable = e.time_s[m][uv].is_finite() || vu.is_some_and(|vu| e.time_s[m][vu].is_finite());
-                    o.expect(usable, || format!("{mode} id {i}: no direction the mode may use"));
-                }
-            }
+            served.push((mv.info.fam, x, k, i as u32));
         }
+    }
+    served.sort_unstable();
+    for group in served.chunk_by(|a, b| (a.0, a.1) == (b.0, b.1)) {
+        let (fam, x) = (group[0].0, group[0].1);
+        match rt.component(fam, x) {
+            Ok(e) => group.iter().for_each(|&(_, _, k, i)| served_entry(&e, &v.modes[k], i as usize, o)),
+            Err(_) => group.iter().for_each(|&(_, _, k, i)| o.fail(format!("{} id {i}: component {x} does not load", v.modes[k].info.name))),
+        }
+        rt.release();
     }
     for p in 0..v.place.len() {
         let alt = &v.alt[v.alt_first[p] as usize..v.alt_first[p + 1] as usize];
@@ -223,6 +186,59 @@ fn vocab(rt: &Runtime, rep: &mut Report) {
     o.expect(v.tax_name.windows(2).all(|w| w[0] < w[1]) && v.redirect.windows(2).all(|w| w[0] < w[1]), || "taxonomy keys not sorted".into());
     o.expect(v.tax_basic.iter().all(|&b| b == NONE16 || (b as usize) < t && v.tax_is_basic[b as usize] == 1), || "a basic category that is not basic".into());
     o.expect(v.tax_parent.iter().all(|&b| b == NONE16 || (b as usize) < t), || "a parent out of range".into());
+}
+
+/// The entry of a served ID on its component (FORMAT §7.2).
+fn served_entry(e: &Component, mv: &ModeVocab, i: usize, o: &mut Outcome) {
+    let mode = &mv.info.name;
+    let (nd, off) = (mv.node[i], mv.off[i]);
+    let ok_node = |n: u32| (n as usize) < e.n;
+    match mv.info.fam {
+        Fam::Car => {
+            o.expect(nd.iter().any(|&s| s != NONE), || format!("car id {i}: no segment"));
+            for k in 0..2 {
+                if nd[k] == NONE {
+                    o.expect(off[2 * k] == INF && off[2 * k + 1] == INF, || format!("car id {i}: offsets on a NONE slot"));
+                    continue;
+                }
+                let s = nd[k] as usize;
+                o.expect(ok_node(nd[k]) && e.kind[s] != 2, || format!("car id {i}: slot {k} is not an original segment"));
+                if ok_node(nd[k]) {
+                    let w = e.w[0][s];
+                    let sum = if w == INF { off[2 * k] == INF && off[2 * k + 1] == INF } else { off[2 * k] as u32 + off[2 * k + 1] as u32 == w as u32 };
+                    o.expect(sum, || format!("car id {i}: slot {k} parts do not sum to the weight"));
+                }
+            }
+            if nd[0] != NONE && nd[1] != NONE && ok_node(nd[0]) && ok_node(nd[1]) {
+                let (a, b) = (nd[0] as usize, nd[1] as usize);
+                o.expect(e.way[a] == e.way[b] && e.way_seq[a] == e.way_seq[b] && e.way_dir[a] != e.way_dir[b] && e.way_dir[a] == 0, || format!("car id {i}: slots are not the piece's [A→B, B→A]"));
+            }
+        }
+        Fam::Active => {
+            let m = mv.info.metric;
+            o.expect(ok_node(nd[0]) && ok_node(nd[1]), || format!("{mode} id {i}: nodes out of range"));
+            if !(ok_node(nd[0]) && ok_node(nd[1])) {
+                return;
+            }
+            let uv = e.arcs(nd[0]).find(|&a| e.arc_local[a] == mv.road[i] && e.arc_head[a] == nd[1]);
+            o.expect(uv.is_some(), || format!("{mode} id {i}: road U → V does not exist"));
+            let Some(uv) = uv else { return };
+            let w = e.w[m][uv];
+            let ok = if w == INF { off[0] == INF && off[3] == INF } else { off[0] as u32 + off[3] as u32 == w as u32 };
+            o.expect(ok, || format!("{mode} id {i}: U → V parts do not sum"));
+            let vu = e.arcs(nd[1]).find(|&a| e.arc_head[a] == nd[0] && e.way[a] == e.way[uv] && e.way_seq[a] == e.way_seq[uv] && e.way_dir[a] != e.way_dir[uv]);
+            match vu {
+                Some(vu) => {
+                    let w = e.w[m][vu];
+                    let ok = if w == INF { off[2] == INF && off[1] == INF } else { off[2] as u32 + off[1] as u32 == w as u32 };
+                    o.expect(ok, || format!("{mode} id {i}: V → U parts do not sum"));
+                }
+                None => o.expect(off[2] == INF && off[1] == INF, || format!("{mode} id {i}: offsets on an absent road")),
+            }
+            let usable = e.time_s[m][uv].is_finite() || vu.is_some_and(|vu| e.time_s[m][vu].is_finite());
+            o.expect(usable, || format!("{mode} id {i}: no direction the mode may use"));
+        }
+    }
 }
 
 /// Every hash of FORMAT §9, recomputed from the bytes.

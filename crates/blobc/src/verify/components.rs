@@ -32,7 +32,7 @@ pub fn main(a: Vec<String>) -> Result<()> {
     let rt = Runtime::open(Path::new(model))?;
     let tf = TierFile::read(Path::new(tier_file))?;
     let inputs = tf.find(&rt.manifest)?.check(Path::new(data), &rt.manifest)?;
-    let r = Reference::build(&inputs)?;
+    let r = Reference::build(&inputs, &[Fam::Car, Fam::Active])?;
     for (fam, e) in [(Fam::Car, &r.car_components), (Fam::Active, &r.active_components)] {
         let t = &rt.tables[&fam];
         ensure!((0..t.components() as u32).map(|x| t.nodes(x)).eq(e.nodes.iter().copied()), "{}: the model's components differ from the reference's", fam.name());
@@ -84,7 +84,7 @@ pub fn main(a: Vec<String>) -> Result<()> {
             }
             // The nearest eligible piece, every piece searched: its component is the trapped one.
             let p = if mode.car { &r.car_pieces } else { &r.active_pieces };
-            let hits: Vec<_> = at.par_iter().map(|&i| find_brute(p, r.points[i].0, r.points[i].1, r.radius[m], r.small_max[m], &r.sets[m]).eligible).collect();
+            let hits: Vec<_> = at.par_iter().map(|&i| find_brute(p, r.points[i].0, r.points[i].1, r.modes[m].radius, r.modes[m].small_max, &r.modes[m].sets).eligible).collect();
             println!("  {}: {} IDs unserved because of their component (TrappedComponent)", mode.name, at.len());
             println!("  {:>36} {:>21} {:>7} {:>7} {:>6} {:>11}", "ID", "point", "metres", "component", "nodes", "OSM way");
             for (&i, h) in at.iter().zip(hits) {

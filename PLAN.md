@@ -105,6 +105,9 @@ other module and builds the one `blobc` binary. Each module gets unit tests as i
     - **Ports:** old `conformance`.
     - **New:** the turn-aware Dijkstra that tracks the segments driven, independent of the
       copy construction; the via-way, cells, cap, ties and car-`to` cases.
+    - **Memory:** the checks on the model's bytes run first, with no reference; above the
+      tiny tier the reference is then built and checked one family at a time; each check
+      holds one of the model's components at a time; the golden replay holds no reference.
 13. **`cli`** (`blobc`'s `main.rs`): `blobc build | verify | inspect`, thin over `build`,
     `verify` and `blobmap-format`, and the tools (`fixtures`, `extract`, `tier`,
     `accuracy`, `components`, `fragments`) as subcommands with their own arguments.

@@ -11,6 +11,7 @@ use rayon::prelude::*;
 use crate::osm::Pieces;
 use crate::osm::geo::Local;
 
+pub mod islands;
 pub mod modes;
 pub use modes::Membership;
 

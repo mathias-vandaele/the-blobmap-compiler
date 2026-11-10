@@ -17,10 +17,11 @@ pub mod report;
 pub mod tier;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use anyhow::Result;
-use blobmap_format::runtime::Runtime;
+use blobmap_format::runtime::{Fam, Runtime};
 
 use crate::build::mem;
 use crate::fixtures::Check;
@@ -100,31 +101,61 @@ struct Facts {
     cells: bool,
 }
 
+/// The highest peak of the phases ended inside the running one: a phase resets the
+/// high-water mark, so an enclosing phase takes its nested phases' peaks from here.
+static NESTED_PEAK: AtomicU64 = AtomicU64::new(0);
+
 /// Runs a phase of verify and, as it ends, prints its time and memory, as a build does
-/// per stage, so a long verify shows where it is.
-fn phase<T>(name: &str, f: impl FnOnce() -> T) -> T {
+/// per stage, so a long verify shows where it is. Phases may nest.
+pub(crate) fn phase<T>(name: &str, f: impl FnOnce() -> T) -> T {
+    let outer = NESTED_PEAK.swap(0, Ordering::Relaxed);
     mem::reset_peak();
     let t = Instant::now();
     let out = f();
     mem::trim();
-    eprintln!("{name:>18} {:>9.3} s  peak {:>6} MiB  after {:>6} MiB", t.elapsed().as_secs_f64(), mem::peak_rss().unwrap_or(0) >> 20, mem::rss().unwrap_or(0) >> 20);
+    let peak = mem::peak_rss().unwrap_or(0).max(NESTED_PEAK.load(Ordering::Relaxed));
+    NESTED_PEAK.store(outer.max(peak), Ordering::Relaxed);
+    eprintln!("{name:>18} {:>9.3} s  peak {:>6} MiB  after {:>6} MiB", t.elapsed().as_secs_f64(), peak >> 20, mem::rss().unwrap_or(0) >> 20);
     out
 }
 
 /// Every check except golden replay and mutants.
-fn run(rt: &Runtime, ex: &Expected, s: &Facts, n: &Samples, hashes: bool, rep: &mut Report) -> Result<()> {
-    phase("structure", || invariants::structure(rt, rep))?;
+/// Runs a phase, then releases the model's components it loaded; the phases over every
+/// component hold one at a time.
+fn released(rt: &Runtime, name: &str, rep: &mut Report, f: impl FnOnce(&mut Report) -> Result<()>) -> Result<()> {
+    let out = phase(name, || f(rep));
+    rt.release();
+    out
+}
+
+/// The checks on the model's bytes alone, before any reference is built.
+fn model_checks(rt: &Runtime, hashes: bool, rep: &mut Report) -> Result<()> {
+    released(rt, "structure", rep, |rep| invariants::structure(rt, rep))?;
     if hashes {
-        phase("hashes", || invariants::hashes(rt, rep))?;
+        released(rt, "hashes", rep, |rep| invariants::hashes(rt, rep))?;
     }
-    phase("components", || checks::components(rt, ex.r, rep));
-    phase("snapping", || checks::snapping(rt, ex.r, rep))?;
-    phase("snapping brute", || checks::snapping_brute(ex.r, n.brute, rep));
-    phase("recustomization", || checks::recustomization(rt, rep))?;
-    phase("distances", || checks::distances(rt, ex, n, rep))?;
-    phase("via copies", || checks::via_copies(rt, ex, rep))?;
-    phase("via segments", || checks::via_segments(rt, ex, rep))?;
-    phase("scenario", || checks::scenario(rt, ex, &s.checks, s.cells, rep))?;
+    released(rt, "recustomization", rep, |rep| checks::recustomization(rt, rep))
+}
+
+/// The checks against the reference, for the families it holds; the scenario's facts with
+/// the last family.
+fn reference_checks(rt: &Runtime, ex: &Expected, s: &Facts, n: &Samples, rep: &mut Report) -> Result<()> {
+    let p = |name: &str| format!("{} {name}", ex.r.fams.iter().map(|f| f.name()).collect::<Vec<_>>().join("+"));
+    released(rt, &p("components"), rep, |rep| {
+        checks::components(rt, ex.r, rep);
+        Ok(())
+    })?;
+    released(rt, &p("snapping"), rep, |rep| checks::snapping(rt, ex.r, rep))?;
+    released(rt, &p("snapping brute"), rep, |rep| {
+        checks::snapping_brute(ex.r, n.brute, rep);
+        Ok(())
+    })?;
+    released(rt, &p("distances"), rep, |rep| checks::distances(rt, ex, n, rep))?;
+    released(rt, &p("via copies"), rep, |rep| checks::via_copies(rt, ex, rep))?;
+    released(rt, &p("via segments"), rep, |rep| checks::via_segments(rt, ex, rep))?;
+    if ex.r.has(Fam::Active) {
+        released(rt, &p("scenario"), rep, |rep| checks::scenario(rt, ex, &s.checks, s.cells, rep))?;
+    }
     Ok(())
 }
 
@@ -148,56 +179,85 @@ pub fn verify(model: &Path, o: &Options) -> Result<Verified> {
         cells: scenario.as_ref().is_some_and(|s| s.variants.iter().any(|v| v.name == "cells" && v.build_toml.contains(&budget))),
         checks: scenario.map(|s| s.checks).unwrap_or_default(),
     };
-    let r = phase("reference", || Reference::build(&inputs))?;
-    let ex = phase("dijkstra graphs", || Expected::new(&r));
     let n = Samples::for_tier(&o.tier);
     let mut report = Report::default();
-    guarded(&mut report, "checks", |rep| run(&rt, &ex, &scenario, &n, true, rep));
+    guarded(&mut report, "checks", |rep| model_checks(&rt, true, rep));
+    // The tiny tier is checked with both families at once, as its facts and its mutants span
+    // them; a larger tier one family at a time, each reference dropped before the next. The
+    // golden queries span the families too (chained trips), so writing them takes both.
+    let golden_dir = o.golden.as_ref().map(|root| root.join(&o.tier).join(&set.name));
+    let write_golden = golden_dir.as_ref().is_some_and(|d| !d.join(golden::HEADER).exists());
+    const BOTH: &[Fam] = &[Fam::Car, Fam::Active];
+    // Each pass: its families, and whether it runs the checks (else it only writes the golden
+    // queries and runs the mutants).
+    let mut passes: Vec<(&[Fam], bool)> = if o.tier == "tiny" { vec![(BOTH, true)] } else { vec![(&[Fam::Car], true), (&[Fam::Active], true)] };
+    if (write_golden || o.mutants) && passes.len() > 1 {
+        passes.push((BOTH, false));
+    }
     let mut golden_written = None;
-    let mut golden_dir = None;
-    if let Some(root) = &o.golden {
-        let dir = root.join(&o.tier).join(&set.name);
-        if !dir.join(golden::HEADER).exists() {
+    let mut mutants = Vec::new();
+    for (fams, check) in passes {
+        let r = phase(&format!("{} reference", fams.iter().map(|f| f.name()).collect::<Vec<_>>().join("+")), || Reference::build(&inputs, fams))?;
+        let ex = phase("dijkstra graphs", || Expected::new(&r));
+        if check {
+            guarded(&mut report, "checks", |rep| reference_checks(&rt, &ex, &scenario, &n, rep));
+        }
+        if fams != BOTH {
+            continue;
+        }
+        if let (Some(dir), true) = (&golden_dir, write_golden) {
             let q = phase("golden queries", || golden::queries(&ex, &named(&scenario.checks), &n));
-            golden::write(&dir, &o.tier, &rt.manifest.inputs_hash, &q)?;
+            golden::write(dir, &o.tier, &rt.manifest.inputs_hash, &q)?;
             golden_written = Some(dir.clone());
         }
-        phase("golden replay", || guarded(&mut report, "golden replay", |rep| golden::replay(&rt, &dir, rep)));
-        golden_dir = Some(dir);
+        if o.mutants {
+            mutants = run_mutants(model, o, &ex, &scenario, &n, golden_dir.as_deref())?;
+        }
     }
-    let mut mutants = Vec::new();
-    if o.mutants {
-        for (name, faults) in mutants::RUNTIME_FAULTS {
-            let mut broken = Runtime::open(model)?;
-            broken.faults = *faults;
-            let mut rep = Report::default();
-            guarded(&mut rep, "checks", |rep| {
-                checks::distances(&broken, &ex, &n, rep)?;
-                checks::scenario(&broken, &ex, &scenario.checks, false, rep)
-            });
-            if let Some(d) = &golden_dir {
-                guarded(&mut rep, "golden replay", |rep| golden::replay(&broken, d, rep));
-            }
-            mutants.push((name.to_string(), Some(rep.mismatches() > 0)));
-        }
-        for mu in mutants::MODEL_MUTANTS {
-            let Some(dir) = mutants::apply(model, &o.work.join("mutants"), mu)? else {
-                mutants.push((mu.name.to_string(), None));
-                continue;
-            };
-            let caught = match Runtime::open(&dir) {
-                Err(_) => true,
-                Ok(b) => {
-                    let mut rep = Report::default();
-                    guarded(&mut rep, "checks", |rep| run(&b, &ex, &scenario, &n, false, rep));
-                    if let Some(d) = &golden_dir {
-                        guarded(&mut rep, "golden replay", |rep| golden::replay(&b, d, rep));
-                    }
-                    rep.mismatches() > 0
-                }
-            };
-            mutants.push((mu.name.to_string(), Some(caught)));
-        }
+    mem::trim();
+    // The replay needs the model and the golden files only.
+    if let Some(dir) = &golden_dir {
+        phase("golden replay", || guarded(&mut report, "golden replay", |rep| golden::replay(&rt, dir, rep)));
     }
     Ok(Verified { scenario: set.name.clone(), report, mutants, golden_written })
+}
+
+/// Broken runtimes and models, each of which some check must catch.
+fn run_mutants(model: &Path, o: &Options, ex: &Expected, scenario: &Facts, n: &Samples, golden_dir: Option<&Path>) -> Result<Vec<(String, Option<bool>)>> {
+    let mut mutants = Vec::new();
+    for (name, faults) in mutants::RUNTIME_FAULTS {
+        let mut broken = Runtime::open(model)?;
+        broken.faults = *faults;
+        let mut rep = Report::default();
+        guarded(&mut rep, "checks", |rep| {
+            checks::distances(&broken, ex, n, rep)?;
+            checks::scenario(&broken, ex, &scenario.checks, false, rep)
+        });
+        if let Some(d) = golden_dir {
+            guarded(&mut rep, "golden replay", |rep| golden::replay(&broken, d, rep));
+        }
+        mutants.push((name.to_string(), Some(rep.mismatches() > 0)));
+    }
+    for mu in mutants::MODEL_MUTANTS {
+        let Some(dir) = mutants::apply(model, &o.work.join("mutants"), mu)? else {
+            mutants.push((mu.name.to_string(), None));
+            continue;
+        };
+        let caught = match Runtime::open(&dir) {
+            Err(_) => true,
+            Ok(b) => {
+                let mut rep = Report::default();
+                guarded(&mut rep, "checks", |rep| {
+                    model_checks(&b, false, rep)?;
+                    reference_checks(&b, ex, scenario, n, rep)
+                });
+                if let Some(d) = golden_dir {
+                    guarded(&mut rep, "golden replay", |rep| golden::replay(&b, d, rep));
+                }
+                rep.mismatches() > 0
+            }
+        };
+        mutants.push((mu.name.to_string(), Some(caught)));
+    }
+    Ok(mutants)
 }

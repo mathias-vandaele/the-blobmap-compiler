@@ -119,7 +119,7 @@ impl Dsu {
 }
 
 /// A family's components.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Components {
     /// Component index of each node.
     pub of: Vec<u32>,

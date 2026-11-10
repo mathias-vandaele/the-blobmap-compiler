@@ -37,6 +37,14 @@ pub struct Families<'a> {
     pub active_small_max: u32,
 }
 
+/// The three sets of SPEC §6 for a mode.
+pub fn membership(f: &Families, mode: &str) -> Membership {
+    match mode {
+        "car" => Membership::car(f.car.p, f.car.g, &f.car.e),
+        m => Membership::active(f.active.p, f.active.g, &f.active.e, METRICS.iter().position(|x| *x == m).unwrap()),
+    }
+}
+
 /// Snaps points per mode (car, bike, walk).
 pub fn snap(f: &Families, points: &[(f64, f64)]) -> Vec<ModeSnap> {
     let (car, act) = (f.car, f.active);
@@ -44,15 +52,10 @@ pub fn snap(f: &Families, points: &[(f64, f64)]) -> Vec<ModeSnap> {
     let agrid = Grid::new(act.p);
     let mut out = Vec::new();
     for (mode, _) in MODES {
-        let (grid, p, sets, radius, small_max) = match mode {
-            "car" => (&cgrid, car.p, Membership::car(car.p, car.g, &car.e), f.car_radius_m, f.car_small_max),
-            m => (
-                &agrid,
-                act.p,
-                Membership::active(act.p, act.g, &act.e, METRICS.iter().position(|x| *x == m).unwrap()),
-                f.active_radius_m,
-                f.active_small_max,
-            ),
+        let sets = membership(f, mode);
+        let (grid, p, radius, small_max) = match mode {
+            "car" => (&cgrid, car.p, f.car_radius_m, f.car_small_max),
+            _ => (&agrid, act.p, f.active_radius_m, f.active_small_max),
         };
         let trapped = |k: usize| -> Option<u32> {
             if sets.servable(k as u32) {

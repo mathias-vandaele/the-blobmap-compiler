@@ -31,6 +31,7 @@ use crate::overture::{Catalog, Polygon, Release};
 use crate::profile::active::{ActiveMode, ActiveProfile, Mode};
 use crate::profile::car::{CarProfile, WayAttrs};
 use crate::profile::config::Config;
+use crate::snap::islands::Islands;
 
 /// The SPEC version this compiler builds to (FORMAT §3 `spec_version`).
 pub fn spec_version() -> &'static str {
@@ -287,6 +288,19 @@ impl Stage<(&Families<'_>, &Catalog, bool)> for Snap {
     }
 }
 
+/// The island polygons of the `.pbf`, for the data report (SPEC §3).
+pub struct ReadIslands;
+
+impl Stage<&Path> for ReadIslands {
+    type Output = Islands;
+    fn name(&self) -> &'static str {
+        "islands"
+    }
+    fn run(&self, pbf: &Path) -> Result<Islands> {
+        Islands::read(pbf)
+    }
+}
+
 /// The largest pack of a family (FORMAT §4 limits), for the build report.
 #[derive(Clone, Debug, Default)]
 pub struct PackSize {
@@ -510,7 +524,8 @@ pub fn build(a: &Args) -> Result<BuildResult> {
     };
     let (snaps, ids) = run.run(&Snap, (&families, &catalog, inputs.polygon.is_some()))?;
     let wo = run.run(&WriteModel, WriteInput { args: a, inputs: &inputs, families: &families, catalog: &catalog, snaps: &snaps, ids: &ids })?;
-    let data = report::data(a, &families, &catalog, &snaps, &ids, &wo.served)?;
+    let islands = run.run(&ReadIslands, a.pbf.as_path())?;
+    let data = report::data(a, &families, &catalog, &snaps, &ids, &wo.served, &islands)?;
     blobmap_format::json::write_file(&a.report_path("data"), &data)?;
     // Each family's largest component and every component built as cells: its links, its sweep
     // layers (FORMAT's level count) and its elimination tree's height (SPEC §13, milestone 4).

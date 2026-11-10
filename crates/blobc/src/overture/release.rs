@@ -2,8 +2,10 @@
 //! `raw/address.parquet` and `raw/place.parquet`, row groups decoded in parallel and put
 //! back in file order.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail, ensure};
 use arrow_array::cast::AsArray;
@@ -13,19 +15,23 @@ use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rayon::prelude::*;
 
+use crate::overture::{Id, parse_uuid};
+
 pub struct Release {
     pub dir: PathBuf,
     /// The directory's name, e.g. "2026-10-21.0".
     pub name: String,
 }
 
+/// An address row as read: its ID parsed, and its licence set interned (`Licenses`), so a
+/// release of many millions of rows is held compactly.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RawAddress {
-    pub id: String,
+    pub id: Id,
     pub lat: f64,
     pub lon: f64,
-    pub country: String,
-    pub licenses: Vec<String>,
+    /// The licence set's number in the reading's `Licenses`.
+    pub license: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -41,7 +47,33 @@ pub struct RawPlace {
     pub status: Option<String>,
     pub name: String,
     pub country: String,
-    pub licenses: Vec<String>,
+    /// The licence set's number in the reading's `Licenses`.
+    pub license: u32,
+}
+
+/// The distinct licence sets met while reading, numbered as first met: the numbers depend
+/// on the threads, so `sorted` gives the deterministic order and each number's place in it.
+#[derive(Default)]
+pub struct Licenses {
+    sets: Mutex<BTreeMap<Vec<String>, u32>>,
+}
+
+impl Licenses {
+    fn number(&self, set: Vec<String>) -> u32 {
+        let mut sets = self.sets.lock().unwrap();
+        let next = sets.len() as u32;
+        *sets.entry(set).or_insert(next)
+    }
+
+    /// The sets in ascending order, and per number its index in that order.
+    pub fn sorted(self) -> (Vec<Vec<String>>, Vec<u32>) {
+        let sets = self.sets.into_inner().unwrap();
+        let mut at = vec![0u32; sets.len()];
+        for (k, n) in sets.values().enumerate() {
+            at[*n as usize] = k as u32;
+        }
+        (sets.into_keys().collect(), at)
+    }
 }
 
 impl Release {
@@ -71,23 +103,16 @@ impl Release {
         [self.addresses(), self.places()]
     }
 
-    pub fn read_addresses(&self, keep: &(dyn Fn(f64, f64) -> bool + Sync)) -> Result<Vec<RawAddress>> {
-        let groups = read_groups(&self.addresses(), &["id", "geometry", "country", "sources"], |b, first| {
+    pub fn read_addresses(&self, keep: &(dyn Fn(f64, f64) -> bool + Sync), lic: &Licenses) -> Result<Vec<RawAddress>> {
+        let groups = read_groups(&self.addresses(), &["id", "geometry", "sources"], |b, first| {
             let id = b.column(0).as_string::<i32>();
             let geom = b.column(1).as_binary::<i32>();
-            let country = b.column(2).as_string::<i32>();
-            let sources = b.column(3).as_list::<i32>();
+            let sources = b.column(2).as_list::<i32>();
             let mut out = Vec::new();
             for i in 0..b.num_rows() {
                 let (lat, lon) = wkb_point(geom.value(i)).with_context(|| format!("address row {}", first + i))?;
                 if keep(lat, lon) {
-                    out.push(RawAddress {
-                        id: id.value(i).to_string(),
-                        lat,
-                        lon,
-                        country: s(country, i).unwrap_or("").to_string(),
-                        licenses: licenses(sources, i)?,
-                    });
+                    out.push(RawAddress { id: parse_uuid(id.value(i))?, lat, lon, license: lic.number(licenses(sources, i)?) });
                 }
             }
             Ok(out)
@@ -95,7 +120,7 @@ impl Release {
         Ok(groups.into_iter().flatten().collect())
     }
 
-    pub fn read_places(&self, keep: &(dyn Fn(f64, f64) -> bool + Sync)) -> Result<Vec<RawPlace>> {
+    pub fn read_places(&self, keep: &(dyn Fn(f64, f64) -> bool + Sync), lic: &Licenses) -> Result<Vec<RawPlace>> {
         let cols = ["id", "geometry", "taxonomy", "basic_category", "confidence", "operating_status", "names", "sources", "addresses"];
         let groups = read_groups(&self.places(), &cols, |b, first| {
             let id = b.column(0).as_string::<i32>();
@@ -148,7 +173,7 @@ impl Release {
                     status: s(status, i).map(String::from),
                     name: if names.is_valid(i) { s(name, i).unwrap_or("").to_string() } else { String::new() },
                     country,
-                    licenses: licenses(sources, i)?,
+                    license: lic.number(licenses(sources, i)?),
                 });
             }
             Ok(out)

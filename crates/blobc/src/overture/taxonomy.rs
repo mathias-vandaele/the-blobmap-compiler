@@ -9,7 +9,7 @@ use std::path::Path;
 use anyhow::{Context, Result, ensure};
 use blobmap_format::NONE16;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Taxonomy {
     /// Keys in byte order; a node's index is its position.
     pub name: Vec<String>,

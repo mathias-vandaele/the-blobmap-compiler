@@ -58,7 +58,9 @@ Each build writes a data report, outside the model directory (§8): `<model dir>
 - **Trapped components** (§5), which usually point at OSM errors: every one, sorted by size, with its node count, the number of IDs whose nearest eligible piece lies in it, and one OSM way id, so the large ones can be fixed in OSM. Provider score distributions drift between releases, so the rules are reviewed against this report every month.
 - **Small components** (§6), per mode, each with its node count and one OSM way id, sorted by IDs:
   - every component that IDs were moved away from, with the IDs moved and the IDs left on it;
-  - every component other than the largest that still serves IDs: the real islands, and fragments with no larger component in reach, usually OSM errors to fix.
+  - every component other than the largest that still serves IDs: the real islands, and fragments with no larger component in reach, usually OSM errors to fix;
+  - every real island the rule emptied: a small island within the radius of a larger component loses its IDs to it (§6), as two Seine islands do for car in France.
+  - Each component listed is marked with the real island it stands on, if any: the smallest OSM island polygon (`place=island|islet`, or a closed coastline way) around one of its pieces, when that polygon holds no servable piece of a larger component.
 - **Dead-end restrictions** (§5): every via-way restriction whose prefix copy has no turn out, with its relation id and the copied segment's way, usually a mis-tagged restriction.
 
 ## 4. Modes and profiles

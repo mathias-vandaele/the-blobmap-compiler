@@ -47,7 +47,6 @@ pub struct Address {
     pub id: Id,
     pub lat: f64,
     pub lon: f64,
-    pub country: String,
     /// Index of the row's source licences in `Catalog::license_sets`.
     pub license: u32,
 }
@@ -82,7 +81,7 @@ pub struct CatalogStats {
 }
 
 /// The Overture IDs a model may hold, before snapping decides the extent without a polygon.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Catalog {
     pub release: String,
     pub taxonomy: Taxonomy,
@@ -103,18 +102,14 @@ impl Catalog {
     /// Reads the release, keeping the points `keep` accepts (the extent polygon, if any).
     pub fn read(release: &Release, rules: &PlaceRules, keep: &(dyn Fn(f64, f64) -> bool + Sync)) -> Result<Catalog> {
         let taxonomy = Taxonomy::read(&release.taxonomy_dir())?;
-        let raw_a = release.read_addresses(keep)?;
-        let raw_p = release.read_places(keep)?;
+        let lic = release::Licenses::default();
+        let raw_a = release.read_addresses(keep, &lic)?;
+        let raw_p = release.read_places(keep, &lic)?;
         let mut stats = CatalogStats { addresses: raw_a.len() as u64, places: raw_p.len() as u64, ..CatalogStats::default() };
-        // Licence sets, interned in sorted order.
-        let mut license_sets: Vec<Vec<String>> = raw_a.iter().map(|a| &a.licenses).chain(raw_p.iter().map(|p| &p.licenses)).map(|l| sorted(l)).collect();
-        license_sets.sort();
-        license_sets.dedup();
-        let license = |l: &[String]| license_sets.binary_search(&sorted(l)).unwrap() as u32;
-        let mut addresses = Vec::with_capacity(raw_a.len());
-        for a in &raw_a {
-            addresses.push(Address { id: parse_uuid(&a.id)?, lat: a.lat, lon: a.lon, country: a.country.clone(), license: license(&a.licenses) });
-        }
+        // Licence sets, in sorted order.
+        let (license_sets, license_at) = lic.sorted();
+        let license = |n: u32| license_at[n as usize];
+        let mut addresses: Vec<Address> = raw_a.into_iter().map(|a| Address { id: a.id, lat: a.lat, lon: a.lon, license: license(a.license) }).collect();
         addresses.sort_by_key(|a| a.id);
         // A place's keys go through the redirects, like query keys (SPEC §6).
         let key = |k: &Option<String>, stats: &mut CatalogStats| -> u16 {
@@ -137,7 +132,7 @@ impl Catalog {
             let status = if places::filtered(p, rules, &taxonomy) { 4 } else { 0 };
             stats.filtered += (status == 4) as u64;
             stats.primary_none += (primary == NONE16) as u64;
-            let license = license(&p.licenses);
+            let license = license(p.license);
             places.push((
                 Place { id, lat: p.lat, lon: p.lon, country: p.country.clone(), status, primary, basic, alt, basic_key: p.basic.clone(), license },
                 i,
@@ -192,13 +187,6 @@ impl Catalog {
         }
         out
     }
-}
-
-fn sorted(l: &[String]) -> Vec<String> {
-    let mut v = l.to_vec();
-    v.sort();
-    v.dedup();
-    v
 }
 
 #[cfg(test)]

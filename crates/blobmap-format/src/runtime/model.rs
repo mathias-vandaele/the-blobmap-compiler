@@ -308,6 +308,7 @@ pub struct Runtime {
     pub tables: BTreeMap<Fam, Tables>,
     pub vocab: Vocab,
     pub faults: Faults,
+    /// The components loaded, kept until `release`.
     cache: Mutex<BTreeMap<(Fam, u32), Arc<Component>>>,
     /// Held while a component loads, so that concurrent queries load it once.
     loading: Mutex<()>,
@@ -449,6 +450,11 @@ impl Runtime {
         let e = Arc::new(self.load(fam, x)?);
         self.cache.lock().unwrap().insert((fam, x), e.clone());
         Ok(e)
+    }
+
+    /// Drops every component loaded so far; a query still holding one keeps it until it ends.
+    pub fn release(&self) {
+        self.cache.lock().unwrap().clear();
     }
 
     fn load(&self, fam: Fam, x: u32) -> Result<Component> {

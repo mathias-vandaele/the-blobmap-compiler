@@ -22,7 +22,7 @@ use crate::verify::report::Report;
 
 pub fn components(rt: &Runtime, r: &Reference, rep: &mut Report) {
     let o = rep.check("components against the reference (SPEC §5)");
-    for (fam, e) in [(Fam::Car, &r.car_components), (Fam::Active, &r.active_components)] {
+    for (fam, e) in [(Fam::Car, &r.car_components), (Fam::Active, &r.active_components)].into_iter().filter(|f| r.has(f.0)) {
         let t = &rt.tables[&fam];
         o.count();
         let nodes: Vec<u32> = (0..t.components() as u32).map(|x| t.nodes(x)).collect();
@@ -36,8 +36,6 @@ fn expected_entry(r: &Reference, m: usize, piece: usize, frac: f64) -> ([Option<
     let mode = &r.modes[m];
     if mode.car {
         let g = &r.car;
-        let e = r.modes[m].at.iter().flatten().next().map(|_| ()).is_some();
-        let _ = e;
         let x = crate::snap::modes::car_component(g, &r.car_components, piece).unwrap();
         let mut keys = [None, None];
         let mut off = [INF; 4];
@@ -70,14 +68,14 @@ fn expected_entry(r: &Reference, m: usize, piece: usize, frac: f64) -> ([Option<
 pub fn snapping_brute(r: &Reference, max: usize, rep: &mut Report) {
     let o = rep.check("snapping without the grid");
     let step = r.n().div_ceil(max.max(1)).max(1);
-    for (m, mode) in r.modes.iter().enumerate() {
+    for mode in &r.modes {
         let p = if mode.car { &r.car_pieces } else { &r.active_pieces };
         let picked: Vec<usize> = (0..r.n()).step_by(step).filter(|&i| !matches!(mode.at[i], Err((FILTERED_PLACE, _)))).collect();
         let results: Vec<Option<String>> = picked
             .par_iter()
             .map(|&i| {
                 let (lat, lon) = r.points[i];
-                let want = crate::snap::find_brute(p, lat, lon, r.radius[m], r.small_max[m], &r.sets[m]).outcome();
+                let want = crate::snap::find_brute(p, lat, lon, mode.radius, mode.small_max, &mode.sets).outcome();
                 let got = mode.at[i].map(|e| (e.piece, e.frac.to_bits())).map_err(|(c, d)| (c, d.to_bits()));
                 let want = want.map(|h| (h.piece, h.frac.to_bits())).map_err(|(c, d)| (c, d.to_bits()));
                 (got != want).then(|| format!("{} {}: grid {got:?}, every segment {want:?}", mode.name, uuid(&r.ids[i])))
@@ -105,6 +103,8 @@ pub fn snapping(rt: &Runtime, r: &Reference, rep: &mut Report) -> Result<()> {
     if ids != r.ids {
         return Ok(());
     }
+    // Served IDs, checked one component at a time: (family, component, mode, ID).
+    let mut served: Vec<(Fam, u32, usize, u32)> = Vec::new();
     for (m, mode) in r.modes.iter().enumerate() {
         let k = rt.mode(mode.name)?;
         let mv = &v.modes[k];
@@ -124,29 +124,40 @@ pub fn snapping(rt: &Runtime, r: &Reference, rep: &mut Report) -> Result<()> {
                         o.fail(format!("{} {}: component {} != {}", mode.name, uuid(&r.ids[i]), mv.component[i], e.component));
                         continue;
                     }
-                    let x = rt.component(mv.info.fam, e.component)?;
-                    let (keys, off) = expected_entry(r, m, e.piece as usize, e.frac);
-                    let stored: [Option<(i64, u32, u8)>; 2] = if mode.car {
-                        [0, 1].map(|d| {
-                            let s = mv.node[i][d];
-                            (s != NONE).then(|| (x.way[s as usize], x.way_seq[s as usize], x.way_dir[s as usize]))
-                        })
-                    } else {
-                        let [uu, vv] = mv.node[i];
-                        let uv = x.arcs(uu).find(|&a| x.arc_local[a] == mv.road[i] && x.arc_head[a] == vv);
-                        let key = |a: usize| (x.way[a], x.way_seq[a], x.way_dir[a]);
-                        let vu = uv.and_then(|uv| {
-                            x.arcs(vv)
-                                .find(|&a| x.arc_head[a] == uu && key(a).0 == key(uv).0 && key(a).1 == key(uv).1 && key(a).2 != key(uv).2)
-                        });
-                        [uv.map(key), vu.map(key)]
-                    };
-                    o.expect(stored == keys && mv.off[i] == off, || {
-                        format!("{} {}: entry {stored:?} {:?}, expected {keys:?} {off:?}", mode.name, uuid(&r.ids[i]), mv.off[i])
-                    });
+                    served.push((mv.info.fam, e.component, m, i as u32));
                 }
             }
         }
+    }
+    served.sort_unstable();
+    for group in served.chunk_by(|a, b| (a.0, a.1) == (b.0, b.1)) {
+        let x = rt.component(group[0].0, group[0].1)?;
+        for &(_, _, m, i) in group {
+            let (mode, i) = (&r.modes[m], i as usize);
+            let mv = &v.modes[rt.mode(mode.name)?];
+            let Ok(e) = mode.at[i] else { unreachable!("a served ID") };
+            let (keys, off) = expected_entry(r, m, e.piece as usize, e.frac);
+            let stored: [Option<(i64, u32, u8)>; 2] = if mode.car {
+                [0, 1].map(|d| {
+                    let s = mv.node[i][d];
+                    (s != NONE).then(|| (x.way[s as usize], x.way_seq[s as usize], x.way_dir[s as usize]))
+                })
+            } else {
+                let [uu, vv] = mv.node[i];
+                let uv = x.arcs(uu).find(|&a| x.arc_local[a] == mv.road[i] && x.arc_head[a] == vv);
+                let key = |a: usize| (x.way[a], x.way_seq[a], x.way_dir[a]);
+                let vu = uv.and_then(|uv| {
+                    x.arcs(vv)
+                        .find(|&a| x.arc_head[a] == uu && key(a).0 == key(uv).0 && key(a).1 == key(uv).1 && key(a).2 != key(uv).2)
+                });
+                [uv.map(key), vu.map(key)]
+            };
+            o.expect(stored == keys && mv.off[i] == off, || {
+                format!("{} {}: entry {stored:?} {:?}, expected {keys:?} {off:?}", mode.name, uuid(&r.ids[i]), mv.off[i])
+            });
+        }
+        drop(x);
+        rt.release();
     }
     Ok(())
 }
@@ -213,6 +224,8 @@ pub fn recustomization(rt: &Runtime, rep: &mut Report) -> Result<()> {
                 let (up, down) = customize(&e, w)?;
                 o.expect(up == e.up[m] && down == e.down[m], || format!("component {x} metric {m}: re-customized links differ"));
             }
+            drop(e);
+            rt.release();
         }
         if fam == Fam::Active {
             let cw = rt.model.get::<u16>("road/active/cross/walk.w")?;
@@ -237,6 +250,8 @@ pub fn recustomization(rt: &Runtime, rep: &mut Report) -> Result<()> {
                     o.expect(a == b, || format!("component {x} metric {m} from {src}: CCH and Dijkstra differ"));
                 }
             }
+            drop(e);
+            rt.release();
         }
     }
     Ok(())
@@ -304,6 +319,7 @@ pub fn distances(rt: &Runtime, ex: &Expected, n: &Samples, rep: &mut Report) -> 
                 }
             }
         }
+        rt.release();
     }
     Ok(())
 }
@@ -314,6 +330,9 @@ pub fn distances(rt: &Runtime, ex: &Expected, n: &Samples, rep: &mut Report) -> 
 /// point-to-point reference Dijkstra. Prefixes whose last segment carries no ID are counted.
 pub fn via_copies(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()> {
     let r = ex.r;
+    if !r.has(Fam::Car) {
+        return Ok(());
+    }
     let (g, mode) = (&r.car, r.mode("car"));
     let k = rt.mode("car")?;
     let mut prefixes: Vec<&[u32]> = g.forbidden.iter().flat_map(|f| (2..f.len()).map(move |j| &f[..j])).collect();
@@ -400,6 +419,9 @@ pub fn via_copies(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()> {
 /// over the original and its copies), from and to, against the reference.
 pub fn via_segments(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()> {
     let r = ex.r;
+    if !r.has(Fam::Car) {
+        return Ok(());
+    }
     let g = &r.car;
     let k = rt.mode("car")?;
     let (metric, f) = (rt.vocab.modes[k].info.metric, &rt.faults);
