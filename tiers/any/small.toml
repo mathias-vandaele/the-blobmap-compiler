@@ -1,0 +1,42 @@
+# Inputs of the small tier (SPEC §10, verify): paths under `blobc verify --data`.
+tier = "small"
+
+[[inputs]]
+name = "fiji"
+pbf = "osm/fiji.osm.pbf"
+overture = "overture-fiji/2026-10-21.0"
+config = "config"
+extent = "poly/fiji.poly"
+
+[inputs.files]
+"config/active.toml" = "80ae190a7a6e92fcaa17941ae6ffc9aee52e0d490972bc8aa4bf7f065d4ca0ce"
+"config/build.toml" = "245143b17c43f1d9eb43e3f611c59a15563f2f9b164fc0467d711ef7135fcf4a"
+"config/car.toml" = "6456347d9f330fe92d03b39f3b67cda252dee462e6697bf3a7cab473b653da57"
+"config/places.toml" = "c37fcad0881de6bf6d43ae60198a3e31704937a5afefacdbd7889407c1ced449"
+"osm/fiji.osm.pbf" = "33123b678fe51a9b310d56c5560788a34f954d234e676e401ee0e7efdf184df1"
+"overture-fiji/2026-10-21.0/raw/address.parquet" = "d5f3a911814c08ee4e992300bd10874d894cb49149062ba82d056ca6a8835c12"
+"overture-fiji/2026-10-21.0/raw/place.parquet" = "12845f02d02cc31326bde85cac4f2f5d0bf0a8bc7eaac664e76b08a2e9905a67"
+"overture-fiji/2026-10-21.0/taxonomy/basic_categories.csv" = "c0aed53113a825240d71b981746f5296b88a2bb20005528b104045c3c97b7afc"
+"overture-fiji/2026-10-21.0/taxonomy/mapping_sheet.csv" = "5dfb038fb8fbadfb31bbb51e577b53eb4488140bc93e1d32b005edba2f212ce6"
+"overture-fiji/2026-10-21.0/taxonomy/taxonomy.csv" = "59eecbf9e24859bcdab459e8efeea673b7fcbab06b45bd1c7067f215b3bc25d4"
+"poly/fiji.poly" = "c54661a8e0ebc18c4b158870c4a67ff81f2bf2b7f2d40c272c1483f5a113e4df"
+
+[[inputs]]
+name = "norway"
+pbf = "osm/norway.osm.pbf"
+overture = "overture-norway/2026-10-21.0"
+config = "config"
+extent = "poly/norway.poly"
+
+[inputs.files]
+"config/active.toml" = "80ae190a7a6e92fcaa17941ae6ffc9aee52e0d490972bc8aa4bf7f065d4ca0ce"
+"config/build.toml" = "245143b17c43f1d9eb43e3f611c59a15563f2f9b164fc0467d711ef7135fcf4a"
+"config/car.toml" = "6456347d9f330fe92d03b39f3b67cda252dee462e6697bf3a7cab473b653da57"
+"config/places.toml" = "c37fcad0881de6bf6d43ae60198a3e31704937a5afefacdbd7889407c1ced449"
+"osm/norway.osm.pbf" = "3c801f90aa88b248c755f873ad13b443fc5580e6885c865bfe83f06320bb3edf"
+"overture-norway/2026-10-21.0/raw/address.parquet" = "555ccdcb0cea774dda7a6792a93c85852083a4c3951b00ee3a3295f17bc4b578"
+"overture-norway/2026-10-21.0/raw/place.parquet" = "84face560a0e5aabbb0d97770aa45a295c2f0c9027854a2984f6298c5c39f39e"
+"overture-norway/2026-10-21.0/taxonomy/basic_categories.csv" = "c0aed53113a825240d71b981746f5296b88a2bb20005528b104045c3c97b7afc"
+"overture-norway/2026-10-21.0/taxonomy/mapping_sheet.csv" = "5dfb038fb8fbadfb31bbb51e577b53eb4488140bc93e1d32b005edba2f212ce6"
+"overture-norway/2026-10-21.0/taxonomy/taxonomy.csv" = "59eecbf9e24859bcdab459e8efeea673b7fcbab06b45bd1c7067f215b3bc25d4"
+"poly/norway.poly" = "bf08b7f9f070e62d1b64b8950c05dbefaa77bba7c0637394acecb4a959d493b4"
