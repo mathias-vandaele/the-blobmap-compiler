@@ -179,7 +179,8 @@ impl Release {
     /// The address rows `keep` accepts, in file order, each licence set as its number in
     /// `lic`.
     pub fn read_addresses(&self, keep: &(dyn Fn(f64, f64) -> bool + Sync), lic: &Licenses) -> Result<Vec<Address>> {
-        let batches = read_groups(&self.addresses(), &["id", "geometry", "sources"], |b, first| {
+        let mut out = Vec::new();
+        let read = |b: &RecordBatch, first: usize| {
             let id = b.column(0).as_string::<i32>();
             let geom = b.column(1).as_binary::<i32>();
             let sources = b.column(2).as_list::<i32>();
@@ -191,18 +192,17 @@ impl Release {
                 }
             }
             Ok(out)
-        })?;
-        let mut out = Vec::with_capacity(batches.iter().map(Vec::len).sum());
-        for b in batches {
-            out.extend(b);
-        }
+        };
+        read_groups(&self.addresses(), &["id", "geometry", "sources"], read, |b: Vec<Address>| out.extend(b))?;
         Ok(out)
     }
 
     /// The place rows `keep` accepts, in file order, each licence set as its number in `lic`.
     pub fn read_places(&self, keep: &(dyn Fn(f64, f64) -> bool + Sync), lic: &Licenses) -> Result<RawPlaces> {
         let cols = ["id", "geometry", "taxonomy", "basic_category", "confidence", "operating_status", "names", "sources", "addresses"];
-        let batches = read_groups(&self.places(), &cols, |b, first| {
+        let mut out = RawPlaces::new();
+        let mut index = HashMap::new();
+        let read = |b: &RecordBatch, first: usize| {
             let id = b.column(0).as_string::<i32>();
             let geom = b.column(1).as_binary::<i32>();
             let tax = b.column(2).as_struct();
@@ -257,12 +257,8 @@ impl Release {
             }
             out.strings = local.1;
             Ok(out)
-        })?;
-        let mut out = RawPlaces::new();
-        let mut index = HashMap::new();
-        for b in batches {
-            out.append(b, &mut index);
-        }
+        };
+        read_groups(&self.places(), &cols, read, |b| out.append(b, &mut index))?;
         Ok(out)
     }
 }
@@ -312,9 +308,10 @@ pub fn wkb_point(b: &[u8]) -> Result<(f64, f64)> {
     Ok((y, x))
 }
 
-/// Decodes the named root columns of every row group in parallel: `f(batch, first row)`
-/// per batch, the results in file order.
-fn read_groups<T: Send>(path: &Path, cols: &[&str], f: impl Fn(&RecordBatch, usize) -> Result<T> + Sync) -> Result<Vec<T>> {
+/// Decodes the named root columns of every row group in parallel, `f(batch, first row)` per
+/// batch, and hands the results to `sink` in file order. The row groups go a window at a
+/// time, so that only one window's results wait for the sink beside what it has kept.
+fn read_groups<T: Send>(path: &Path, cols: &[&str], f: impl Fn(&RecordBatch, usize) -> Result<T> + Sync, mut sink: impl FnMut(T)) -> Result<()> {
     let open = || File::open(path).with_context(|| path.display().to_string());
     let meta = ParquetRecordBatchReaderBuilder::try_new(open()?)?;
     let schema = meta.parquet_schema().clone();
@@ -331,24 +328,29 @@ fn read_groups<T: Send>(path: &Path, cols: &[&str], f: impl Fn(&RecordBatch, usi
         starts.push(starts.last().unwrap() + rg.num_rows() as usize);
     }
     drop(meta);
-    let per: Vec<Vec<T>> = (0..starts.len() - 1)
-        .into_par_iter()
-        .map(|g| -> Result<Vec<T>> {
-            let b = ParquetRecordBatchReaderBuilder::try_new(open()?)?;
-            let mask = ProjectionMask::roots(b.parquet_schema(), roots.iter().copied());
-            let reader = b.with_row_groups(vec![g]).with_projection(mask).with_batch_size(65536).build()?;
-            let mut first = starts[g];
-            let mut out = Vec::new();
-            for batch in reader {
-                let batch = batch?;
-                let names: Vec<String> = batch.schema().fields().iter().map(|x| x.name().clone()).collect();
-                let order: Vec<usize> = cols.iter().map(|c| names.iter().position(|n| n == c).unwrap()).collect();
-                let batch = batch.project(&order)?;
-                out.push(f(&batch, first)?);
-                first += batch.num_rows();
-            }
-            Ok(out)
-        })
-        .collect::<Result<_>>()?;
-    Ok(per.into_iter().flatten().collect())
+    let groups = starts.len() - 1;
+    let window = rayon::current_num_threads();
+    for w in (0..groups).step_by(window) {
+        let per: Vec<Vec<T>> = (w..groups.min(w + window))
+            .into_par_iter()
+            .map(|g| -> Result<Vec<T>> {
+                let b = ParquetRecordBatchReaderBuilder::try_new(open()?)?;
+                let mask = ProjectionMask::roots(b.parquet_schema(), roots.iter().copied());
+                let reader = b.with_row_groups(vec![g]).with_projection(mask).with_batch_size(65536).build()?;
+                let mut first = starts[g];
+                let mut out = Vec::new();
+                for batch in reader {
+                    let batch = batch?;
+                    let names: Vec<String> = batch.schema().fields().iter().map(|x| x.name().clone()).collect();
+                    let order: Vec<usize> = cols.iter().map(|c| names.iter().position(|n| n == c).unwrap()).collect();
+                    let batch = batch.project(&order)?;
+                    out.push(f(&batch, first)?);
+                    first += batch.num_rows();
+                }
+                Ok(out)
+            })
+            .collect::<Result<_>>()?;
+        per.into_iter().flatten().for_each(&mut sink);
+    }
+    Ok(())
 }

@@ -41,6 +41,12 @@ fn sizes<A>(net: &Network<A>, p: &Pieces) -> Value {
     })
 }
 
+/// Keeps what a stage read, and logs it at once, so that a run cut short still shows it.
+fn note(read: &mut serde_json::Map<String, Value>, stage: &str, v: Value) {
+    eprintln!("{stage}: {v}");
+    read.insert(stage.into(), v);
+}
+
 pub fn main(a: Vec<String>) -> Result<()> {
     let (pbf, overture, config, work, extent) = match &a[..] {
         [p, o, c, w] => (p, o, c, w, None),
@@ -66,10 +72,7 @@ pub fn main(a: Vec<String>) -> Result<()> {
         let (lat, lon) = crate::osm::nodes::unpack(osm.coord(to));
         twins.push(json!({"node": to, "lat": lat, "lon": lon, "joined": g.iter().map(|t| t.1).collect::<Vec<_>>()}));
     }
-    read.insert(
-        "nodes".into(),
-        json!({"nodes": osm.len(), "car_obstacles": osm.car_obstacles.len(), "active_obstacles": osm.active_obstacles.len(), "twins": twins}),
-    );
+    note(&mut read, "nodes", json!({"nodes": osm.len(), "car_obstacles": osm.car_obstacles.len(), "active_obstacles": osm.active_obstacles.len(), "twins": twins}));
     let car = run.run(
         &Step("car-pieces", || {
             let net = Network::read(&osm, &osm.car_obstacles, &CarProfile::new(&config.car.config), &config.car.config.snap, Some(&osm.dir().join("car")))?;
@@ -78,7 +81,7 @@ pub fn main(a: Vec<String>) -> Result<()> {
         }),
         (),
     )?;
-    read.insert("car".into(), car);
+    note(&mut read, "car", car);
     let restrictions = run.run(
         &Step("restrictions", || {
             let (r, _) = osm.restrictions()?;
@@ -86,7 +89,7 @@ pub fn main(a: Vec<String>) -> Result<()> {
         }),
         (),
     )?;
-    read.insert("restrictions".into(), restrictions);
+    note(&mut read, "restrictions", restrictions);
     let active = run.run(
         &Step("active-pieces", || {
             let prof = ActiveProfile::new(&config.active.config);
@@ -97,12 +100,12 @@ pub fn main(a: Vec<String>) -> Result<()> {
         }),
         (),
     )?;
-    read.insert("active".into(), active);
+    note(&mut read, "active", active);
     let islands = run.run(&ReadIslands, &osm)?;
-    read.insert("islands".into(), json!({"polygons": islands.all.len()}));
+    note(&mut read, "islands", json!({"polygons": islands.all.len()}));
     drop((islands, osm));
     let catalog = run.run(&ReadCatalog, (&release, &config, polygon.as_ref()))?;
-    read.insert("catalog".into(), json!({"addresses": catalog.addresses.len(), "places": catalog.places.len(), "aliases": catalog.aliases.len()}));
+    note(&mut read, "catalog", json!({"addresses": catalog.addresses.len(), "places": catalog.places.len(), "aliases": catalog.aliases.len()}));
     drop(catalog);
     let report = json!({
         "pbf": pbf.display().to_string(),
