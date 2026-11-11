@@ -74,4 +74,5 @@ path and SHA-256 (`blobc verify --data <dir>`); `blobc tier` writes them (`blobc
 <dir> tiers/tiny.toml`, `blobc tier add …`). Milestone 3 tools: `blobc extract` (city
 extracts), `blobc accuracy` (cached OSRM pairs), `blobc components` (served components),
 `blobc fragments` (what the small-component rule moves). Milestone 4: `blobc inputs` (the
-input stages alone, any `.pbf` the planet included, peak RSS per stage).
+input stages alone, any `.pbf` the planet included, peak RSS per stage). Milestone 5:
+`blobc cut` (a polygon out of any `.pbf`, up to the planet).

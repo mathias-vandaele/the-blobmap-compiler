@@ -158,23 +158,15 @@ pub const BLOCK: usize = 8000;
 impl OsmData {
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let mut out = Vec::new();
-        let mut header = Msg::default();
-        if !self.nodes.is_empty() {
+        let bbox = (!self.nodes.is_empty()).then(|| {
             let (mut lo, mut hi) = ((f64::MAX, f64::MAX), (f64::MIN, f64::MIN));
             for n in &self.nodes {
                 lo = (lo.0.min(n.lat), lo.1.min(n.lon));
                 hi = (hi.0.max(n.lat), hi.1.max(n.lon));
             }
-            let mut bbox = Msg::default();
-            let nano = |d: f64| (d * 1e9).round() as i64;
-            bbox.sint(1, nano(lo.1)).sint(2, nano(hi.1)).sint(3, nano(hi.0)).sint(4, nano(lo.0));
-            header.bytes(1, &bbox.0);
-        }
-        header.bytes(4, b"OsmSchema-V0.6").bytes(4, b"DenseNodes").bytes(16, b"blobmap-fixtures");
-        if let Some(t) = self.timestamp {
-            header.uint(32, t as u64);
-        }
-        blob("OSMHeader", &header.0, &mut out)?;
+            (lo, hi)
+        });
+        header_block(bbox, self.timestamp, &mut out)?;
         let (nn, nw, nr) = (self.nodes.len(), self.ways.len(), self.relations.len());
         let mut at = 0;
         while at < nn + nw + nr {
@@ -182,77 +174,95 @@ impl OsmData {
             let part = |len: usize, start: usize| at.max(start).min(start + len)..end.max(start).min(start + len);
             let (n, w, r) = (part(nn, 0), part(nw, nn), part(nr, nn + nw));
             let shift = |x: std::ops::Range<usize>, by: usize| x.start - by..x.end - by;
-            self.block(&self.nodes[n], &self.ways[shift(w, nn)], &self.relations[shift(r, nn + nw)], &mut out)?;
+            data_block(&self.nodes[n], &self.ways[shift(w, nn)], &self.relations[shift(r, nn + nw)], &mut out)?;
             at = end;
         }
         Ok(out)
     }
 
-    fn block(&self, nodes: &[Node], ways: &[Way], relations: &[Relation], out: &mut Vec<u8>) -> Result<()> {
-        let mut st = Strings::default();
-        st.id("");
-        let mut groups: Vec<Vec<u8>> = Vec::new();
-        if !nodes.is_empty() {
-            let mut kv = Vec::new();
-            for n in nodes {
-                for (k, v) in &n.tags {
-                    kv.push(st.id(k));
-                    kv.push(st.id(v));
-                }
-                kv.push(0);
-            }
-            let mut dense = Msg::default();
-            dense
-                .packed_sint(1, delta(nodes.iter().map(|n| n.id)))
-                .packed_sint(8, delta(nodes.iter().map(|n| units(n.lat))))
-                .packed_sint(9, delta(nodes.iter().map(|n| units(n.lon))))
-                .packed_uint(10, kv);
-            let mut g = Msg::default();
-            g.bytes(2, &dense.0);
-            groups.push(g.0);
-        }
-        if !ways.is_empty() {
-            let mut g = Msg::default();
-            for w in ways {
-                let mut m = Msg::default();
-                m.uint(1, w.id as u64);
-                let keys: Vec<u64> = w.tags.iter().map(|(k, _)| st.id(k)).collect();
-                let vals: Vec<u64> = w.tags.iter().map(|(_, v)| st.id(v)).collect();
-                m.packed_uint(2, keys).packed_uint(3, vals).packed_sint(8, delta(w.refs.iter().copied()));
-                g.bytes(3, &m.0);
-            }
-            groups.push(g.0);
-        }
-        if !relations.is_empty() {
-            let mut g = Msg::default();
-            for r in relations {
-                let mut m = Msg::default();
-                m.uint(1, r.id as u64);
-                let keys: Vec<u64> = r.tags.iter().map(|(k, _)| st.id(k)).collect();
-                let vals: Vec<u64> = r.tags.iter().map(|(_, v)| st.id(v)).collect();
-                let roles: Vec<u64> = r.members.iter().map(|x| st.id(&x.role)).collect();
-                m.packed_uint(2, keys)
-                    .packed_uint(3, vals)
-                    .packed_uint(8, roles)
-                    .packed_sint(9, delta(r.members.iter().map(|x| x.id)))
-                    .packed_uint(10, r.members.iter().map(|x| x.kind as u64));
-                g.bytes(4, &m.0);
-            }
-            groups.push(g.0);
-        }
-        let mut table = Msg::default();
-        for s in &st.list {
-            table.bytes(1, s.as_bytes());
-        }
-        let mut block = Msg::default();
-        block.bytes(1, &table.0);
-        for g in &groups {
-            block.bytes(2, g);
-        }
-        blob("OSMData", &block.0, out)
-    }
-
     pub fn write(&self, path: &Path) -> Result<()> {
         std::fs::write(path, self.to_bytes()?).with_context(|| format!("writing {}", path.display()))
     }
+}
+
+/// The header block: the bounding box ((min lat, min lon), (max lat, max lon)), if any, and the
+/// replication timestamp.
+pub fn header_block(bbox: Option<((f64, f64), (f64, f64))>, timestamp: Option<i64>, out: &mut Vec<u8>) -> Result<()> {
+    let mut header = Msg::default();
+    if let Some((lo, hi)) = bbox {
+        let mut b = Msg::default();
+        let nano = |d: f64| (d * 1e9).round() as i64;
+        b.sint(1, nano(lo.1)).sint(2, nano(hi.1)).sint(3, nano(hi.0)).sint(4, nano(lo.0));
+        header.bytes(1, &b.0);
+    }
+    header.bytes(4, b"OsmSchema-V0.6").bytes(4, b"DenseNodes").bytes(16, b"blobmap-fixtures");
+    if let Some(t) = timestamp {
+        header.uint(32, t as u64);
+    }
+    blob("OSMHeader", &header.0, out)
+}
+
+/// One data block of at most `BLOCK` entities, nodes before ways before relations.
+pub fn data_block(nodes: &[Node], ways: &[Way], relations: &[Relation], out: &mut Vec<u8>) -> Result<()> {
+    let mut st = Strings::default();
+    st.id("");
+    let mut groups: Vec<Vec<u8>> = Vec::new();
+    if !nodes.is_empty() {
+        let mut kv = Vec::new();
+        for n in nodes {
+            for (k, v) in &n.tags {
+                kv.push(st.id(k));
+                kv.push(st.id(v));
+            }
+            kv.push(0);
+        }
+        let mut dense = Msg::default();
+        dense
+            .packed_sint(1, delta(nodes.iter().map(|n| n.id)))
+            .packed_sint(8, delta(nodes.iter().map(|n| units(n.lat))))
+            .packed_sint(9, delta(nodes.iter().map(|n| units(n.lon))))
+            .packed_uint(10, kv);
+        let mut g = Msg::default();
+        g.bytes(2, &dense.0);
+        groups.push(g.0);
+    }
+    if !ways.is_empty() {
+        let mut g = Msg::default();
+        for w in ways {
+            let mut m = Msg::default();
+            m.uint(1, w.id as u64);
+            let keys: Vec<u64> = w.tags.iter().map(|(k, _)| st.id(k)).collect();
+            let vals: Vec<u64> = w.tags.iter().map(|(_, v)| st.id(v)).collect();
+            m.packed_uint(2, keys).packed_uint(3, vals).packed_sint(8, delta(w.refs.iter().copied()));
+            g.bytes(3, &m.0);
+        }
+        groups.push(g.0);
+    }
+    if !relations.is_empty() {
+        let mut g = Msg::default();
+        for r in relations {
+            let mut m = Msg::default();
+            m.uint(1, r.id as u64);
+            let keys: Vec<u64> = r.tags.iter().map(|(k, _)| st.id(k)).collect();
+            let vals: Vec<u64> = r.tags.iter().map(|(_, v)| st.id(v)).collect();
+            let roles: Vec<u64> = r.members.iter().map(|x| st.id(&x.role)).collect();
+            m.packed_uint(2, keys)
+                .packed_uint(3, vals)
+                .packed_uint(8, roles)
+                .packed_sint(9, delta(r.members.iter().map(|x| x.id)))
+                .packed_uint(10, r.members.iter().map(|x| x.kind as u64));
+            g.bytes(4, &m.0);
+        }
+        groups.push(g.0);
+    }
+    let mut table = Msg::default();
+    for s in &st.list {
+        table.bytes(1, s.as_bytes());
+    }
+    let mut block = Msg::default();
+    block.bytes(1, &table.0);
+    for g in &groups {
+        block.bytes(2, g);
+    }
+    blob("OSMData", &block.0, out)
 }

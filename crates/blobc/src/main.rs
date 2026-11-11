@@ -56,6 +56,8 @@ enum Cmd {
     Fixtures(Tool),
     /// Writes a city extract of a .pbf (PLAN, milestone 3).
     Extract(Tool),
+    /// Cuts a polygon out of a .pbf of any size, up to the planet (PLAN, milestone 5).
+    Cut(Tool),
     /// Writes tier files: `tier tiny …` or `tier add …`.
     Tier(Tool),
     /// Accuracy against cached OSRM times (PLAN, milestone 3).
@@ -124,6 +126,7 @@ fn run() -> Result<bool> {
         }
         Cmd::Fixtures(t) => blobc::fixtures::main(t.args).map(|()| true),
         Cmd::Extract(t) => blobc::fixtures::extract::main(t.args).map(|()| true),
+        Cmd::Cut(t) => blobc::fixtures::cut::main(t.args).map(|()| true),
         Cmd::Tier(t) => blobc::verify::tier::main(t.args).map(|()| true),
         Cmd::Accuracy(t) => blobc::verify::accuracy::main(t.args).map(|()| true),
         Cmd::Components(t) => blobc::verify::components::main(t.args).map(|()| true),

@@ -3,6 +3,7 @@
 //! test-only. Each scenario also lists facts the conformance suite checks (`Check`).
 
 pub mod build;
+pub mod cut;
 pub mod extract;
 pub mod overture;
 pub mod pbf;
