@@ -49,6 +49,8 @@ struct ShardOut {
 pub struct UnitWritten {
     pub shards: Vec<usize>,
     pub hashes: BTreeMap<String, Hash>,
+    /// The bytes of its shard files.
+    pub bytes: u64,
 }
 
 pub struct ModelWriter {
@@ -175,6 +177,7 @@ impl ModelWriter {
             if !o.cur.is_empty() && o.cur_bytes + b > self.limits.target {
                 let k = self.flush(std::mem::take(&mut o.cur))?;
                 o.written.shards.push(k);
+                o.written.bytes += self.shards[k].bytes;
                 o.cur_bytes = 0;
             }
             o.cur_bytes += b;
@@ -191,6 +194,7 @@ impl ModelWriter {
         if !o.cur.is_empty() {
             let k = self.flush(o.cur)?;
             o.written.shards.push(k);
+            o.written.bytes += self.shards[k].bytes;
         }
         Ok(o.written)
     }

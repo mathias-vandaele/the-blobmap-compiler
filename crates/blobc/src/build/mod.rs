@@ -354,6 +354,8 @@ pub struct RoadOut {
     pub links: u64,
     pub components: u64,
     pub packs: u64,
+    /// The bytes of its shard files, tables and packs.
+    pub bytes: u64,
     /// The largest component and every component built as cells: its links, its sweep layers
     /// (FORMAT's level count) and its elimination tree's height (SPEC §13, milestone 4).
     pub hierarchies: Vec<serde_json::Value>,
@@ -377,7 +379,9 @@ impl Stage<(&dyn Family, Built, Layout, &mut ModelWriter)> for WriteRoad {
     fn run(&self, (fam, b, l, writer): (&dyn Family, Built, Layout, &mut ModelWriter)) -> Result<RoadOut> {
         let mut hashes = BTreeMap::new();
         writer.set_slot(self.slots.0)?;
-        hashes.extend(writer.write_unit(road::tables(fam, &b, &l))?.hashes);
+        let t = writer.write_unit(road::tables(fam, &b, &l))?;
+        let mut bytes = t.bytes;
+        hashes.extend(t.hashes);
         writer.set_slot(self.slots.1)?;
         let mut largest = PackSize::default();
         for k in 0..l.packs.len() {
@@ -386,7 +390,9 @@ impl Stage<(&dyn Family, Built, Layout, &mut ModelWriter)> for WriteRoad {
             if (size.rows, size.links) > (largest.rows, largest.links) {
                 largest = size;
             }
-            hashes.extend(writer.write_unit(road::pack(fam, &b, &l, k))?.hashes);
+            let w = writer.write_unit(road::pack(fam, &b, &l, k))?;
+            bytes += w.bytes;
+            hashes.extend(w.hashes);
         }
         let hierarchies = b
             .components
@@ -402,7 +408,7 @@ impl Stage<(&dyn Family, Built, Layout, &mut ModelWriter)> for WriteRoad {
             .collect();
         let (links, components, packs) = (b.components.iter().map(|x| x.h.links()).sum(), b.components.len() as u64, l.packs.len() as u64);
         let arc_local = if self.arc_local { l.arc_local } else { Vec::new() };
-        Ok(RoadOut { layout_of: b.layout_of, arc_local, hashes, largest, links, components, packs, hierarchies })
+        Ok(RoadOut { layout_of: b.layout_of, arc_local, hashes, largest, links, components, packs, bytes, hierarchies })
     }
 }
 
@@ -419,6 +425,8 @@ pub struct WriteInput<'a> {
 pub struct WriteOutput {
     pub manifest: Manifest,
     pub served: vocab::Served,
+    /// The bytes of the vocabulary's shard files.
+    pub vocab_bytes: u64,
     pub shard_bytes: u64,
     pub shards: usize,
 }
@@ -513,7 +521,7 @@ impl Stage<WriteInput<'_>> for WriteModel {
             licenses_sha256: hex::encode(sha2::Sha256::digest(licenses.as_bytes())),
         };
         manifest.write(&out.join(blobmap_format::MANIFEST_FILE))?;
-        Ok(WriteOutput { manifest, served, shard_bytes, shards: written.shard_files.len() })
+        Ok(WriteOutput { manifest, served, vocab_bytes: vw.bytes, shard_bytes, shards: written.shard_files.len() })
     }
 }
 
@@ -618,6 +626,24 @@ pub fn build(a: &Args) -> Result<BuildResult> {
     let data = report::data(a, &families, &catalog, &snaps, &ids, &wo.served, &islands)?;
     blobmap_format::json::write_file(&a.report_path("data"), &data)?;
     let hierarchies: Vec<&serde_json::Value> = car_road.hierarchies.iter().chain(&active_road.hierarchies).collect();
+    // What serving costs (SPEC §13, milestone 5): the road part per link and per family, a
+    // column's distance state (u16 per node of the family's largest component), and the
+    // vocabulary per ID.
+    let (ids_addresses, ids) = (ids.addresses.len() as u64, (ids.addresses.len() + ids.places.len()) as u64);
+    let family = |r: &RoadOut, f: &dyn Family| {
+        let largest = f.components().nodes.first().copied().unwrap_or(0) as u64;
+        json!({
+            "bytes": r.bytes, "links": r.links, "bytes_per_link": r.bytes as f64 / r.links.max(1) as f64,
+            "nodes": f.nodes(), "largest_component_nodes": largest, "column_state_bytes": 2 * largest,
+        })
+    };
+    let road_bytes = car_road.bytes + active_road.bytes;
+    let sizes = json!({
+        "car": family(&car_road, &car), "active": family(&active_road, &act),
+        "road_bytes": road_bytes, "bytes_per_link": road_bytes as f64 / (car_road.links + active_road.links).max(1) as f64,
+        "vocab_bytes": wo.vocab_bytes, "ids": ids, "addresses": ids_addresses, "bytes_per_id": wo.vocab_bytes as f64 / ids.max(1) as f64,
+        "column_result_bytes": 2 * ids,
+    });
     let largest: serde_json::Map<String, serde_json::Value> = [("car", &car_road, "turns"), ("active", &active_road, "roads")]
         .iter()
         .map(|&(f, r, arcs)| {
@@ -632,6 +658,7 @@ pub fn build(a: &Args) -> Result<BuildResult> {
         "peak_rss_bytes": run.stages.iter().filter_map(|s| s.peak_rss_bytes).max(),
         "largest_pack": largest,
         "hierarchies": hierarchies,
+        "sizes": sizes,
         "shard_bytes": wo.shard_bytes,
         "shards": wo.shards,
         // Layout ids per family against their U32 bound (FORMAT §4).
