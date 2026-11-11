@@ -2,6 +2,7 @@
 //! whether a component is built in one piece or as cells, and orders each block.
 
 pub mod cells;
+pub mod dissect;
 pub mod elim;
 
 pub use cells::{Block, Kind, plan};

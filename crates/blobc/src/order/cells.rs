@@ -14,8 +14,8 @@
 
 use blobmap_format::NONE;
 
-use crate::order::elim::{eliminate, etree};
-use crate::order::{Graph, InertialFlow, Orderer, ranks};
+use crate::order::elim::etree;
+use crate::order::{Graph, Orderer, ranks};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -32,9 +32,9 @@ pub struct Block {
 }
 
 /// Undirected adjacency without loops or parallel arcs, with arc multiplicities.
-struct Adj {
+pub(crate) struct Adj {
     first: Vec<u32>,
-    to: Vec<u32>,
+    pub to: Vec<u32>,
     weight: Vec<u32>,
 }
 
@@ -59,13 +59,13 @@ impl Adj {
         Adj { first, to: merged.iter().map(|e| e.1).collect(), weight: merged.iter().map(|e| e.2).collect() }
     }
 
-    fn range(&self, v: usize) -> std::ops::Range<usize> {
+    pub fn range(&self, v: usize) -> std::ops::Range<usize> {
         self.first[v] as usize..self.first[v + 1] as usize
     }
 }
 
 /// The induced subgraph on `nodes` (sorted), ordered, mapped back to node ids.
-fn order_induced(g: &Graph, adj: &Adj, nodes: &[u32], orderer: &dyn Orderer) -> Vec<u32> {
+pub(crate) fn order_induced(g: &Graph, adj: &Adj, nodes: &[u32], orderer: &dyn Orderer) -> Vec<u32> {
     let local = |v: u32| nodes.binary_search(&v).ok();
     let (mut tail, mut head) = (Vec::new(), Vec::new());
     for (i, &v) in nodes.iter().enumerate() {
@@ -182,7 +182,8 @@ fn fine(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
     out
 }
 
-/// Cells from a coarsened graph, for a component too large to order at once.
+/// Cells from a coarsened graph, for a component too large to order at once: the fine nodes
+/// clustered, then dissected with the clusters' orders as a guide (`dissect`).
 fn coarse(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
     let fine = Adj::new(g.n, g.tail.iter().zip(g.head).map(|(&a, &b)| (a, b, 1)));
     // Coarsen to clusters of at most a quarter cell, until about 16 fine nodes per cluster.
@@ -219,91 +220,13 @@ fn coarse(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
         }
         (w, lat, lon) = (nw, nlat, nlon);
     }
-    // Order the coarse graph and cut its elimination tree.
-    let nc = w.len();
-    let (mut tail, mut head) = (Vec::new(), Vec::new());
-    for v in 0..nc {
-        for e in adj.range(v) {
-            if (v as u32) < adj.to[e] {
-                tail.push(v as u32);
-                head.push(adj.to[e]);
-            }
-        }
-    }
-    let (flat, flon): (Vec<f32>, Vec<f32>) = (lat.iter().map(|&x| x as f32).collect(), lon.iter().map(|&x| x as f32).collect());
-    let order = InertialFlow.order(&Graph { n: nc, tail: &tail, head: &head, lat: &flat, lon: &flon });
-    let rank = ranks(&order);
-    let el = eliminate(nc, tail.iter().zip(&head).map(|(&a, &b)| (rank[a as usize], rank[b as usize])));
-    let parent: Vec<Option<u32>> = el.up.iter().map(|u| u.first().copied()).collect();
-    let mut sub = vec![0u64; nc];
-    for r in 0..nc {
-        sub[r] += w[order[r] as usize];
-        if let Some(p) = parent[r] {
-            sub[p as usize] += sub[r];
-        }
-    }
-    let (cell_of_rank, cells) = cut(&parent, &sub, max_cell);
-    // Lift to the fine graph, then let top nodes whose arcs all stay in one cell join it.
-    let mut block: Vec<u32> = (0..g.n).map(|v| cell_of_rank[rank[map[v] as usize] as usize]).collect();
-    let mut count: Vec<u64> = vec![0; cells];
-    for &b in &block {
-        if b != NONE {
-            count[b as usize] += 1;
-        }
-    }
-    for _ in 0..3 {
-        let mut moved = false;
-        for v in 0..g.n {
-            if block[v] != NONE {
-                continue;
-            }
-            let mut only = NONE;
-            let mut ok = true;
-            for e in fine.range(v) {
-                let b = block[fine.to[e] as usize];
-                if b != NONE {
-                    if only != NONE && only != b {
-                        ok = false;
-                        break;
-                    }
-                    only = b;
-                }
-            }
-            if ok && only != NONE && count[only as usize] < max_cell as u64 {
-                block[v] = only;
-                count[only as usize] += 1;
-                moved = true;
-            }
-        }
-        if !moved {
-            break;
-        }
-    }
-    let top_nodes: Vec<u32> = (0..g.n as u32).filter(|&v| block[v as usize] == NONE).collect();
-    if top_nodes.is_empty() || cells < 2 {
-        return vec![Block { kind: Kind::Whole, nodes: orderer.order(g) }];
-    }
-    // The top block by the coarse rank of its clusters, then the orderer inside a cluster.
-    let induced = order_induced(g, &fine, &top_nodes, orderer);
-    let mut within = vec![0u32; g.n];
-    for (i, &v) in induced.iter().enumerate() {
-        within[v as usize] = i as u32;
-    }
-    let mut top_order = top_nodes;
-    top_order.sort_by_key(|&v| (rank[map[v as usize] as usize], within[v as usize]));
-    let mut out = vec![Block { kind: Kind::Top, nodes: top_order }];
-    for c in 0..cells as u32 {
-        let nodes: Vec<u32> = (0..g.n as u32).filter(|&v| block[v as usize] == c).collect();
-        if !nodes.is_empty() {
-            out.push(Block { kind: Kind::Cell, nodes: order_induced(g, &fine, &nodes, orderer) });
-        }
-    }
-    out
+    crate::order::dissect::refined(g, &fine, &map, orderer, max_cell)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::order::InertialFlow;
 
     fn grid(k: u32) -> (Vec<u32>, Vec<u32>, Vec<f32>, Vec<f32>) {
         let (mut tail, mut head) = (Vec::new(), Vec::new());
