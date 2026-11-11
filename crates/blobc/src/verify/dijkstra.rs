@@ -220,6 +220,27 @@ fn run(g: &Csr, dist: &mut [u32], extra: impl Fn(u32, u32) -> u32) {
     }
 }
 
+/// `run` from the labels at `seeds`, calling `settle` on each node as its label becomes final;
+/// it stops when `settle` says so.
+fn run_until(g: &Csr, dist: &mut [u32], seeds: &[u32], extra: impl Fn(u32, u32) -> u32, mut settle: impl FnMut(u32, u32) -> bool) {
+    let mut heap: BinaryHeap<Reverse<(u32, u32)>> = seeds.iter().map(|&v| Reverse((dist[v as usize], v))).collect();
+    while let Some(Reverse((t, v))) = heap.pop() {
+        if t > dist[v as usize] {
+            continue;
+        }
+        if !settle(v, t) {
+            return;
+        }
+        for (h, c) in g.arcs(v) {
+            let x = t.saturating_add(c as u32 + extra(v, h));
+            if x < dist[h as usize] {
+                dist[h as usize] = x;
+                heap.push(Reverse((x, h)));
+            }
+        }
+    }
+}
+
 /// The reference graphs, built once: the CAR states and, per ACTIVE metric, its roads.
 pub struct Graphs {
     car: CarStates,
@@ -371,6 +392,82 @@ impl Graphs {
 }
 
 impl Graphs {
+    /// The times from (`from`) or to the ID at s, alone at start 0, of the IDs `targets` in
+    /// mode m, as `column` reads them: exact for every target at the least of these times, and
+    /// no less than it for the others. The Dijkstra stops once no label can lower that least,
+    /// where `column` searches the whole component.
+    pub fn nearest(&self, r: &Reference, m: &Mode, s: usize, from: bool, targets: &[usize]) -> Vec<u16> {
+        let mut out = vec![u32::MAX; targets.len()];
+        let Ok(o) = m.at(s) else { return out.into_iter().map(cap).collect() };
+        // Per key (a CAR state or an ACTIVE node): the targets read there, and the time after it.
+        let mut keys: Vec<(u32, u32, u32)> = Vec::new();
+        for (j, &d) in targets.iter().enumerate() {
+            let Ok(e) = m.at(d) else { continue };
+            if e.component != o.component {
+                continue;
+            }
+            if d == s {
+                out[j] = 0;
+            }
+            out[j] = out[j].min(if from { direct(r, m, &o, &e) } else { direct(r, m, &e, &o) });
+            for side in sides(r, m, &e).iter().flatten() {
+                let Some((before, after)) = split(side.w, side.g) else { continue };
+                let j = j as u32;
+                match (m.car, from) {
+                    (true, true) => keys.extend(self.car.of(side.tail).map(|k| (k, j, before))),
+                    (true, false) => keys.extend(self.car.fwd.arcs(side.tail).map(|(k, c)| (k, j, after + c as u32))),
+                    (false, true) => keys.push((side.tail, j, before)),
+                    (false, false) => keys.push((side.head, j, after)),
+                }
+            }
+        }
+        keys.sort_unstable();
+        let mut least = out.iter().copied().min().unwrap_or(u32::MAX);
+        let settle = |v: u32, t: u32| -> bool {
+            if t > least {
+                return false;
+            }
+            let lo = keys.partition_point(|x| x.0 < v);
+            for &(_, j, after) in keys[lo..].iter().take_while(|x| x.0 == v) {
+                let x = t.saturating_add(after);
+                out[j as usize] = out[j as usize].min(x);
+                least = least.min(x);
+            }
+            true
+        };
+        // The source's labels, as `component_column` seeds them.
+        let mut seeds: Vec<(u32, u32)> = Vec::new();
+        for side in sides(r, m, &o).iter().flatten() {
+            let Some((before, after)) = split(side.w, side.g) else { continue };
+            match (m.car, from) {
+                (true, true) => seeds.extend(self.car.fwd.arcs(side.tail).map(|(k, c)| (k, after + c as u32))),
+                (true, false) => seeds.extend(self.car.of(side.tail).map(|k| (k, before))),
+                (false, true) => seeds.push((side.head, after)),
+                (false, false) => seeds.push((side.tail, before)),
+            }
+        }
+        let n = if m.car { self.car.last.len() } else { r.active.nodes };
+        let mut dist = vec![u32::MAX; n];
+        for &(v, t) in &seeds {
+            dist[v as usize] = dist[v as usize].min(t);
+        }
+        let mut at: Vec<u32> = seeds.iter().map(|x| x.0).collect();
+        at.sort_unstable();
+        at.dedup();
+        if m.car {
+            let (g, cs) = (&r.car, &self.car);
+            if from {
+                run_until(&cs.fwd, &mut dist, &at, |k, _| g.w[cs.last[k as usize] as usize] as u32, settle);
+            } else {
+                run_until(&cs.rev, &mut dist, &at, |_, k| g.w[cs.last[k as usize] as usize] as u32, settle);
+            }
+        } else {
+            let (f, b) = &self.active[m.metric];
+            run_until(if from { f } else { b }, &mut dist, &at, |_, _| 0, settle);
+        }
+        out.into_iter().map(cap).collect()
+    }
+
     /// The CAR time from the ID at o to the ID at d (SPEC §9), by a Dijkstra that stops once
     /// no label can improve the arrival.
     pub fn car_pair(&self, r: &Reference, m: &Mode, o: usize, d: usize) -> u16 {

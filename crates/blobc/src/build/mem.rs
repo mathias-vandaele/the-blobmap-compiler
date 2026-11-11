@@ -37,3 +37,33 @@ pub fn trim() {
 pub fn reset_peak() {
     let _ = std::fs::write("/proc/self/clear_refs", "5");
 }
+
+/// Memory this process may still take without swapping, in bytes: the least of the system's
+/// available memory and, under a cgroup limit (a `systemd-run` scope), the limit less this
+/// process's anonymous memory, which the kernel cannot drop when the scope has no swap. None
+/// where unknown.
+pub fn free() -> Option<u64> {
+    let m = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let avail = m.lines().find(|l| l.starts_with("MemAvailable:"))?.split_whitespace().nth(1)?.parse::<u64>().ok()? * 1024;
+    Some(match cgroup_limit() {
+        Some(l) => avail.min(l.saturating_sub(anon()?)),
+        None => avail,
+    })
+}
+
+/// The tightest `memory.max` of this process's cgroup and its ancestors (cgroup v2).
+fn cgroup_limit() -> Option<u64> {
+    let c = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let path = c.lines().find_map(|l| l.strip_prefix("0::"))?;
+    let root = std::path::Path::new("/sys/fs/cgroup");
+    let mut dir = root.join(path.trim_start_matches('/'));
+    let mut least: Option<u64> = None;
+    loop {
+        if let Some(x) = std::fs::read_to_string(dir.join("memory.max")).ok().and_then(|v| v.trim().parse::<u64>().ok()) {
+            least = Some(least.map_or(x, |l| l.min(x)));
+        }
+        if dir == root || !dir.pop() {
+            return least;
+        }
+    }
+}

@@ -43,9 +43,14 @@ struct Memo {
 /// Bytes of columns kept.
 const MEMO_BYTES: usize = 1 << 30;
 
-/// Bytes the Dijkstra runs in flight may hold together; a run beyond them waits, whatever
-/// the number of threads.
+/// Bytes the Dijkstra runs in flight may hold together where the free memory is unknown; a
+/// run beyond them waits, whatever the number of threads.
 const SCRATCH_BYTES: usize = 4 << 30;
+
+/// The share of the memory free once the graphs are built (less the kept columns and the
+/// runtime's columns) that the Dijkstra runs in flight may hold together: the scope has no
+/// swap, so an overshoot would end the run.
+const SCRATCH_SHARE: f64 = 0.75;
 
 /// The runs that may start, and a signal when one ends.
 struct Gate {
@@ -82,7 +87,15 @@ impl Expected<'_> {
     pub fn new(r: &Reference) -> anyhow::Result<Expected<'_>> {
         let max = (MEMO_BYTES / (2 * r.n().max(1))).clamp(8, 4096);
         let g = Graphs::new(r)?;
-        let gate = Gate { free: Mutex::new((SCRATCH_BYTES / g.scratch_bytes(r.n()).max(1)).max(1)), ended: Condvar::new() };
+        let scratch = g.scratch_bytes(r.n()).max(1);
+        let kept = (max * 2 * r.n()) as u64 + crate::verify::COLUMN_MEMORY;
+        let runs = match crate::build::mem::free() {
+            Some(free) => (SCRATCH_SHARE * free.saturating_sub(kept) as f64 / scratch as f64) as usize,
+            None => SCRATCH_BYTES / scratch,
+        }
+        .clamp(1, rayon::current_num_threads());
+        eprintln!("reference: {runs} Dijkstra runs at once, {:.1} GB each", scratch as f64 / 1e9);
+        let gate = Gate { free: Mutex::new(runs), ended: Condvar::new() };
         Ok(Expected { r, g, memo: Mutex::new(Memo { cells: BTreeMap::new(), order: VecDeque::new(), max }), gate })
     }
 
@@ -121,7 +134,7 @@ impl Expected<'_> {
         if self.component(m, ia) != self.component(m, ib) {
             return json!({"reason": "DifferentComponent", "id": b});
         }
-        json!({"time": time(self.column(m, &[(ia, 0)], "from")[ib])})
+        json!({"time": time(self.gate.run(|| self.g.nearest(self.r, &self.r.modes[m], ia, true, &[ib]))[0])})
     }
 
     /// The column of (source, start) pairs in a direction ("from" or "to"): per ID, the
@@ -219,8 +232,10 @@ impl Expected<'_> {
                     Err(r) => return r,
                 };
                 let c = self.category(&a["category"]).expect("a known category");
-                let col = self.column(m, &[(i, 0)], a["dir"].as_str().unwrap());
-                let best = self.matching(&c).into_iter().filter(|&p| col[p] != INF).map(|p| (col[p], self.r.ids[p])).min();
+                // The first places settled: the least time is exact, ties included.
+                let places = self.matching(&c);
+                let t = self.gate.run(|| self.g.nearest(self.r, &self.r.modes[m], i, a["dir"] == "from", &places));
+                let best = places.iter().zip(&t).filter(|x| *x.1 != INF).map(|(&p, &t)| (t, self.r.ids[p])).min();
                 match best {
                     Some((t, p)) => json!({"time": t, "place": uuid(&p)}),
                     None => json!({"time": "BEYOND", "place": null}),

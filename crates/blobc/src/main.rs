@@ -49,6 +49,10 @@ enum Cmd {
         /// Also run the broken models and runtimes, which must fail.
         #[arg(long)]
         mutants: bool,
+        /// Only write the golden queries (from the reference of both families) and replay
+        /// them: no other check.
+        #[arg(long)]
+        golden_only: bool,
     },
     /// Prints a model's manifest summary.
     Inspect { model: PathBuf },
@@ -97,10 +101,10 @@ fn run() -> Result<bool> {
             println!("inputs_hash {}", r.manifest.inputs_hash);
             Ok(true)
         }
-        Cmd::Verify { model, tier, data, tiers, golden, mutants } => {
+        Cmd::Verify { model, tier, data, tiers, golden, mutants, golden_only } => {
             let work = blobc::verify::work_dir(&model, "verify");
             let tier_file = tiers.join(format!("{tier}.toml"));
-            let o = blobc::verify::Options { tier, tier_file, data, golden, mutants, work: work.clone() };
+            let o = blobc::verify::Options { tier, tier_file, data, golden, mutants, golden_only, work: work.clone() };
             let v = blobc::verify::verify(&model, &o);
             let _ = std::fs::remove_dir_all(&work);
             let v = v?;

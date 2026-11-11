@@ -3,12 +3,13 @@
 //! ids; loaded, its nodes are numbered from 0, and so are the vocabulary's nodes.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::manifest::Manifest;
+use crate::runtime::arr::{Arr, ArrWriter};
 use crate::{Model, NONE};
 
 pub type Id = [u8; 16];
@@ -172,17 +173,17 @@ impl Tables {
 /// and `node` is numbered within that component.
 pub struct ModeVocab {
     pub info: ModeInfo,
-    pub component: Vec<u32>,
-    pub node: Vec<[u32; 2]>,
-    pub road: Vec<u32>,
-    pub off: Vec<[u16; 4]>,
+    pub component: Arr<u32>,
+    pub node: Arr<[u32; 2]>,
+    pub road: Arr<u32>,
+    pub off: Arr<[u16; 4]>,
     /// (internal index, code, metres), sorted by index.
     pub reasons: Vec<(u32, u8, f32)>,
 }
 
 pub struct Vocab {
-    pub address: Vec<Id>,
-    pub place: Vec<Id>,
+    pub address: Arr<Id>,
+    pub place: Arr<Id>,
     pub alias: Vec<Id>,
     pub alias_to: Vec<u32>,
     pub road_hash: Vec<u8>,
@@ -246,29 +247,29 @@ pub struct Component {
     pub fam: Fam,
     pub n: usize,
     pub blocks: Vec<BlockAt>,
-    pub up_first: Vec<u64>,
-    pub up_head: Vec<u32>,
+    pub up_first: Arr<u64>,
+    pub up_head: Arr<u32>,
     /// Per metric.
-    pub up: Vec<Vec<u16>>,
-    pub down: Vec<Vec<u16>>,
+    pub up: Vec<Arr<u16>>,
+    pub down: Vec<Arr<u16>>,
     /// Turns (CAR) or roads (ACTIVE), CSR by tail.
-    pub arc_first: Vec<u64>,
-    pub arc_head: Vec<u32>,
+    pub arc_first: Arr<u64>,
+    pub arc_head: Arr<u32>,
     /// Component-local link of each arc, `NONE` when tail = head.
-    pub arc_link: Vec<u32>,
+    pub arc_link: Arr<u32>,
     /// The pack-local index of each arc (ACTIVE `road`).
-    pub arc_local: Vec<u32>,
-    pub turn_cost: Vec<u16>,
+    pub arc_local: Arr<u32>,
+    pub turn_cost: Arr<u16>,
     /// The roads' tensors: per node for CAR, per arc for ACTIVE.
-    pub way: Vec<i64>,
-    pub way_dir: Vec<u8>,
-    pub way_seq: Vec<u32>,
-    pub kind: Vec<u8>,
-    pub time_s: Vec<Vec<f32>>,
-    pub w: Vec<Vec<u16>>,
-    pub copy_of: Vec<u32>,
-    pub copy_first: Vec<u32>,
-    pub copies: Vec<u32>,
+    pub way: Arr<i64>,
+    pub way_dir: Arr<u8>,
+    pub way_seq: Arr<u32>,
+    pub kind: Arr<u8>,
+    pub time_s: Vec<Arr<f32>>,
+    pub w: Vec<Arr<u16>>,
+    pub copy_of: Arr<u32>,
+    pub copy_first: Arr<u32>,
+    pub copies: Arr<u32>,
 }
 
 impl Component {
@@ -312,6 +313,8 @@ pub struct Runtime {
     cache: Mutex<BTreeMap<(Fam, u32), Arc<Component>>>,
     /// Held while a component loads, so that concurrent queries load it once.
     loading: Mutex<()>,
+    /// Where the vocabulary and the components go to mapped files (`Arr`), if anywhere.
+    scratch: Option<PathBuf>,
 }
 
 fn strings(m: &Model, name: &str) -> Result<Vec<String>> {
@@ -326,8 +329,21 @@ fn ids(m: &Model, name: &str) -> Result<Vec<Id>> {
     Ok((0..n).map(|i| v[16 * i..16 * i + 16].try_into().unwrap()).collect())
 }
 
+fn ids_in(m: &Model, name: &str, scratch: Option<&Path>) -> Result<Arr<Id>> {
+    let (v, n) = m.get_rows::<u8>(name, &[16])?;
+    let mut w = ArrWriter::new(scratch)?;
+    w.extend_from_slice(bytemuck::cast_slice(&v[..16 * n]))?;
+    w.finish()
+}
+
 impl Runtime {
     pub fn open(dir: &Path) -> Result<Runtime> {
+        Runtime::open_in(dir, None)
+    }
+
+    /// The runtime of the model in `dir`, its vocabulary and components in mapped files under
+    /// `scratch` when given (SPEC §10).
+    pub fn open_in(dir: &Path, scratch: Option<&Path>) -> Result<Runtime> {
         let model = Model::open(dir)?;
         let manifest = Manifest::from_value(&model.manifest).context("manifest")?;
         let road_hash = &manifest.parts.road.hash;
@@ -353,8 +369,8 @@ impl Runtime {
             t.derive(f)?;
             tables.insert(fam, t);
         }
-        let address = ids(&model, "vocab/ids/address")?;
-        let place = ids(&model, "vocab/ids/place")?;
+        let address = ids_in(&model, "vocab/ids/address", scratch)?;
+        let place = ids_in(&model, "vocab/ids/place", scratch)?;
         let n = address.len() + place.len();
         let mut modes = Vec::new();
         for (name, mode) in &manifest.modes {
@@ -397,6 +413,7 @@ impl Runtime {
             let rcode = model.get_len::<u8>(&format!("{p}reason_code"), rid.len())?;
             let rm = model.get_len::<f32>(&format!("{p}reason_m"), rid.len())?;
             let reasons = (0..rid.len()).map(|k| (rid[k], rcode[k], rm[k])).collect();
+            let (component, node, road, off) = (Arr::new(component, scratch)?, Arr::new(node, scratch)?, Arr::new(road, scratch)?, Arr::new(off, scratch)?);
             modes.push(ModeVocab { info: ModeInfo { name: name.clone(), fam, metric }, component, node, road, off, reasons });
         }
         let vocab = Vocab {
@@ -427,6 +444,7 @@ impl Runtime {
             faults: Faults::default(),
             cache: Mutex::new(BTreeMap::new()),
             loading: Mutex::new(()),
+            scratch: scratch.map(Path::to_path_buf),
         })
     }
 
@@ -471,33 +489,24 @@ impl Runtime {
             ensure!(v >= base && v - base < n as u32, "{f} component {x}: {what} {v} is outside its layout ids");
             Ok(v - base)
         };
-        let mut e = Component {
-            fam,
-            n,
-            blocks: Vec::new(),
-            up_first: vec![0],
-            up_head: Vec::new(),
-            up: vec![Vec::new(); metrics.len()],
-            down: vec![Vec::new(); metrics.len()],
-            arc_first: vec![0],
-            arc_head: Vec::new(),
-            arc_link: Vec::new(),
-            arc_local: Vec::new(),
-            turn_cost: Vec::new(),
-            way: Vec::new(),
-            way_dir: Vec::new(),
-            way_seq: Vec::new(),
-            kind: Vec::new(),
-            time_s: vec![Vec::new(); metrics.len()],
-            w: vec![Vec::new(); metrics.len()],
-            copy_of: Vec::new(),
-            copy_first: vec![0],
-            copies: Vec::new(),
-        };
-        let mut raw_links: Vec<u32> = Vec::new();
+        // Each array is written as it is read, to a mapped file when there is a scratch
+        // directory, so that loading holds no second copy (SPEC §10).
+        let sc = self.scratch.as_deref();
+        let per_metric = || -> Result<Vec<ArrWriter<u16>>> { metrics.iter().map(|_| ArrWriter::new(sc)).collect() };
+        let (mut up_first_w, mut up_head_w, mut up_w, mut down_w) = (ArrWriter::new(sc)?, ArrWriter::new(sc)?, per_metric()?, per_metric()?);
+        let (mut arc_first_w, mut arc_head_w, mut raw_links, mut arc_local_w) = (ArrWriter::new(sc)?, ArrWriter::new(sc)?, ArrWriter::new(sc)?, ArrWriter::new(sc)?);
+        let (mut turn_cost_w, mut way_w, mut way_dir_w, mut way_seq_w, mut kind_w) = (ArrWriter::new(sc)?, ArrWriter::new(sc)?, ArrWriter::new(sc)?, ArrWriter::new(sc)?, ArrWriter::new(sc)?);
+        let mut time_s_w: Vec<ArrWriter<f32>> = metrics.iter().map(|_| ArrWriter::new(sc)).collect::<Result<_>>()?;
+        let mut w_w = per_metric()?;
+        let (mut copy_of_w, mut copy_first_w, mut copies_w) = (ArrWriter::new(sc)?, ArrWriter::new(sc)?, ArrWriter::new(sc)?);
+        let mut blocks = Vec::new();
+        let (mut up_last, mut arc_last) = (0u64, 0u64);
+        up_first_w.push(0u64)?;
+        arc_first_w.push(0u64)?;
+        copy_first_w.push(0u32)?;
         for b in t.block_first[x as usize] as usize..t.block_first[x as usize + 1] as usize {
             let (pack, row_first, id_first, nodes) = (t.b_pack[b], t.b_row_first[b], t.b_id_first[b], t.b_nodes[b]);
-            ensure!(id_first == base + e.up_first.len() as u32 - 1, "{f} component {x}: blocks do not follow layout ids");
+            ensure!(id_first == base + up_first_w.len() as u32 - 1, "{f} component {x}: blocks do not follow layout ids");
             let id_first = id_first - base;
             let p = format!("road/{f}/p{pack}/");
             let u32s = |name: &str| m.get::<u32>(&format!("{p}{name}"));
@@ -508,51 +517,81 @@ impl Runtime {
             let arc_link = u32s(&format!("{word}_link"))?;
             let rows = row_first as usize..(row_first + nodes) as usize;
             ensure!(rows.end < up_first.len() && rows.end < arc_first.len(), "{p}: rows out of range");
-            e.blocks.push(BlockAt { kind: t.b_kind[b], id_first, pack_link_first: up_first[rows.start] as u64 });
+            blocks.push(BlockAt { kind: t.b_kind[b], id_first, pack_link_first: up_first[rows.start] as u64 });
             let links = up_first[rows.start] as usize..up_first[rows.end] as usize;
             let arcs = arc_first[rows.start] as usize..arc_first[rows.end] as usize;
             for r in rows.clone() {
-                e.up_first.push(e.up_first.last().unwrap() + (up_first[r + 1] - up_first[r]) as u64);
-                e.arc_first.push(e.arc_first.last().unwrap() + (arc_first[r + 1] - arc_first[r]) as u64);
+                up_last += (up_first[r + 1] - up_first[r]) as u64;
+                arc_last += (arc_first[r + 1] - arc_first[r]) as u64;
+                up_first_w.push(up_last)?;
+                arc_first_w.push(arc_last)?;
             }
             for &h in &up_head[links.clone()] {
-                e.up_head.push(local(h, "upper neighbour")?);
+                up_head_w.push(local(h, "upper neighbour")?)?;
             }
             for (k, name) in metrics.iter().enumerate() {
-                e.up[k].extend_from_slice(&m.get::<u16>(&format!("{p}{name}.up"))?[links.clone()]);
-                e.down[k].extend_from_slice(&m.get::<u16>(&format!("{p}{name}.down"))?[links.clone()]);
+                up_w[k].extend_from_slice(&m.get::<u16>(&format!("{p}{name}.up"))?[links.clone()])?;
+                down_w[k].extend_from_slice(&m.get::<u16>(&format!("{p}{name}.down"))?[links.clone()])?;
             }
             for &h in &arc_head[arcs.clone()] {
-                e.arc_head.push(local(h, "head")?);
+                arc_head_w.push(local(h, "head")?)?;
             }
-            raw_links.extend_from_slice(&arc_link[arcs.clone()]);
-            e.arc_local.extend(arcs.clone().map(|a| a as u32));
+            raw_links.extend_from_slice(&arc_link[arcs.clone()])?;
+            for a in arcs.clone() {
+                arc_local_w.push(a as u32)?;
+            }
             let range = if fam == Fam::Car { rows.clone() } else { arcs.clone() };
-            e.way.extend_from_slice(&m.get::<i64>(&format!("{p}way"))?[range.clone()]);
-            e.way_dir.extend_from_slice(&m.get::<u8>(&format!("{p}way_dir"))?[range.clone()]);
-            e.way_seq.extend_from_slice(&u32s("way_seq")?[range.clone()]);
-            e.kind.extend_from_slice(&m.get::<u8>(&format!("{p}kind"))?[range.clone()]);
+            way_w.extend_from_slice(&m.get::<i64>(&format!("{p}way"))?[range.clone()])?;
+            way_dir_w.extend_from_slice(&m.get::<u8>(&format!("{p}way_dir"))?[range.clone()])?;
+            way_seq_w.extend_from_slice(&u32s("way_seq")?[range.clone()])?;
+            kind_w.extend_from_slice(&m.get::<u8>(&format!("{p}kind"))?[range.clone()])?;
             for (k, name) in metrics.iter().enumerate() {
-                e.time_s[k].extend_from_slice(&m.get::<f32>(&format!("{p}{name}.time_s"))?[range.clone()]);
-                e.w[k].extend_from_slice(&m.get::<u16>(&format!("{p}{name}.w"))?[range.clone()]);
+                time_s_w[k].extend_from_slice(&m.get::<f32>(&format!("{p}{name}.time_s"))?[range.clone()])?;
+                w_w[k].extend_from_slice(&m.get::<u16>(&format!("{p}{name}.w"))?[range.clone()])?;
             }
             if fam == Fam::Car {
-                e.turn_cost.extend_from_slice(&m.get::<u16>(&format!("{p}car.turn_cost"))?[arcs.clone()]);
+                turn_cost_w.extend_from_slice(&m.get::<u16>(&format!("{p}car.turn_cost"))?[arcs.clone()])?;
                 for &o in &u32s("copy_of")?[rows.clone()] {
-                    e.copy_of.push(if o == NONE { NONE } else { local(o, "copy_of")? });
+                    copy_of_w.push(if o == NONE { NONE } else { local(o, "copy_of")? })?;
                 }
                 let cf = u32s("copy_first")?;
                 let cs = u32s("copies")?;
                 for r in rows.clone() {
                     for &c in &cs[cf[r] as usize..cf[r + 1] as usize] {
-                        e.copies.push(local(c, "copy")?);
+                        copies_w.push(local(c, "copy")?)?;
                     }
-                    e.copy_first.push(e.copies.len() as u32);
+                    copy_first_w.push(copies_w.len() as u32)?;
                 }
             }
         }
-        ensure!(e.up_first.len() == n + 1, "{f} component {x}: blocks cover {} of {n} nodes", e.up_first.len() - 1);
+        ensure!(up_first_w.len() == n + 1, "{f} component {x}: blocks cover {} of {n} nodes", up_first_w.len() - 1);
+        let all = |ws: Vec<ArrWriter<u16>>| -> Result<Vec<Arr<u16>>> { ws.into_iter().map(ArrWriter::finish).collect() };
+        let mut e = Component {
+            fam,
+            n,
+            blocks,
+            up_first: up_first_w.finish()?,
+            up_head: up_head_w.finish()?,
+            up: all(up_w)?,
+            down: all(down_w)?,
+            arc_first: arc_first_w.finish()?,
+            arc_head: arc_head_w.finish()?,
+            arc_link: Arr::default(),
+            arc_local: arc_local_w.finish()?,
+            turn_cost: turn_cost_w.finish()?,
+            way: way_w.finish()?,
+            way_dir: way_dir_w.finish()?,
+            way_seq: way_seq_w.finish()?,
+            kind: kind_w.finish()?,
+            time_s: time_s_w.into_iter().map(ArrWriter::finish).collect::<Result<_>>()?,
+            w: all(w_w)?,
+            copy_of: copy_of_w.finish()?,
+            copy_first: copy_first_w.finish()?,
+            copies: copies_w.finish()?,
+        };
+        let raw_links = raw_links.finish()?;
         // Arc links: pack-local in the pack of the lower node → component-local.
+        let mut arc_link = ArrWriter::new(sc)?;
         let mut tail = 0u32;
         for a in 0..e.arc_head.len() {
             while e.arc_first[tail as usize + 1] as usize <= a {
@@ -562,7 +601,7 @@ impl Runtime {
             let h = e.arc_head[a];
             if raw == NONE {
                 ensure!(h == tail, "{f} component {x}: a NONE link on an arc {tail} -> {h}");
-                e.arc_link.push(NONE);
+                arc_link.push(NONE)?;
                 continue;
             }
             let lo = tail.max(h);
@@ -570,8 +609,9 @@ impl Runtime {
             let local = e.up_first[bl.id_first as usize] + (raw as u64 - bl.pack_link_first);
             let expect = e.link(tail, h).with_context(|| format!("{f} component {x}: arc {tail} -> {h} has no link"))?;
             ensure!(local as usize == expect, "{f} component {x}: arc {tail} -> {h} names link {local}, not {expect}");
-            e.arc_link.push(local as u32);
+            arc_link.push(local as u32)?;
         }
+        e.arc_link = arc_link.finish()?;
         Ok(e)
     }
 }

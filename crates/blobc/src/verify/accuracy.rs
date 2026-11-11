@@ -75,7 +75,7 @@ pub fn main(a: Vec<String>) -> Result<()> {
         // The ways of each component but the largest, which would take long to load.
         let mut ways: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
         for &x in apart.keys().flat_map(|(x, y)| [x, y]).filter(|&&x| x != 0) {
-            let mut w = rt.component(mv.info.fam, x)?.way.clone();
+            let mut w = rt.component(mv.info.fam, x)?.way.to_vec();
             w.sort_unstable();
             w.dedup();
             ways.insert(x, w);
@@ -116,7 +116,7 @@ pub fn main(a: Vec<String>) -> Result<()> {
     }
     let groups: Vec<(&str, Vec<usize>)> = by_origin.into_iter().collect();
     // Per pair: Ok(seconds) or the answer's reason.
-    let answers: Vec<Vec<(usize, Result<f64, String>)>> = groups
+    let answers: Vec<Vec<(usize, Result<f64, String>)>> = crate::verify::columns_at_once(&rt, m, || groups
         .par_iter()
         .map(|(o, ks)| -> Result<_> {
             let src = match rt.resolve(o).and_then(|i| rt.served(i, m).map(|_| i)) {
@@ -140,7 +140,7 @@ pub fn main(a: Vec<String>) -> Result<()> {
                 })
                 .collect())
         })
-        .collect::<Result<_>>()?;
+        .collect::<Result<_>>())?;
     let mut ok: Vec<(f64, f64)> = Vec::new();
     let mut missed: BTreeMap<String, u64> = BTreeMap::new();
     for (k, r) in answers.into_iter().flatten() {

@@ -33,6 +33,7 @@ fn toy_and_viaway_verify() {
             data: data.clone(),
             golden: Some(dir.join("golden")),
             mutants: true,
+            golden_only: false,
             work: dir.join("work"),
         };
         let v = verify(&out, &o).unwrap();

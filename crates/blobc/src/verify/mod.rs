@@ -40,6 +40,8 @@ pub struct Options {
     /// The golden root: files live in `<root>/<tier>/<inputs>/`. Written when absent.
     pub golden: Option<PathBuf>,
     pub mutants: bool,
+    /// Only the golden queries, written and replayed: no other check.
+    pub golden_only: bool,
     /// Scratch space for mutant models.
     pub work: PathBuf,
 }
@@ -172,6 +174,21 @@ pub fn work_dir(model: &Path, what: &str) -> PathBuf {
     model.with_file_name(format!("{name}.{what}-work"))
 }
 
+/// The memory for the runtime columns of one check in flight at once: each holds an answer
+/// per ID and a label per node of its component, so that on a continent fewer run at a time
+/// than there are threads (SPEC §10).
+pub(crate) const COLUMN_MEMORY: u64 = 6 << 30;
+
+/// Runs `f`, whose parallel loop computes columns of mode `k`, on as many threads as such
+/// columns fit in `COLUMN_MEMORY`.
+pub fn columns_at_once<R: Send>(rt: &Runtime, k: usize, f: impl FnOnce() -> R + Send) -> R {
+    let t = &rt.tables[&rt.vocab.modes[k].info.fam];
+    let largest = (0..t.components() as u32).map(|x| t.nodes(x)).max().unwrap_or(0) as u64;
+    let per = 2 * (rt.vocab.n() as u64 + largest) + 1;
+    let threads = (COLUMN_MEMORY / per).clamp(1, rayon::current_num_threads() as u64) as usize;
+    rayon::ThreadPoolBuilder::new().num_threads(threads).build().expect("a thread pool").install(f)
+}
+
 /// Runs a check suite, turning an error into a mismatch of its own.
 fn guarded(rep: &mut Report, name: &str, f: impl FnOnce(&mut Report) -> Result<()>) {
     if let Err(e) = f(rep) {
@@ -180,7 +197,8 @@ fn guarded(rep: &mut Report, name: &str, f: impl FnOnce(&mut Report) -> Result<(
 }
 
 pub fn verify(model: &Path, o: &Options) -> Result<Verified> {
-    let rt = Runtime::open(model)?;
+    // The runtime's vocabulary and components in mapped files, out of the process (SPEC §10).
+    let rt = Runtime::open_in(model, Some(&o.work.join("runtime")))?;
     let tf = tier::TierFile::read(&o.tier_file)?;
     anyhow::ensure!(tf.tier == o.tier, "{}: a tier file for {}, not {}", o.tier_file.display(), tf.tier, o.tier);
     let set = tf.find(&rt.manifest)?;
@@ -194,7 +212,9 @@ pub fn verify(model: &Path, o: &Options) -> Result<Verified> {
     };
     let n = Samples::for_tier(&o.tier);
     let mut report = Report::default();
-    guarded(&mut report, "checks", |rep| model_checks(&rt, true, rep));
+    if !o.golden_only {
+        guarded(&mut report, "checks", |rep| model_checks(&rt, true, rep));
+    }
     // The tiny tier is checked with both families at once, as its facts and its mutants span
     // them; a larger tier one family at a time, each reference dropped before the next. The
     // golden queries span the families too (chained trips), so writing them takes both.
@@ -206,6 +226,9 @@ pub fn verify(model: &Path, o: &Options) -> Result<Verified> {
     let mut passes: Vec<(&[Fam], bool)> = if o.tier == "tiny" { vec![(BOTH, true)] } else { vec![(&[Fam::Car], true), (&[Fam::Active], true)] };
     if (write_golden || o.mutants) && passes.len() > 1 {
         passes.push((BOTH, false));
+    }
+    if o.golden_only {
+        passes = vec![(BOTH, false)];
     }
     let mut golden_written = None;
     let mut mutants = Vec::new();

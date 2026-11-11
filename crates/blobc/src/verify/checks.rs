@@ -275,9 +275,9 @@ pub fn recustomization(rt: &Runtime, rep: &mut Report) -> Result<()> {
             for m in 0..e.up.len() {
                 o.count();
                 let w = &stored.w[m][x as usize];
-                o.expect(*w == e.w[m], || format!("component {x} metric {m}: re-rounded weights differ"));
+                o.expect(w[..] == e.w[m][..], || format!("component {x} metric {m}: re-rounded weights differ"));
                 let (up, down) = customize(&e, w)?;
-                o.expect(up == e.up[m] && down == e.down[m], || format!("component {x} metric {m}: re-customized links differ"));
+                o.expect(up[..] == e.up[m][..] && down[..] == e.down[m][..], || format!("component {x} metric {m}: re-customized links differ"));
             }
             drop(e);
             rt.release();
@@ -335,7 +335,7 @@ pub fn distances(rt: &Runtime, ex: &Expected, n: &Samples, rep: &mut Report) -> 
             cases.push((src.clone(), Dir::From, "from"));
             cases.push((src, Dir::To, "to"));
         }
-        let results: Vec<Result<Option<String>>> = cases
+        let results: Vec<Result<Option<String>>> = crate::verify::columns_at_once(rt, k, || cases
             .par_iter()
             .map(|(src, dir, name)| {
                 let got = rt.column(&src.iter().map(|&(s, st)| Source { id: s as u32, start: st }).collect::<Vec<_>>(), k, *dir)?;
@@ -346,7 +346,7 @@ pub fn distances(rt: &Runtime, ex: &Expected, n: &Samples, rep: &mut Report) -> 
                     format!("{name} {from:?} to {}: {} != {}", uuid(&r.ids[i]), got[i], want[i])
                 }))
             })
-            .collect();
+            .collect());
         for res in results {
             o.count();
             if let Some(f) = res? {
@@ -355,7 +355,7 @@ pub fn distances(rt: &Runtime, ex: &Expected, n: &Samples, rep: &mut Report) -> 
         }
         let o = rep.check(&format!("{}: travel_time and reasons", mode.name));
         let sample: Vec<usize> = (0..r.n()).step_by(r.n().div_ceil(n.pairs).max(1)).collect();
-        let results: Vec<Result<Vec<Option<String>>>> = sample
+        let results: Vec<Result<Vec<Option<String>>>> = crate::verify::columns_at_once(rt, k, || sample
             .par_iter()
             .map(|&a| {
                 sample
@@ -368,7 +368,7 @@ pub fn distances(rt: &Runtime, ex: &Expected, n: &Samples, rep: &mut Report) -> 
                     })
                     .collect()
             })
-            .collect();
+            .collect());
         for res in results {
             for f in res? {
                 o.count();
@@ -449,7 +449,7 @@ pub fn via_copies(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()> {
             _ => no_source += 1,
         }
     }
-    let results: Vec<Result<Option<String>>> = cases
+    let results: Vec<Result<Option<String>>> = crate::verify::columns_at_once(rt, k, || cases
         .par_iter()
         .map(|&(s, t)| {
             let want = ex.car_pair(s, t);
@@ -458,7 +458,7 @@ pub fn via_copies(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()> {
             Ok((from != want || to != want)
                 .then(|| format!("{} -> {}: from {from}, to {to}, reference {want}", uuid(&r.ids[s]), uuid(&r.ids[t]))))
         })
-        .collect();
+        .collect());
     let o = rep.check(&format!(
         "car: every via-way prefix, both directions ({} prefixes; {no_target} with no ID on the copied segment, {no_source} with no ID before it)",
         prefixes.len()
@@ -529,7 +529,7 @@ pub fn via_segments(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()>
         m.into_values().collect()
     };
     let missing = |s: u32| anyhow::anyhow!("car segment {s} (way {}) has no node in its component", g.way[s as usize]);
-    let from: Vec<Result<Vec<(usize, u16)>>> = group(|p| p.0)
+    let from: Vec<Result<Vec<(usize, u16)>>> = crate::verify::columns_at_once(rt, k, || group(|p| p.0)
         .par_iter()
         .map(|ks| {
             let a = pairs[ks[0]].0;
@@ -541,8 +541,8 @@ pub fn via_segments(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()>
                 })
                 .collect()
         })
-        .collect();
-    let to: Vec<Result<Vec<(usize, u16)>>> = group(|p| p.1)
+        .collect());
+    let to: Vec<Result<Vec<(usize, u16)>>> = crate::verify::columns_at_once(rt, k, || group(|p| p.1)
         .par_iter()
         .map(|ks| {
             let b = pairs[ks[0]].1;
@@ -556,7 +556,7 @@ pub fn via_segments(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()>
                 })
                 .collect()
         })
-        .collect();
+        .collect());
     let o = rep.check(&format!(
         "car: every via-way copy, segment to segment, both directions ({} prefixes, {} first and last segment pairs; {elsewhere} with the first segment in another component)",
         prefixes.len(),

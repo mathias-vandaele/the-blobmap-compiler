@@ -3,6 +3,7 @@
 //! (upward by decreasing layout id, downward by increasing id, FORMAT §8), and the
 //! operations of SPEC §9 are evaluated exactly, in integers.
 
+pub mod arr;
 pub mod model;
 pub mod ops;
 pub mod query;
