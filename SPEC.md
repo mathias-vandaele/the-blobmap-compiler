@@ -55,12 +55,14 @@ Place rules (defaults, kept in versioned config; the config hash goes into the m
 
 Each build writes a data report, outside the model directory (§8): `<model dir>.data-report.json`, next to the model directory.
 - **Place counts** per country and basic category, compared with the previous build's data report and flagging any change above 20 %. The previous report is passed as `--previous-report <file>` (§10); without it there is no comparison.
+- **Coverage** per country: the addresses and places in the model, and the countries with places but no address. Overture has no addresses for some countries (Great Britain and India in release 2026-10-21.0), so the gap shows at every scale.
 - **Trapped components** (§5), which usually point at OSM errors: every one, sorted by size, with its node count, the number of IDs whose nearest eligible piece lies in it, and one OSM way id, so the large ones can be fixed in OSM. Provider score distributions drift between releases, so the rules are reviewed against this report every month.
 - **Small components** (§6), per mode, each with its node count and one OSM way id, sorted by IDs:
   - every component that IDs were moved away from, with the IDs moved and the IDs left on it;
   - every component other than the largest that still serves IDs: the real islands, and fragments with no larger component in reach, usually OSM errors to fix;
   - every real island the rule emptied: a small island within the radius of a larger component loses its IDs to it (§6), as Île de la Dérivation, Île Callot and Île des Embiez do for car in France.
-  - Each component listed is marked with the real island it stands on, if any: the smallest OSM island polygon (`place=island|islet`, or a closed coastline way) around one of its pieces, when that polygon holds no servable piece of a larger component.
+  - Each component listed is marked with the real island it stands on, if any. Each of its servable pieces counts for the smallest OSM island polygon (`place=island|islet`, or a closed coastline way) around it, or for none; the polygon holding the most of them, ties to none and then to the first polygon read, is a real island when it holds no servable piece of a larger component. So a component mostly on the mainland, with a few pieces on an island it reaches by bridge, stands on no island.
+- **Driving side** (§4, turns): the car segments keeping left and keeping right, each split by what decided it (the way's `driving_side` tag, or the polygon its last node lies in), and the 1° cells holding the side fewer segments keep, with one way each.
 - **Dead-end restrictions** (§5): every via-way restriction whose prefix copy has no turn out, with its relation id and the copied segment's way, usually a mis-tagged restriction.
 
 ## 4. Modes and profiles

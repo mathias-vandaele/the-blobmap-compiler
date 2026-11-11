@@ -50,7 +50,12 @@ pub struct Address {
     pub lon: f64,
     /// Index of the row's source licences in `Catalog::license_sets`.
     pub license: u32,
+    /// Its country, as a number in `Catalog::strings` (`NO_STR` if none).
+    pub country: u32,
 }
+
+// The planet's addresses are held in memory, 40 bytes each (SPEC §10).
+const _: () = assert!(std::mem::size_of::<Address>() == 40);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Place {
@@ -95,7 +100,7 @@ pub struct Catalog {
     pub places: Vec<Place>,
     /// The places' alternate categories: per place ascending, without the primary.
     pub alts: Vec<u16>,
-    /// The country codes and category keys places point to.
+    /// The country codes and category keys addresses and places point to.
     pub strings: Vec<String>,
     /// Merged duplicates and the index in `places` of the place kept, sorted by ID.
     pub aliases: Vec<(Id, u32)>,
@@ -159,7 +164,7 @@ impl Catalog {
         let kept: Vec<u32> = (0..places.len() as u32).filter(|&k| places[k as usize].status == 0).collect();
         let merges = places::dedup(&raw, &kept, rules.duplicates.radius_m);
         stats.merged = merges.len() as u64;
-        let strings = raw.strings.clone();
+        let mut strings = raw.strings.clone();
         drop(raw);
         let mut to = vec![u32::MAX; places.len()];
         for &(m, k) in &merges {
@@ -182,7 +187,7 @@ impl Catalog {
         let mut aliases: Vec<(Id, u32, u32)> = alias_raw.iter().map(|(a, k, l)| (*a, index(k).expect("kept place"), *l)).collect();
         drop(alias_raw);
         aliases.par_sort_unstable();
-        let mut addresses = release.read_addresses(keep, &lic)?;
+        let mut addresses = release.read_addresses(keep, &lic, &mut strings)?;
         stats.addresses = addresses.len() as u64;
         // Licence sets, in sorted order.
         let (license_sets, license_at) = lic.sorted();

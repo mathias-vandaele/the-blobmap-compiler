@@ -189,6 +189,9 @@ pub struct Pieces {
     /// Pieces cut because a master time exceeded the cap (SPEC §7), and the parts made.
     pub cut: usize,
     pub cut_parts: usize,
+    /// The ways whose `driving_side` tag decides their side, sorted (the data report tells
+    /// them from the ways a polygon decides).
+    pub side_tagged: Vec<i64>,
 }
 
 impl Pieces {
@@ -578,6 +581,7 @@ impl<'o, A: Copy + Send + Sync + Speeds> Network<'o, A> {
             missing_coords: missing,
             cut,
             cut_parts,
+            side_tagged: self.ways.iter().filter(|w| !w.by_location).map(|w| w.id).collect(),
         })
     }
 

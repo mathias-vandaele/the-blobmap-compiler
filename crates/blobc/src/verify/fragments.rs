@@ -8,7 +8,7 @@
 //! Real islands are those of `snap::islands`; IDs moved off one go to a larger component
 //! within the radius (SPEC §6), and the data report lists every island so emptied.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::profile::config::Config;
@@ -95,12 +95,8 @@ pub fn main(a: Vec<String>) -> Result<()> {
             }
         }
         // The real island each component serving IDs stands on, if any.
-        let mut asked: BTreeMap<u32, u32> = BTreeMap::new();
-        for (&x, &(_, k)) in before.iter().chain(after.iter()) {
-            let a = asked.entry(x).or_insert(k);
-            *a = (*a).min(k);
-        }
-        let island_of = islands.real(p, sets, &e.nodes, &asked);
+        let asked: BTreeSet<u32> = before.keys().chain(after.keys()).copied().collect();
+        let island_of = islands.real(p, sets, &e.nodes, &asked, &component);
         let on_island = |x: u32| island_of[&x];
         let label = |x: u32| island_of[&x].map_or("–".to_string(), |j| islands.all[j as usize].label.clone());
         let sum = |map: &BTreeMap<u32, (u64, u32)>, island: bool| -> u64 {

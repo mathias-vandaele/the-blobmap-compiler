@@ -1,12 +1,12 @@
 //! Islands (SPEC §3, §6): the island polygons of a `.pbf`, and which small components stand on
 //! a real island.
 //!
-//! A component is on a real island when the smallest island polygon around one of its pieces
-//! (OSM `place=island|islet`, or a closed `natural=coastline` way) holds no servable piece of
-//! a larger component of the family. An island with a road to the rest holds the larger
+//! A component is on a real island when the island polygon (OSM `place=island|islet`, or a
+//! closed `natural=coastline` way) holding most of its pieces holds no servable piece of a
+//! larger component of the family. An island with a road to the rest holds the larger
 //! component; a fragment on it is no island.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -18,6 +18,9 @@ use crate::osm::nodes::MISSING;
 use crate::osm::{Osm, Pieces};
 use crate::osm::geo::{lon_shifts, unwrap_ring};
 use crate::snap::Sets;
+
+/// A piece in no island polygon.
+const NO_ISLAND: u32 = u32::MAX;
 
 /// Cell size of the polygon index, in degrees.
 const CELL: f64 = 0.05;
@@ -227,11 +230,37 @@ impl Islands {
     pub fn smallest(&self, pt: (f64, f64)) -> Option<u32> {
         self.around(pt).min_by(|&a, &b| self.all[a as usize].area.total_cmp(&self.all[b as usize].area).then(a.cmp(&b)))
     }
-    /// Per component asked, with one of its pieces, the island it stands on if that is a real
-    /// one: the smallest island polygon around the piece's first point, when the polygon holds
-    /// no servable piece of a larger component.
-    pub fn real(&self, p: &Pieces, sets: &dyn Sets, nodes: &[u32], asked: &BTreeMap<u32, u32>) -> BTreeMap<u32, Option<u32>> {
-        let around: BTreeMap<u32, Option<u32>> = asked.iter().map(|(&x, &k)| (x, self.smallest(first_point(p, k)))).collect();
+    /// Per component asked, the island it stands on if that is a real one. Each servable
+    /// piece of the component counts for the smallest island polygon around its first point,
+    /// or for none; the polygon holding the most of them wins (ties to none, then to the first
+    /// polygon read), and is a real island when it holds no servable piece of a larger
+    /// component. `component` gives a servable piece's component.
+    pub fn real(&self, p: &Pieces, sets: &dyn Sets, nodes: &[u32], asked: &BTreeSet<u32>, component: &(dyn Fn(u32) -> u32 + Sync)) -> BTreeMap<u32, Option<u32>> {
+        let counts: BTreeMap<(u32, u32), u64> = (0..p.len() as u32)
+            .into_par_iter()
+            .filter(|&k| sets.servable(k))
+            .filter_map(|k| {
+                let x = component(k);
+                asked.contains(&x).then(|| (x, self.smallest(first_point(p, k)).unwrap_or(NO_ISLAND)))
+            })
+            .fold(BTreeMap::new, |mut m, key| {
+                *m.entry(key).or_insert(0) += 1;
+                m
+            })
+            .reduce(BTreeMap::new, |mut a, b| {
+                for (key, n) in b {
+                    *a.entry(key).or_insert(0) += n;
+                }
+                a
+            });
+        let mut most: BTreeMap<u32, (u64, u32)> = BTreeMap::new();
+        for (&(x, j), &n) in &counts {
+            let m = most.entry(x).or_insert((n, j));
+            if n > m.0 || (n == m.0 && j == NO_ISLAND) {
+                *m = (n, j);
+            }
+        }
+        let around: BTreeMap<u32, Option<u32>> = asked.iter().map(|&x| (x, most.get(&x).map(|m| m.1).filter(|&j| j != NO_ISLAND))).collect();
         let mut wanted = vec![false; self.all.len()];
         around.values().flatten().for_each(|&j| wanted[j as usize] = true);
         // Per island polygon asked about: the largest component with a servable piece in it.

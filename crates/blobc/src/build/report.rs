@@ -1,11 +1,12 @@
 //! The data report (SPEC §3), written next to the model directory: place counts per country
-//! and basic category, compared with `--previous-report`; served counts and reasons per mode;
+//! and basic category, compared with `--previous-report`; addresses and places per country,
+//! and the countries without addresses; served counts and reasons per mode;
 //! every trapped component; the small components IDs were moved away from, the components
 //! other than the largest that still serve IDs (SPEC §6), and the real islands emptied, with
 //! the island each stands on; restrictions whose prefix copy has no exit; places without a
 //! category.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -29,6 +30,19 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
             *places.entry(country).or_default().entry(c.str(p.basic_key).unwrap_or("none").to_string()).or_default() += 1;
         }
     }
+    // Coverage per country (SPEC §3): the addresses and places in the model, and the
+    // countries with places but no address, where Overture has none.
+    let mut coverage: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    for &i in &ids.addresses {
+        coverage.entry(c.str(c.addresses[i].country).unwrap_or("none").to_string()).or_default().0 += 1;
+    }
+    for &p in &ids.places {
+        let p = &c.places[p];
+        if p.status == 0 {
+            coverage.entry(c.str(p.country).unwrap_or("none").to_string()).or_default().1 += 1;
+        }
+    }
+    let no_addresses: Vec<&String> = coverage.iter().filter(|(k, n)| *k != "none" && n.0 == 0).map(|(k, _)| k).collect();
     let mut trapped = serde_json::Map::new();
     for fam in [f.car as &dyn Family, f.active] {
         let e = fam.components();
@@ -90,12 +104,8 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
             v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
             v
         };
-        let mut asked: BTreeMap<u32, u32> = BTreeMap::new();
-        for (&x, &(_, _, k)) in from.iter().chain(on.iter()).filter(|(x, _)| **x != 0) {
-            let a = asked.entry(x).or_insert(k);
-            *a = (*a).min(k);
-        }
-        let real = islands.real(p, &membership(f, mode), &e.nodes, &asked);
+        let asked: BTreeSet<u32> = from.keys().chain(on.keys()).copied().filter(|&x| x != 0).collect();
+        let real = islands.real(p, &membership(f, mode), &e.nodes, &asked, &|k| component(k).expect("servable"));
         let island = |x: u32| real.get(&x).copied().flatten().map(|j| islands.all[j as usize].label.clone());
         let ids_on = |x: u32| on.get(&x).map_or(0, |b| b.0);
         let rows: Vec<Value> = sorted(&from)
@@ -124,6 +134,30 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
             json!({"relation": rel, "way": g.way[c], "way_seq": g.seq[c], "way_dir": g.dir[c]})
         })
         .collect();
+    // The side car traffic keeps (SPEC §4, turns), per segment: by the way's `driving_side`
+    // tag or by the polygon its last node lies in; and where the side fewer segments keep
+    // lies, per 1° cell, with one way each.
+    let cp = f.car.p;
+    let mut side = [[0u64; 2]; 2];
+    let mut cells: BTreeMap<(i32, i32), ([u64; 2], i64)> = BTreeMap::new();
+    let segs = &g.piece[..g.stats.segments];
+    let tagged = |q: usize| cp.side_tagged.binary_search(&cp.way[q]).is_ok();
+    for &q in segs {
+        side[cp.left[q as usize] as usize][tagged(q as usize) as usize] += 1;
+    }
+    let minority_left = side[1][0] + side[1][1] <= side[0][0] + side[0][1];
+    for &q in segs {
+        let q = q as usize;
+        if cp.left[q] == minority_left {
+            let (la, lo) = crate::snap::islands::first_point(cp, q as u32);
+            let e = cells.entry((la.floor() as i32, lo.floor() as i32)).or_insert(([0; 2], i64::MAX));
+            e.0[tagged(q) as usize] += 1;
+            e.1 = e.1.min(cp.way[q]);
+        }
+    }
+    let mut cells: Vec<((i32, i32), ([u64; 2], i64))> = cells.into_iter().collect();
+    cells.sort_by(|a, b| (b.1.0[0] + b.1.0[1]).cmp(&(a.1.0[0] + a.1.0[1])).then(a.0.cmp(&b.0)));
+    let cells: Vec<Value> = cells.iter().map(|&((la, lo), ([by_polygon, by_tag], way))| json!({"lat": la, "lon": lo, "by_tag": by_tag, "by_polygon": by_polygon, "way": way})).collect();
     let s = &c.stats;
     Ok(json!({
         "inputs": {"pbf": a.pbf.file_name().map(|n| n.to_string_lossy().into_owned()), "overture": c.release},
@@ -141,6 +175,8 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
             "primary_none": s.primary_none,
             "missing_keys": s.missing_keys,
         },
+        "coverage": coverage.iter().map(|(k, n)| (k.clone(), json!({"addresses": n.0, "places": n.1}))).collect::<serde_json::Map<_, _>>(),
+        "no_addresses": no_addresses,
         "places": places,
         "served": served,
         "trapped": trapped,
@@ -148,7 +184,16 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
         "served_components": left,
         "islands_emptied": emptied,
         "dead_end_restrictions": dead_ends,
-        "car_segments": {"all": g.stats.segments, "keeping_left": g.stats.left_segments},
+        "car_segments": {
+            "all": g.stats.segments,
+            "keeping_left": g.stats.left_segments,
+            "left_by_tag": side[1][1],
+            "left_by_polygon": side[1][0],
+            "right_by_tag": side[0][1],
+            "right_by_polygon": side[0][0],
+            "minority": if minority_left { "left" } else { "right" },
+            "minority_cells": cells,
+        },
         "previous": previous,
     }))
 }

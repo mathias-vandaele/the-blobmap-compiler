@@ -78,17 +78,7 @@ impl RawPlaces {
 
     /// Appends a batch, its local string numbers turned into this table's.
     fn append(&mut self, b: RawPlaces, index: &mut HashMap<String, u32>) {
-        let global: Vec<u32> = b
-            .strings
-            .into_iter()
-            .map(|s| {
-                let next = self.strings.len() as u32;
-                *index.entry(s).or_insert_with_key(|s| {
-                    self.strings.push(s.clone());
-                    next
-                })
-            })
-            .collect();
+        let global = intern(&mut self.strings, index, b.strings);
         let g = |k: u32| if k == NO_STR { NO_STR } else { global[k as usize] };
         self.rows.extend(b.rows.into_iter().map(|r| RawPlace { primary: g(r.primary), basic: g(r.basic), status: g(r.status), country: g(r.country), ..r }));
         let (a0, n0) = (self.alts.len() as u64, self.names.len() as u64);
@@ -97,6 +87,20 @@ impl RawPlaces {
         self.names.extend_from_slice(&b.names);
         self.name_first.extend(b.name_first[1..].iter().map(|&x| n0 + x));
     }
+}
+
+/// A batch's strings as numbers in `strings`, which takes those it lacks in order.
+fn intern(strings: &mut Vec<String>, index: &mut HashMap<String, u32>, local: Vec<String>) -> Vec<u32> {
+    local
+        .into_iter()
+        .map(|s| {
+            let next = strings.len() as u32;
+            *index.entry(s).or_insert_with_key(|s| {
+                strings.push(s.clone());
+                next
+            })
+        })
+        .collect()
 }
 
 /// An empty category key or country is none.
@@ -177,23 +181,29 @@ impl Release {
     }
 
     /// The address rows `keep` accepts, in file order, each licence set as its number in
-    /// `lic`.
-    pub fn read_addresses(&self, keep: &(dyn Fn(f64, f64) -> bool + Sync), lic: &Licenses) -> Result<Vec<Address>> {
+    /// `lic` and its country as a number in `strings`, which takes the countries it lacks.
+    pub fn read_addresses(&self, keep: &(dyn Fn(f64, f64) -> bool + Sync), lic: &Licenses, strings: &mut Vec<String>) -> Result<Vec<Address>> {
         let mut out = Vec::new();
+        let mut index: HashMap<String, u32> = strings.iter().enumerate().map(|(k, s)| (s.clone(), k as u32)).collect();
         let read = |b: &RecordBatch, first: usize| {
             let id = b.column(0).as_string::<i32>();
             let geom = b.column(1).as_binary::<i32>();
             let sources = b.column(2).as_list::<i32>();
-            let mut out = Vec::new();
+            let country = b.column(3).as_string::<i32>();
+            let (mut out, mut local) = (Vec::new(), Local::default());
             for i in 0..b.num_rows() {
                 let (lat, lon) = wkb_point(geom.value(i)).with_context(|| format!("address row {}", first + i))?;
                 if keep(lat, lon) {
-                    out.push(Address { id: parse_uuid(id.value(i))?, lat, lon, license: lic.number(licenses(sources, i)?) });
+                    let (id, license) = (parse_uuid(id.value(i))?, lic.number(licenses(sources, i)?));
+                    out.push(Address { id, lat, lon, license, country: local.of(key(s(country, i))) });
                 }
             }
-            Ok(out)
+            Ok((out, local.1))
         };
-        read_groups(&self.addresses(), &["id", "geometry", "sources"], read, |b: Vec<Address>| out.extend(b))?;
+        read_groups(&self.addresses(), &["id", "geometry", "sources", "country"], read, |(b, local): (Vec<Address>, Vec<String>)| {
+            let global = intern(strings, &mut index, local);
+            out.extend(b.into_iter().map(|a| Address { country: if a.country == NO_STR { NO_STR } else { global[a.country as usize] }, ..a }));
+        })?;
         Ok(out)
     }
 
