@@ -67,6 +67,13 @@ impl ActiveGraph {
         self.piece.len()
     }
 
+    /// Drops what only the order, the hierarchy and the road part read, once the family's road
+    /// units are written: the vocabulary and the data report read the rest.
+    pub fn shed(&mut self) {
+        (self.tail, self.head) = Default::default();
+        (self.way, self.seq, self.dir) = Default::default();
+    }
+
     /// The components of the union graph (SPEC §5). Ties go to the component with the smallest
     /// (way, way_seq, way_dir, end) over the roads at its nodes, `end` 0 for the road's tail
     /// and 1 for its head.

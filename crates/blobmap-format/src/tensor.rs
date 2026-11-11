@@ -33,6 +33,12 @@ impl Tensor {
         Tensor::new(&[data.len() as u64 / width, width], data)
     }
 
+    /// A `U8` tensor that takes its bytes without copying them.
+    pub fn of_bytes(shape: &[u64], data: Vec<u8>) -> Tensor {
+        assert_eq!(shape.iter().product::<u64>(), data.len() as u64, "tensor shape {shape:?} does not hold {} bytes", data.len());
+        Tensor { dtype: Dtype::U8, shape: shape.to_vec(), data }
+    }
+
     /// Bytes per index of dimension 0 (FORMAT §2.2).
     pub fn row_bytes(&self) -> u64 {
         self.shape.iter().skip(1).product::<u64>() * self.dtype.size() as u64

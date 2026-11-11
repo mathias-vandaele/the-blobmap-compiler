@@ -15,7 +15,7 @@ pub mod writer;
 pub use hash::Hash;
 pub use reader::Model;
 pub use tensor::{Tensor, Unit};
-pub use writer::{ModelWriter, ShardLimits};
+pub use writer::{ModelWriter, ShardLimits, UnitWritten};
 
 /// The format name and version this crate reads and writes (FORMAT §12).
 pub const FORMAT: &str = "blobmap-model";

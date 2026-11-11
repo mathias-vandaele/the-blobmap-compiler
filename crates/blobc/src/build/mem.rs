@@ -18,6 +18,12 @@ pub fn rss() -> Option<u64> {
     status_bytes("VmRSS:")
 }
 
+/// Anonymous resident memory in bytes now: the resident set without mapped files' pages,
+/// which the kernel can drop and read back.
+pub fn anon() -> Option<u64> {
+    status_bytes("RssAnon:")
+}
+
 /// Gives the allocator's free memory back to the system (glibc keeps it per thread arena
 /// otherwise, and a later stage cannot reuse another arena's holes).
 pub fn trim() {

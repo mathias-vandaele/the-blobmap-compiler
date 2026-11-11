@@ -61,17 +61,27 @@ impl Found {
 /// What a build keeps of a `Found`: whether any piece of the family's graph is within the
 /// radius, the outcome, and for the data report a trapped component and the nearest servable
 /// piece when a larger component won over it (`u32::MAX` for none).
+///
+/// Kept per ID and mode in a column on disk (SPEC §10, memory): 24 bytes, no padding.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
 pub struct Snapped {
-    pub any: bool,
-    /// The reason code when not served, else 0.
-    pub code: u8,
+    /// The fraction along the piece when served, else the reason's distance in metres.
+    x: f64,
     pub piece: u32,
     pub trapped: u32,
     pub moved_from: u32,
-    pub reason_m: f32,
-    pub frac: f64,
+    /// The reason code when not served, else 0.
+    pub code: u8,
+    pub any: bool,
+    _pad: [u8; 2],
 }
+
+const _: () = assert!(std::mem::size_of::<Snapped>() == 24);
+
+// SAFETY: `repr(C)` with every byte a field (the padding is a field, always zero), `any`
+// only ever 0 or 1.
+unsafe impl crate::osm::column::Plain for Snapped {}
 
 impl Snapped {
     pub fn new(f: &Found, trapped: u32) -> Snapped {
@@ -79,16 +89,16 @@ impl Snapped {
             (Some(n), Some(s)) if n.piece != s.piece => n.piece,
             _ => u32::MAX,
         };
-        let base = Snapped { any: f.any.is_some(), code: 0, piece: u32::MAX, trapped, moved_from, reason_m: 0.0, frac: 0.0 };
+        let base = Snapped { x: 0.0, piece: u32::MAX, trapped, moved_from, code: 0, any: f.any.is_some(), _pad: [0; 2] };
         match f.outcome() {
-            Ok(h) => Snapped { piece: h.piece, frac: h.frac, ..base },
-            Err((code, m)) => Snapped { code, reason_m: m, ..base },
+            Ok(h) => Snapped { piece: h.piece, x: h.frac, ..base },
+            Err((code, m)) => Snapped { code, x: m as f64, ..base },
         }
     }
 
     /// The piece and fraction to serve on, or the reason and its distance.
     pub fn outcome(&self) -> Result<(u32, f64), (u8, f32)> {
-        if self.code == 0 { Ok((self.piece, self.frac)) } else { Err((self.code, self.reason_m)) }
+        if self.code == 0 { Ok((self.piece, self.x)) } else { Err((self.code, self.x as f32)) }
     }
 }
 

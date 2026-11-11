@@ -92,12 +92,37 @@ pub struct CarGraph {
     /// The turns before any restriction, by the original segment they leave, and the
     /// restrictions as forbidden sequences of original segments: what an independent
     /// turn-aware Dijkstra needs (SPEC §11).
-    pub base: Vec<Vec<(u32, u16)>>,
+    pub base: BaseTurns,
     pub forbidden: Vec<Vec<u32>>,
     /// Restrictions with a prefix copy that has no turn out, likely mis-tagged (data
     /// report): (relation id, the copy), sorted.
     pub dead_ends: Vec<(i64, u32)>,
     pub stats: CarStats,
+}
+
+/// Turns by the original segment they leave, CSR: the segment entered and the cost.
+#[derive(Clone, Debug, Default)]
+pub struct BaseTurns {
+    first: Vec<u64>,
+    to: Vec<u32>,
+    cost: Vec<u16>,
+}
+
+impl BaseTurns {
+    /// The segments they leave.
+    pub fn len(&self) -> usize {
+        self.first.len().saturating_sub(1)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The turns leaving segment a: (segment entered, cost).
+    pub fn of(&self, a: usize) -> impl Iterator<Item = (u32, u16)> + '_ {
+        let r = self.first[a] as usize..self.first[a + 1] as usize;
+        self.to[r.clone()].iter().copied().zip(self.cost[r].iter().copied())
+    }
 }
 
 /// The point at distance `d` along piece p.
@@ -214,8 +239,9 @@ impl CarGraph {
         let bear: Vec<[(f64, f64); 2]> = (0..p.len()).map(|i| bearings(p, i)).collect();
         let out = Csr::new(p.node_osm.len(), (0..s as u32).map(|k| (g.tail[k as usize], k)));
         // Base turns, by the segment they leave.
-        let mut base: Vec<Vec<(u32, u16)>> = vec![Vec::new(); s];
-        for (a, ta) in base.iter_mut().enumerate() {
+        let mut base = BaseTurns { first: Vec::with_capacity(s + 1), ..BaseTurns::default() };
+        base.first.push(0);
+        for a in 0..s {
             let x = g.head[a] as usize;
             for &b in out.out(x) {
                 let b_ = b as usize;
@@ -235,8 +261,10 @@ impl CarGraph {
                     angle = 180.0;
                 }
                 let c = turn_seconds(turns, &Turn { angle, roads: roads[x], u_turn, left: p.left[g.piece[a] as usize] }).round();
-                ta.push((b, c.min(65534.0) as u16));
+                base.to.push(b);
+                base.cost.push(c.min(65534.0) as u16);
             }
+            base.first.push(base.to.len() as u64);
         }
 
         let (seqs, of_relation) = g.forbidden_sequences(p, &base, restrictions);
@@ -248,7 +276,7 @@ impl CarGraph {
         let mut copy_keys: Vec<Vec<u32>> = Vec::new();
         let mut trans: Vec<(u32, u32, u16)> = Vec::new();
         for a in 0..s as u32 {
-            for &(b, c) in &base[a as usize] {
+            for (b, c) in base.of(a as usize) {
                 match auto.step(&[a], b) {
                     Err(()) => {}
                     Ok(None) => trans.push((a, b, c)),
@@ -268,7 +296,7 @@ impl CarGraph {
             let pkey = copy_keys[k].clone();
             let from = (s + k) as u32;
             let x = *pkey.last().unwrap() as usize;
-            for &(b, c) in &base[x] {
+            for (b, c) in base.of(x) {
                 match auto.step(&pkey, b) {
                     Err(()) => {}
                     Ok(None) => trans.push((from, b, c)),
@@ -340,10 +368,18 @@ impl CarGraph {
         self.piece.len()
     }
 
+    /// Drops what only the order, the hierarchy and the road part read, once the family's road
+    /// units are written: the vocabulary and the data report read the rest.
+    pub fn shed(&mut self) {
+        (self.tail, self.head, self.time) = Default::default();
+        (self.turn_from, self.turn_to, self.turn_cost) = Default::default();
+        (self.base, self.forbidden) = Default::default();
+    }
+
     /// The restrictions as forbidden sequences of original segments (FORMAT §5.3): length 2
     /// for a via node, at least 3 for via ways; `only_*` rewritten as every other exit.
     /// The forbidden sequences, sorted, and every (sequence, relation id), sorted.
-    fn forbidden_sequences(&mut self, p: &Pieces, base: &[Vec<(u32, u16)>], restrictions: &[Restriction]) -> (Vec<Vec<u32>>, Vec<(Vec<u32>, i64)>) {
+    fn forbidden_sequences(&mut self, p: &Pieces, base: &BaseTurns, restrictions: &[Restriction]) -> (Vec<Vec<u32>>, Vec<(Vec<u32>, i64)>) {
         let mut by_way: HashMap<i64, Vec<usize>> = HashMap::new();
         for i in 0..p.len() {
             by_way.entry(p.way[i]).or_default().push(i);
@@ -384,7 +420,7 @@ impl CarGraph {
             }
             for (pre, to) in prefixes {
                 let x = *pre.last().unwrap() as usize;
-                for &(b, _) in &base[x] {
+                for (b, _) in base.of(x) {
                     if to.contains(&b) != r.only {
                         let mut s = pre.clone();
                         s.push(b);

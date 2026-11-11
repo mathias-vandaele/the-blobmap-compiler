@@ -2,14 +2,16 @@
 //! than the shard target is chunked along dimension 0, and inside a shard the data is
 //! ordered by element size so that every tensor is aligned to it.
 //!
-//! Units are written one at a time and dropped by the caller afterwards, so the writer
-//! holds only one unit in memory. Shards get temporary names until `finish`, which knows
+//! Units are written one at a time, each whole or one tensor at a time, so the writer holds
+//! at most one shard's tensors. A unit may be written before one that precedes it in the
+//! model: shards get temporary names until `finish`, which puts them in unit order, knows
 //! their count and renames them `model-0000k-of-0000n.safetensors`.
 
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -34,14 +36,16 @@ impl Default for ShardLimits {
 }
 
 struct ShardOut {
+    /// The slot of its unit (`set_slot`).
+    slot: u32,
     temp: PathBuf,
     bytes: u64,
     sha256: String,
 }
 
-/// One unit, written: its shards (indices into the model's shard list) and the hash of each
-/// of its logical tensors, by full name.
-#[derive(Debug, Clone)]
+/// One unit, written: its shards (in write order) and the hash of each of its logical
+/// tensors, by full name.
+#[derive(Debug, Clone, Default)]
 pub struct UnitWritten {
     pub shards: Vec<usize>,
     pub hashes: BTreeMap<String, Hash>,
@@ -56,6 +60,8 @@ pub struct ModelWriter {
     /// Logical tensor -> its chunks, when chunked.
     chunks: BTreeMap<String, Vec<String>>,
     total_size: u64,
+    slot: u32,
+    open: Option<Open>,
 }
 
 /// The model directory's shard files after `finish`.
@@ -64,13 +70,13 @@ pub struct Written {
 }
 
 /// A piece of a logical tensor that goes into a shard as one physical tensor.
-struct Piece<'a> {
+struct Piece {
     name: String,
-    t: &'a Tensor,
+    t: Arc<Tensor>,
     rows: std::ops::Range<u64>,
 }
 
-impl Piece<'_> {
+impl Piece {
     fn data(&self) -> &[u8] {
         let rb = self.t.row_bytes();
         &self.t.data[(self.rows.start * rb) as usize..(self.rows.end * rb) as usize]
@@ -81,6 +87,15 @@ impl Piece<'_> {
         s[0] = self.rows.end - self.rows.start;
         s
     }
+}
+
+/// The unit being written: its open shard's pieces, its last tensor, and what it wrote.
+#[derive(Default)]
+struct Open {
+    cur: Vec<Piece>,
+    cur_bytes: u64,
+    last: Option<String>,
+    written: UnitWritten,
 }
 
 impl ModelWriter {
@@ -94,22 +109,52 @@ impl ModelWriter {
             weight_map: BTreeMap::new(),
             chunks: BTreeMap::new(),
             total_size: 0,
+            slot: 0,
+            open: None,
         })
     }
 
+    /// Units written from here on take this slot: `finish` orders the shards by slot, and in
+    /// write order within one, so that units may be written out of their order (FORMAT §2.4)
+    /// while a shard never holds two units.
+    pub fn set_slot(&mut self, slot: u32) -> Result<()> {
+        ensure!(self.open.is_none(), "a unit is open");
+        self.slot = slot;
+        Ok(())
+    }
+
     /// Writes one unit: its tensors in full-name order fill new shards (FORMAT §2.4).
-    pub fn write_unit(&mut self, unit: &Unit) -> Result<UnitWritten> {
-        let mut hashes = BTreeMap::new();
-        let mut pieces: Vec<Piece> = Vec::new();
-        for (name, t) in &unit.tensors {
-            t.check().with_context(|| format!("tensor {name}"))?;
-            ensure!(!self.weight_map.contains_key(name) && !self.chunks.contains_key(name), "tensor {name} written twice");
-            hashes.insert(name.clone(), tensor_hash(name, t.dtype, &t.shape, [&t.data[..]]));
-            let rows = t.rows_count();
-            if t.data.len() as u64 <= self.limits.target {
-                pieces.push(Piece { name: name.clone(), t, rows: 0..rows });
-                continue;
-            }
+    pub fn write_unit(&mut self, unit: Unit) -> Result<UnitWritten> {
+        self.begin_unit()?;
+        for (name, t) in unit.tensors {
+            self.put(name, t)?;
+        }
+        self.end_unit()
+    }
+
+    /// Opens a unit whose tensors then come one at a time with `put`, in full-name order.
+    pub fn begin_unit(&mut self) -> Result<()> {
+        ensure!(self.open.is_none(), "a unit is already open");
+        self.open = Some(Open::default());
+        Ok(())
+    }
+
+    /// The open unit's next tensor; the shards it fills are written as they fill.
+    pub fn put(&mut self, name: impl Into<String>, t: Tensor) -> Result<()> {
+        let name = name.into();
+        let last = &self.open.as_ref().context("no unit is open")?.last;
+        t.check().with_context(|| format!("tensor {name}"))?;
+        ensure!(!name.contains('@'), "{name}: '@' is reserved for chunks");
+        ensure!(last.as_ref().is_none_or(|l| *l < name), "tensor {name}: a unit's tensors come in full-name order");
+        ensure!(!self.weight_map.contains_key(&name) && !self.chunks.contains_key(&name), "tensor {name} written twice");
+        let mut o = self.open.take().expect("open");
+        o.written.hashes.insert(name.clone(), tensor_hash(&name, t.dtype, &t.shape, [&t.data[..]]));
+        let rows = t.rows_count();
+        let t = Arc::new(t);
+        let mut pieces = Vec::new();
+        if t.data.len() as u64 <= self.limits.target {
+            pieces.push(Piece { name: name.clone(), t, rows: 0..rows });
+        } else {
             let rb = t.row_bytes();
             if rb > self.limits.target {
                 bail!("tensor {name}: one row ({rb} bytes) exceeds the shard target");
@@ -120,27 +165,34 @@ impl ModelWriter {
             while r < rows {
                 let n = format!("{name}@{}", names.len());
                 names.push(n.clone());
-                pieces.push(Piece { name: n, t, rows: r..(r + per).min(rows) });
+                pieces.push(Piece { name: n, t: t.clone(), rows: r..(r + per).min(rows) });
                 r += per;
             }
             self.chunks.insert(name.clone(), names);
         }
-        let mut shards = Vec::new();
-        let mut cur: Vec<Piece> = Vec::new();
-        let mut cur_bytes = 0u64;
         for p in pieces {
             let b = p.data().len() as u64;
-            if !cur.is_empty() && cur_bytes + b > self.limits.target {
-                shards.push(self.flush(std::mem::take(&mut cur))?);
-                cur_bytes = 0;
+            if !o.cur.is_empty() && o.cur_bytes + b > self.limits.target {
+                let k = self.flush(std::mem::take(&mut o.cur))?;
+                o.written.shards.push(k);
+                o.cur_bytes = 0;
             }
-            cur_bytes += b;
-            cur.push(p);
+            o.cur_bytes += b;
+            o.cur.push(p);
         }
-        if !cur.is_empty() {
-            shards.push(self.flush(cur)?);
+        o.last = Some(name);
+        self.open = Some(o);
+        Ok(())
+    }
+
+    /// Closes the open unit: its last shard is written.
+    pub fn end_unit(&mut self) -> Result<UnitWritten> {
+        let mut o = self.open.take().context("no unit is open")?;
+        if !o.cur.is_empty() {
+            let k = self.flush(o.cur)?;
+            o.written.shards.push(k);
         }
-        Ok(UnitWritten { shards, hashes })
+        Ok(o.written)
     }
 
     /// Writes one shard with the given pieces.
@@ -184,22 +236,30 @@ impl ModelWriter {
         }
         f.flush()?;
         self.total_size += off;
-        self.shards.push(ShardOut { temp, bytes: total, sha256: hex::encode(sha.finalize()) });
+        self.shards.push(ShardOut { slot: self.slot, temp, bytes: total, sha256: hex::encode(sha.finalize()) });
         Ok(k)
     }
 
-    /// Renames the shards to their final names and writes the index.
+    /// Puts the shards in slot order, renames them to their final names and writes the index.
     pub fn finish(self) -> Result<Written> {
+        ensure!(self.open.is_none(), "a unit is still open");
         let n = self.shards.len();
         let names: Vec<String> = (0..n).map(|k| format!("model-{:05}-of-{n:05}.safetensors", k + 1)).collect();
-        for (s, name) in self.shards.iter().zip(&names) {
-            std::fs::rename(&s.temp, self.dir.join(name)).with_context(|| format!("renaming {}", s.temp.display()))?;
+        // `order[i]` is the shard written `i`-th in the model; `name_of[k]`, shard k's file.
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by_key(|&k| self.shards[k].slot);
+        let mut name_of = vec![String::new(); n];
+        for (i, &k) in order.iter().enumerate() {
+            name_of[k] = names[i].clone();
+            let s = &self.shards[k];
+            std::fs::rename(&s.temp, self.dir.join(&names[i])).with_context(|| format!("renaming {}", s.temp.display()))?;
         }
+        let shard = |k: usize| json!({"bytes": self.shards[k].bytes, "file": name_of[k], "sha256": self.shards[k].sha256});
         let index = json!({
             "chunks": self.chunks,
             "metadata": {"format": "blobmap-index", "format_version": FORMAT_VERSION, "total_size": self.total_size},
-            "shards": self.shards.iter().zip(&names).map(|(s, f)| json!({"bytes": s.bytes, "file": f, "sha256": s.sha256})).collect::<Vec<_>>(),
-            "weight_map": self.weight_map.iter().map(|(t, &k)| (t.clone(), Value::String(names[k].clone()))).collect::<serde_json::Map<_, _>>(),
+            "shards": order.iter().map(|&k| shard(k)).collect::<Vec<_>>(),
+            "weight_map": self.weight_map.iter().map(|(t, &k)| (t.clone(), Value::String(name_of[k].clone()))).collect::<serde_json::Map<_, _>>(),
         });
         cjson::write_file(&self.dir.join(INDEX_FILE), &index)?;
         Ok(Written { shard_files: names })

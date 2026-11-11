@@ -158,10 +158,10 @@ impl CarStates {
         for k in 0..last.len() {
             let a = last[k];
             if k < s && !firsts.contains(&a) {
-                arcs.extend(g.base[a as usize].iter().map(|&(b, c)| (k as u32, b, c)));
+                arcs.extend(g.base.of(a as usize).map(|(b, c)| (k as u32, b, c)));
                 continue;
             }
-            for &(b, c) in &g.base[a as usize] {
+            for (b, c) in g.base.of(a as usize) {
                 d.clear();
                 if k < s {
                     d.push(a);

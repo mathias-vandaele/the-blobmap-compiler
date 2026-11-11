@@ -102,7 +102,8 @@ impl Runner {
         mem::trim();
         let r = StageReport { name: s.name(), wall_s: t.elapsed().as_secs_f64(), peak_rss_bytes: mem::peak_rss() };
         // As each stage ends, so a long build shows where it is.
-        eprintln!("{:>18} {:>9.3} s  peak {:>6} MiB  after {:>6} MiB", r.name, r.wall_s, r.peak_rss_bytes.unwrap_or(0) >> 20, mem::rss().unwrap_or(0) >> 20);
+        let (rss, anon) = (mem::rss().unwrap_or(0) >> 20, mem::anon().unwrap_or(0) >> 20);
+        eprintln!("{:>18} {:>9.3} s  peak {:>6} MiB  after {rss:>6} MiB, anon {anon:>6} MiB", r.name, r.wall_s, r.peak_rss_bytes.unwrap_or(0) >> 20);
         self.stages.push(r);
         Ok(out)
     }
@@ -297,14 +298,15 @@ impl Stage<(&Release, &Config, Option<&Polygon>)> for ReadCatalog {
 
 pub struct Snap;
 
-impl Stage<(&Families<'_>, &Catalog, bool)> for Snap {
+impl Stage<(&Families<'_>, &Catalog, bool, &Path)> for Snap {
     type Output = (Vec<ModeSnap>, Ids);
     fn name(&self) -> &'static str {
         "snap"
     }
-    fn run(&self, (f, c, polygon): (&Families, &Catalog, bool)) -> Result<(Vec<ModeSnap>, Ids)> {
+    /// Each mode's outcomes go to a column of `dir` (SPEC §10, memory).
+    fn run(&self, (f, c, polygon, dir): (&Families, &Catalog, bool, &Path)) -> Result<(Vec<ModeSnap>, Ids)> {
         let points: Vec<(f64, f64)> = c.addresses.iter().map(|a| (a.lat, a.lon)).chain(c.places.iter().map(|p| (p.lat, p.lon))).collect();
-        let snaps = vocab::snap(f, &points);
+        let snaps = vocab::snap(f, &points, Some(dir))?;
         let ids = vocab::select(c, &snaps, polygon);
         Ok((snaps, ids))
     }
@@ -332,6 +334,71 @@ pub struct PackSize {
     pub arcs: u64,
 }
 
+/// A family's road units, written (FORMAT §2.4): what the vocabulary, the manifest and the
+/// reports need of its hierarchy, which is then dropped.
+pub struct RoadOut {
+    /// Each node's layout id.
+    pub layout_of: Vec<u32>,
+    /// Each arc's index among its row's arcs (FORMAT §5.4), if the vocabulary needs it.
+    pub arc_local: Vec<u32>,
+    /// Each road tensor's hash, by full name (FORMAT §9).
+    pub hashes: BTreeMap<String, Hash>,
+    pub largest: PackSize,
+    pub links: u64,
+    pub components: u64,
+    pub packs: u64,
+    /// The largest component and every component built as cells: its links, its sweep layers
+    /// (FORMAT's level count) and its elimination tree's height (SPEC §13, milestone 4).
+    pub hierarchies: Vec<serde_json::Value>,
+}
+
+/// A family's road units, written as soon as its hierarchy is built so that the hierarchy is
+/// dropped before the next family's: its tables in slot `slots.0`, its packs in `slots.1`
+/// (FORMAT §2.4 puts every family's tables before the packs).
+pub struct WriteRoad {
+    pub name: &'static str,
+    pub slots: (u32, u32),
+    /// Whether the vocabulary needs the arcs' local indices (ACTIVE, FORMAT §7.2).
+    pub arc_local: bool,
+}
+
+impl Stage<(&dyn Family, Built, Layout, &mut ModelWriter)> for WriteRoad {
+    type Output = RoadOut;
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn run(&self, (fam, b, l, writer): (&dyn Family, Built, Layout, &mut ModelWriter)) -> Result<RoadOut> {
+        let mut hashes = BTreeMap::new();
+        writer.set_slot(self.slots.0)?;
+        hashes.extend(writer.write_unit(road::tables(fam, &b, &l))?.hashes);
+        writer.set_slot(self.slots.1)?;
+        let mut largest = PackSize::default();
+        for k in 0..l.packs.len() {
+            let pk = &l.packs[k];
+            let size = PackSize { pack: k as u32, rows: pk.rows.len() as u64, links: pk.links, arcs: pk.arcs.len() as u64 };
+            if (size.rows, size.links) > (largest.rows, largest.links) {
+                largest = size;
+            }
+            hashes.extend(writer.write_unit(road::pack(fam, &b, &l, k))?.hashes);
+        }
+        let hierarchies = b
+            .components
+            .iter()
+            .enumerate()
+            .filter(|(x, e)| *x == 0 || e.h.cells() > 0)
+            .map(|(x, e)| {
+                json!({
+                    "family": fam.name(), "component": x, "nodes": e.h.len(), "links": e.h.links(), "cells": e.h.cells(),
+                    "sweep_layers": e.h.levels(), "tree_levels": e.h.tree_levels(),
+                })
+            })
+            .collect();
+        let (links, components, packs) = (b.components.iter().map(|x| x.h.links()).sum(), b.components.len() as u64, l.packs.len() as u64);
+        let arc_local = if self.arc_local { l.arc_local } else { Vec::new() };
+        Ok(RoadOut { layout_of: b.layout_of, arc_local, hashes, largest, links, components, packs, hierarchies })
+    }
+}
+
 pub struct WriteInput<'a> {
     pub args: &'a Args,
     pub inputs: &'a InputsRead,
@@ -339,16 +406,17 @@ pub struct WriteInput<'a> {
     pub catalog: &'a Catalog,
     pub snaps: &'a [ModeSnap],
     pub ids: &'a Ids,
+    pub writer: ModelWriter,
 }
 
 pub struct WriteOutput {
     pub manifest: Manifest,
     pub served: vocab::Served,
-    pub largest: BTreeMap<String, PackSize>,
     pub shard_bytes: u64,
     pub shards: usize,
 }
 
+/// The vocabulary part, last in the model (FORMAT §2.4), then the index and the manifest.
 pub struct WriteModel;
 
 impl Stage<WriteInput<'_>> for WriteModel {
@@ -358,34 +426,13 @@ impl Stage<WriteInput<'_>> for WriteModel {
     }
     fn run(&self, w: WriteInput) -> Result<WriteOutput> {
         let out = &w.args.out;
-        prepare_out(out)?;
         let o = w.inputs.config.build.build;
-        let mut writer = ModelWriter::create(out, ShardLimits { target: o.shard_target_bytes, max: o.shard_max_bytes })?;
+        let mut writer = w.writer;
         let f = w.families;
-        let fams: [(&dyn Family, &Built, &Layout); 2] =
-            [(f.car, f.car_built, f.car_layout), (f.active, f.active_built, f.active_layout)];
-        // Every road tensor's hash, by full name (FORMAT §9).
-        let mut road: BTreeMap<String, Hash> = BTreeMap::new();
-        for (fam, b, l) in fams {
-            road.extend(writer.write_unit(&road::tables(fam, b, l))?.hashes);
-        }
-        let mut largest = BTreeMap::new();
-        for (fam, b, l) in fams {
-            let mut big = PackSize::default();
-            for k in 0..l.packs.len() {
-                let pk = &l.packs[k];
-                let size = PackSize { pack: k as u32, rows: pk.rows.len() as u64, links: pk.links, arcs: pk.arcs.len() as u64 };
-                if (size.rows, size.links) > (big.rows, big.links) {
-                    big = size;
-                }
-                road.extend(writer.write_unit(&road::pack(fam, b, l, k))?.hashes);
-            }
-            largest.insert(fam.name().to_string(), big);
-        }
-        let road_hash = of_hashes(ROAD_TAG, road.values());
-        let (unit, served) = vocab::unit(f, w.catalog, w.snaps, w.ids, &road_hash.0);
-        let vw = writer.write_unit(&unit)?;
-        drop(unit);
+        let fams: [(&dyn Family, &RoadOut); 2] = [(f.car, f.car_road), (f.active, f.active_road)];
+        let road_hash = of_hashes(ROAD_TAG, f.car_road.hashes.iter().chain(&f.active_road.hashes).collect::<BTreeMap<_, _>>().into_values());
+        writer.set_slot(4)?;
+        let (vw, served) = vocab::write(f, w.catalog, w.snaps, w.ids, &road_hash.0, &mut writer)?;
         let mut vh = Hasher::tagged(VOCAB_TAG);
         for (name, h) in &vw.hashes {
             if name != "vocab/road_hash" {
@@ -432,14 +479,14 @@ impl Stage<WriteInput<'_>> for WriteModel {
             },
             families: fams
                 .iter()
-                .map(|&(fam, b, l)| {
+                .map(|&(fam, r)| {
                     let family = mf::Family {
                         graph: fam.graph_kind().into(),
                         metrics: fam.metrics(),
                         nodes: fam.nodes() as u64,
-                        links: b.components.iter().map(|x| x.h.links()).sum(),
-                        components: b.components.len() as u64,
-                        packs: l.packs.len() as u64,
+                        links: r.links,
+                        components: r.components,
+                        packs: r.packs,
                     };
                     (fam.name().to_string(), family)
                 })
@@ -459,7 +506,7 @@ impl Stage<WriteInput<'_>> for WriteModel {
             licenses_sha256: hex::encode(sha2::Sha256::digest(licenses.as_bytes())),
         };
         manifest.write(&out.join(blobmap_format::MANIFEST_FILE))?;
-        Ok(WriteOutput { manifest, served, largest, shard_bytes, shards: written.shard_files.len() })
+        Ok(WriteOutput { manifest, served, shard_bytes, shards: written.shard_files.len() })
     }
 }
 
@@ -524,44 +571,51 @@ pub fn build(a: &Args) -> Result<BuildResult> {
     let inputs = run.run(&ReadInputs, a)?;
     let c = &inputs.config;
     let osm = run.run(&ReadNodes, (a.pbf.as_path(), a.work_dir().as_path(), c))?;
-    let (cp, cg) = run.run(&CarNetwork, (&osm, c))?;
+    prepare_out(&a.out)?;
+    let o = c.build.build;
+    let mut writer = ModelWriter::create(&a.out, ShardLimits { target: o.shard_target_bytes, max: o.shard_max_bytes })?;
+    // Each family is written as soon as its hierarchy is built, then keeps only what the
+    // vocabulary and the reports read (SPEC §10, memory). Slots: FORMAT §2.4's unit order.
+    let (cp, mut cg) = run.run(&CarNetwork, (&osm, c))?;
     let car = Car::new(&cp, &cg);
     let co = run.run(&Orders("car-order"), (&car as &dyn Family, c, None))?;
     let (cb, cl) = run.run(&Hierarchies("car-hierarchy"), (&car as &dyn Family, c, co))?;
-    let (ap, ag) = run.run(&ActiveNetwork, (&osm, c))?;
+    let car_road = run.run(&WriteRoad { name: "car-write", slots: (0, 2), arc_local: false }, (&car as &dyn Family, cb, cl, &mut writer))?;
+    let ce = car.into_components();
+    cg.shed();
+    let car = Car::with(&cp, &cg, ce);
+    let (ap, mut ag) = run.run(&ActiveNetwork, (&osm, c))?;
     let act = Active::new(&ap, &ag);
     let fixed = fixed_ranks(&ap, &c.build.order.active)?;
     let ao = run.run(&Orders("active-order"), (&act as &dyn Family, c, fixed.as_ref()))?;
     let (ab, al) = run.run(&Hierarchies("active-hierarchy"), (&act as &dyn Family, c, ao))?;
+    let active_road = run.run(&WriteRoad { name: "active-write", slots: (1, 3), arc_local: true }, (&act as &dyn Family, ab, al, &mut writer))?;
+    drop(fixed);
+    let parts = act.into_parts();
+    ag.shed();
+    let act = Active::with(&ap, &ag, parts);
     let catalog = run.run(&ReadCatalog, (&inputs.release, c, inputs.polygon.as_ref()))?;
     let families = Families {
         car: &car,
-        car_built: &cb,
-        car_layout: &cl,
+        car_road: &car_road,
         active: &act,
-        active_built: &ab,
-        active_layout: &al,
+        active_road: &active_road,
         car_radius_m: c.car.config.snap.radius_m as f64,
         active_radius_m: c.active.config.snap.radius_m as f64,
         car_small_max: c.car.config.snap.small_component_max_nodes,
         active_small_max: c.active.config.snap.small_component_max_nodes,
     };
-    let (snaps, ids) = run.run(&Snap, (&families, &catalog, inputs.polygon.is_some()))?;
-    let wo = run.run(&WriteModel, WriteInput { args: a, inputs: &inputs, families: &families, catalog: &catalog, snaps: &snaps, ids: &ids })?;
+    let (snaps, ids) = run.run(&Snap, (&families, &catalog, inputs.polygon.is_some(), osm.dir().join("snap").as_path()))?;
+    let wo = run.run(&WriteModel, WriteInput { args: a, inputs: &inputs, families: &families, catalog: &catalog, snaps: &snaps, ids: &ids, writer })?;
     let islands = run.run(&ReadIslands, &osm)?;
     let data = report::data(a, &families, &catalog, &snaps, &ids, &wo.served, &islands)?;
     blobmap_format::json::write_file(&a.report_path("data"), &data)?;
-    // Each family's largest component and every component built as cells: its links, its sweep
-    // layers (FORMAT's level count) and its elimination tree's height (SPEC §13, milestone 4).
-    let hierarchies: Vec<serde_json::Value> = [("car", &cb), ("active", &ab)]
+    let hierarchies: Vec<&serde_json::Value> = car_road.hierarchies.iter().chain(&active_road.hierarchies).collect();
+    let largest: serde_json::Map<String, serde_json::Value> = [("car", &car_road, "turns"), ("active", &active_road, "roads")]
         .iter()
-        .flat_map(|(f, b)| {
-            b.components.iter().enumerate().filter(|(x, e)| *x == 0 || e.h.cells() > 0).map(move |(x, e)| {
-                json!({
-                    "family": f, "component": x, "nodes": e.h.len(), "links": e.h.links(), "cells": e.h.cells(),
-                    "sweep_layers": e.h.levels(), "tree_levels": e.h.tree_levels(),
-                })
-            })
+        .map(|&(f, r, arcs)| {
+            let p = &r.largest;
+            (f.to_string(), json!({"pack": p.pack, "rows": p.rows, "links": p.links, arcs: p.arcs}))
         })
         .collect();
     let build = json!({
@@ -569,10 +623,7 @@ pub fn build(a: &Args) -> Result<BuildResult> {
         "stages": run.stages.iter().map(|s| json!({"name": s.name, "wall_s": s.wall_s, "peak_rss_bytes": s.peak_rss_bytes})).collect::<Vec<_>>(),
         "wall_s": t0.elapsed().as_secs_f64(),
         "peak_rss_bytes": run.stages.iter().filter_map(|s| s.peak_rss_bytes).max(),
-        "largest_pack": wo.largest.iter().map(|(f, p)| {
-            let arcs = if f == "car" { "turns" } else { "roads" };
-            (f.clone(), json!({"pack": p.pack, "rows": p.rows, "links": p.links, arcs: p.arcs}))
-        }).collect::<serde_json::Map<_, _>>(),
+        "largest_pack": largest,
         "hierarchies": hierarchies,
         "shard_bytes": wo.shard_bytes,
         "shards": wo.shards,

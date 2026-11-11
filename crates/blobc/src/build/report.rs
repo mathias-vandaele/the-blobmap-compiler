@@ -46,7 +46,15 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
     let mut trapped = serde_json::Map::new();
     for fam in [f.car as &dyn Family, f.active] {
         let e = fam.components();
-        let b = if fam.name() == "car" { f.car_built } else { f.active_built };
+        // The smallest road key of each trapped component's nodes.
+        let mut key: BTreeMap<u32, (i64, u32, u8)> = BTreeMap::new();
+        for v in 0..fam.nodes() as u32 {
+            let x = e.of[v as usize];
+            if e.trapped[x as usize] {
+                let k = fam.road_key(v);
+                key.entry(x).and_modify(|m| *m = (*m).min(k)).or_insert(k);
+            }
+        }
         let mut ids_in: BTreeMap<u32, BTreeMap<&str, u64>> = BTreeMap::new();
         for (m, (mode, family)) in MODES.iter().enumerate() {
             if *family != fam.name() {
@@ -63,7 +71,7 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
         let list: Vec<Value> = (0..e.len() as u32)
             .filter(|&x| e.trapped[x as usize])
             .map(|x| {
-                let way = b.components[x as usize].nodes.iter().map(|&v| fam.road_key(v)).min().map(|k| k.0);
+                let way = key.get(&x).map(|k| k.0);
                 json!({"component": x, "nodes": e.nodes[x as usize], "ids": ids_in.get(&x).cloned().unwrap_or_default(), "way": way})
             })
             .collect();

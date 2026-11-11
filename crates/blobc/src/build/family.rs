@@ -49,7 +49,12 @@ pub struct Car<'a> {
 
 impl<'a> Car<'a> {
     pub fn new(p: &'a Pieces, g: &'a CarGraph) -> Car<'a> {
-        let e = g.components();
+        Car::with(p, g, g.components())
+    }
+
+    /// The family with its components already found (they need the turns, which
+    /// `CarGraph::shed` drops).
+    pub fn with(p: &'a Pieces, g: &'a CarGraph, e: Components) -> Car<'a> {
         let mut pairs: Vec<(u32, u32)> = (g.originals..g.len()).map(|c| (g.copy_of[c], c as u32)).collect();
         pairs.sort_unstable();
         let mut copy_first = vec![0u32; g.len() + 1];
@@ -60,6 +65,10 @@ impl<'a> Car<'a> {
             copy_first[i + 1] += copy_first[i];
         }
         Car { p, g, e, copy_first, copies: pairs.into_iter().map(|x| x.1).collect() }
+    }
+
+    pub fn into_components(self) -> Components {
+        self.e
     }
 }
 
@@ -158,6 +167,15 @@ impl<'a> Active<'a> {
                 key[v as usize] = key[v as usize].min(k);
             }
         }
+        Active { p, g, e, key }
+    }
+
+    /// The family's components and road keys, which `ActiveGraph::shed` drops the roads of.
+    pub fn into_parts(self) -> (Components, Vec<(i64, u32, u8)>) {
+        (self.e, self.key)
+    }
+
+    pub fn with(p: &'a Pieces, g: &'a ActiveGraph, (e, key): (Components, Vec<(i64, u32, u8)>)) -> Active<'a> {
         Active { p, g, e, key }
     }
 

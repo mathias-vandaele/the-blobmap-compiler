@@ -3,13 +3,16 @@
 
 use std::collections::BTreeMap;
 
-use blobmap_format::{INF, NONE, Tensor, Unit};
+use std::path::Path;
+
+use anyhow::Result;
+use blobmap_format::{INF, ModelWriter, NONE, Tensor, Unit, UnitWritten};
 use rayon::prelude::*;
 
 use crate::build::family::{Active, Car};
-use crate::build::hier::Built;
-use crate::build::layout::Layout;
+use crate::build::RoadOut;
 use crate::graph::active::METRICS;
+use crate::osm::column::{Column, ColumnWriter};
 use crate::overture::{Catalog, Id, Taxonomy};
 use crate::snap::modes::{active_component, car_component};
 use crate::snap::{Grid, Membership, Sets, Snapped, parts};
@@ -20,16 +23,17 @@ pub const MODES: [(&str, &str); 3] = [("car", "car"), ("bike", "active"), ("walk
 /// One mode's snapping of every point: the outcome, and the trapped component holding the
 /// nearest eligible piece, if any (for the data report, SPEC §3).
 pub struct ModeSnap {
-    pub at: Vec<Snapped>,
+    pub at: Column<Snapped>,
 }
+
+/// Points snapped at once, before their outcomes go to the column.
+const SNAP_BATCH: usize = 1 << 22;
 
 pub struct Families<'a> {
     pub car: &'a Car<'a>,
-    pub car_built: &'a Built,
-    pub car_layout: &'a Layout,
+    pub car_road: &'a RoadOut,
     pub active: &'a Active<'a>,
-    pub active_built: &'a Built,
-    pub active_layout: &'a Layout,
+    pub active_road: &'a RoadOut,
     pub car_radius_m: f64,
     pub active_radius_m: f64,
     /// The small-component size per family (SPEC §6).
@@ -45,8 +49,9 @@ pub fn membership(f: &Families, mode: &str) -> Membership {
     }
 }
 
-/// Snaps points per mode (car, bike, walk).
-pub fn snap(f: &Families, points: &[(f64, f64)]) -> Vec<ModeSnap> {
+/// Snaps points per mode (car, bike, walk), each mode's outcomes into a column of `dir`
+/// (in memory without one).
+pub fn snap(f: &Families, points: &[(f64, f64)], dir: Option<&Path>) -> Result<Vec<ModeSnap>> {
     let (car, act) = (f.car, f.active);
     let cgrid = Grid::new(car.p);
     let agrid = Grid::new(act.p);
@@ -67,17 +72,23 @@ pub fn snap(f: &Families, points: &[(f64, f64)]) -> Vec<ModeSnap> {
                 [act.p.u[k], act.p.v[k]].iter().map(|&v| act.e.of[v as usize]).filter(|&x| act.e.trapped[x as usize]).min()
             }
         };
-        let at = points
-            .par_iter()
-            .map(|&(lat, lon)| {
-                let fd = grid.find(p, lat, lon, radius, small_max, &sets as &dyn Sets);
-                let t = fd.eligible.and_then(|h| trapped(h.piece as usize)).unwrap_or(NONE);
-                Snapped::new(&fd, t)
-            })
-            .collect();
-        out.push(ModeSnap { at });
+        let mut at = ColumnWriter::new(dir, mode)?;
+        for batch in points.chunks(SNAP_BATCH) {
+            let done: Vec<Snapped> = batch
+                .par_iter()
+                .map(|&(lat, lon)| {
+                    let fd = grid.find(p, lat, lon, radius, small_max, &sets as &dyn Sets);
+                    let t = fd.eligible.and_then(|h| trapped(h.piece as usize)).unwrap_or(NONE);
+                    Snapped::new(&fd, t)
+                })
+                .collect();
+            for x in done {
+                at.push(x)?;
+            }
+        }
+        out.push(ModeSnap { at: at.finish()? });
     }
-    out
+    Ok(out)
 }
 
 /// What the build keeps of the catalog: points in internal-index order.
@@ -111,26 +122,39 @@ pub type Served = BTreeMap<String, BTreeMap<String, u64>>;
 
 pub const REASONS: [&str; 5] = ["", "NoEligibleRoad", "NoRoad", "TrappedComponent", "FilteredPlace"];
 
-pub fn unit(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash: &[u8; 32]) -> (Unit, Served) {
-    let mut u = Unit::default();
+/// Writes the vocabulary part (FORMAT §7) as one unit, a group of tensors at a time in
+/// full-name order (each mode's, the IDs, the places, the road hash, the taxonomy), so that
+/// one group at a time is in memory.
+pub fn write(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash: &[u8; 32], w: &mut ModelWriter) -> Result<(UnitWritten, Served)> {
+    let put = |w: &mut ModelWriter, u: Unit| -> Result<()> {
+        for (name, t) in u.tensors {
+            w.put(name, t)?;
+        }
+        Ok(())
+    };
+    w.begin_unit()?;
     let na = c.addresses.len();
-    // Points of the model in internal-index order: catalog point index, and whether filtered.
-    let pts: Vec<(usize, bool)> =
-        ids.addresses.iter().map(|&i| (i, false)).chain(ids.places.iter().map(|&p| (na + p, c.places[p].status != 0))).collect();
-    let n = pts.len();
-    let id_rows = |v: Vec<&Id>| Tensor::rows(16, &v.into_iter().flatten().copied().collect::<Vec<u8>>());
-    u.put("vocab/ids/address", id_rows(ids.addresses.iter().map(|&i| &c.addresses[i].id).collect()));
-    u.put("vocab/ids/place", id_rows(ids.places.iter().map(|&p| &c.places[p].id).collect()));
-    u.put("vocab/ids/alias", id_rows(ids.aliases.iter().map(|a| &a.0).collect()));
-    u.put("vocab/ids/alias_to", Tensor::vec(&ids.aliases.iter().map(|a| a.1).collect::<Vec<u32>>()));
-    u.put("vocab/road_hash", Tensor::vec(road_hash));
+    // Point i of the model in internal-index order: its catalog point index, and whether it
+    // is a filtered place.
+    let pt = |i: usize| match ids.addresses.get(i) {
+        Some(&a) => (a, false),
+        None => {
+            let p = ids.places[i - ids.addresses.len()];
+            (na + p, c.places[p].status != 0)
+        }
+    };
+    let n = ids.addresses.len() + ids.places.len();
     let mut served: Served = BTreeMap::new();
-    for (m, (mode, family)) in MODES.iter().enumerate() {
+    let mut modes: Vec<usize> = (0..MODES.len()).collect();
+    modes.sort_by_key(|&m| format!("vocab/{}/{}.", MODES[m].1, MODES[m].0));
+    for m in modes {
+        let (mode, family) = MODES[m];
         let counts = served.entry(mode.to_string()).or_default();
-        let (mut node, mut road, mut off) = (vec![NONE; 2 * n], vec![NONE; n], Vec::new());
-        off.resize(4 * n, INF);
+        let road_rows = if mode == "car" { 0 } else { n };
+        let (mut node, mut road, mut off) = (vec![NONE; 2 * n], vec![NONE; road_rows], vec![INF; 4 * n]);
         let (mut rid, mut rcode, mut rm) = (Vec::new(), Vec::new(), Vec::new());
-        for (i, &(pt, filtered)) in pts.iter().enumerate() {
+        for i in 0..n {
+            let (pt, filtered) = pt(i);
             if filtered {
                 *counts.entry("FilteredPlace".into()).or_default() += 1;
                 continue;
@@ -147,8 +171,8 @@ pub fn unit(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash:
             };
             *counts.entry("served".into()).or_default() += 1;
             let k = piece as usize;
-            if *mode == "car" {
-                let (car, b) = (f.car, f.car_built);
+            if mode == "car" {
+                let (car, b) = (f.car, f.car_road);
                 let x = car_component(car.g, &car.e, k).expect("servable");
                 for d in 0..2 {
                     let s = car.g.seg_of_piece[k][d];
@@ -162,7 +186,7 @@ pub fn unit(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash:
                     off[4 * i + 2 * d + 1] = after;
                 }
             } else {
-                let (act, b, l) = (f.active, f.active_built, f.active_layout);
+                let (act, b) = (f.active, f.active_road);
                 let metric = m - 1;
                 debug_assert!(active_component(act.p, &act.e, k).is_some(), "a served piece is servable");
                 let [along, against] = act.g.road_of_piece[k];
@@ -173,25 +197,38 @@ pub fn unit(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash:
                 };
                 node[2 * i] = b.layout_of[uu as usize];
                 node[2 * i + 1] = b.layout_of[vv as usize];
-                road[i] = l.arc_local[ruv as usize];
+                road[i] = b.arc_local[ruv as usize];
                 let (u_id, id_v) = parts(act.g.w[metric][ruv as usize], fu);
                 let (v_id, id_u) = if rvu != NONE { parts(act.g.w[metric][rvu as usize], 1.0 - fu) } else { (INF, INF) };
                 off[4 * i..4 * i + 4].copy_from_slice(&[u_id, id_u, v_id, id_v]);
             }
         }
+        // In full-name order, each vector dropped as it becomes a tensor.
         let p = format!("vocab/{family}/{mode}.");
-        if *mode == "car" {
-            u.put(format!("{p}seg"), Tensor::rows(2, &node));
-            u.put(format!("{p}off"), Tensor::new(&[n as u64, 2, 2], &off));
+        if mode == "car" {
+            w.put(format!("{p}off"), Tensor::new(&[n as u64, 2, 2], &std::mem::take(&mut off)))?;
         } else {
-            u.put(format!("{p}node"), Tensor::rows(2, &node));
-            u.put(format!("{p}road"), Tensor::vec(&road));
-            u.put(format!("{p}off"), Tensor::rows(4, &off));
+            w.put(format!("{p}node"), Tensor::rows(2, &std::mem::take(&mut node)))?;
+            w.put(format!("{p}off"), Tensor::rows(4, &std::mem::take(&mut off)))?;
         }
-        u.put(format!("{p}reason_id"), Tensor::vec(&rid));
-        u.put(format!("{p}reason_code"), Tensor::vec(&rcode));
-        u.put(format!("{p}reason_m"), Tensor::vec(&rm));
+        w.put(format!("{p}reason_code"), Tensor::vec(&rcode))?;
+        w.put(format!("{p}reason_id"), Tensor::vec(&rid))?;
+        w.put(format!("{p}reason_m"), Tensor::vec(&rm))?;
+        if mode == "car" {
+            w.put(format!("{p}seg"), Tensor::rows(2, &std::mem::take(&mut node)))?;
+        } else {
+            w.put(format!("{p}road"), Tensor::vec(&std::mem::take(&mut road)))?;
+        }
     }
+    let id_rows = |v: &mut dyn Iterator<Item = &Id>| {
+        let b: Vec<u8> = v.flatten().copied().collect();
+        Tensor::of_bytes(&[b.len() as u64 / 16, 16], b)
+    };
+    w.put("vocab/ids/address", id_rows(&mut ids.addresses.iter().map(|&i| &c.addresses[i].id)))?;
+    w.put("vocab/ids/alias", id_rows(&mut ids.aliases.iter().map(|a| &a.0)))?;
+    w.put("vocab/ids/alias_to", Tensor::vec(&ids.aliases.iter().map(|a| a.1).collect::<Vec<u32>>()))?;
+    w.put("vocab/ids/place", id_rows(&mut ids.places.iter().map(|&p| &c.places[p].id)))?;
+    let mut u = Unit::default();
     let places: Vec<&crate::overture::Place> = ids.places.iter().map(|&p| &c.places[p]).collect();
     u.put("vocab/places/status", Tensor::vec(&places.iter().map(|p| p.status).collect::<Vec<u8>>()));
     u.put("vocab/places/primary", Tensor::vec(&places.iter().map(|p| p.primary).collect::<Vec<u16>>()));
@@ -204,8 +241,14 @@ pub fn unit(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash:
     }
     u.put("vocab/places/alt_first", Tensor::vec(&alt_first));
     u.put("vocab/places/alt", Tensor::vec(&alt));
+    put(w, u)?;
+    let mut u = Unit::default();
+    u.put("vocab/road_hash", Tensor::vec(road_hash));
+    put(w, u)?;
+    let mut u = Unit::default();
     taxonomy(&c.taxonomy, &mut u);
-    (u, served)
+    put(w, u)?;
+    Ok((w.end_unit()?, served))
 }
 
 fn strings(u: &mut Unit, name: &str, s: &[String]) {

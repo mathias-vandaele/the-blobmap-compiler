@@ -395,7 +395,7 @@ pub fn via_copies(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()> {
         let k = on.partition_point(|x| x.0 < s);
         (k < on.len() && on[k].0 == s).then(|| on[k].1 as usize)
     };
-    let mut into: Vec<(u32, u32)> = (0..g.base.len()).flat_map(|a| g.base[a].iter().map(move |&(b, _)| (b, a as u32))).collect();
+    let mut into: Vec<(u32, u32)> = (0..g.base.len()).flat_map(|a| g.base.of(a).map(move |(b, _)| (b, a as u32))).collect();
     into.sort_unstable();
     // The nearest ID upstream of s, breadth first over turns in segment order.
     let upstream = |s: u32| -> Option<usize> {

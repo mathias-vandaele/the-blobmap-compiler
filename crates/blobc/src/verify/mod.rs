@@ -116,7 +116,8 @@ pub(crate) fn phase<T>(name: &str, f: impl FnOnce() -> T) -> T {
     mem::trim();
     let peak = mem::peak_rss().unwrap_or(0).max(NESTED_PEAK.load(Ordering::Relaxed));
     NESTED_PEAK.store(outer.max(peak), Ordering::Relaxed);
-    eprintln!("{name:>18} {:>9.3} s  peak {:>6} MiB  after {:>6} MiB", t.elapsed().as_secs_f64(), peak >> 20, mem::rss().unwrap_or(0) >> 20);
+    let (rss, anon) = (mem::rss().unwrap_or(0) >> 20, mem::anon().unwrap_or(0) >> 20);
+    eprintln!("{name:>18} {:>9.3} s  peak {:>6} MiB  after {rss:>6} MiB, anon {anon:>6} MiB", t.elapsed().as_secs_f64(), peak >> 20);
     out
 }
 

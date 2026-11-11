@@ -254,10 +254,10 @@ mod tests {
         u.put("a/small", Tensor::vec(&[7u8, 8, 9]));
         u.put("a/wide", Tensor::rows(2, &[1u16, 2, 3, 4]));
         u.put("a/f", Tensor::vec(&[1.5f32]));
-        let uw = w.write_unit(&u).unwrap();
+        let uw = w.write_unit(u).unwrap();
         let mut v = Unit::default();
         v.put("b/x", Tensor::vec(&[1u64, 2]));
-        let vw = w.write_unit(&v).unwrap();
+        let vw = w.write_unit(v).unwrap();
         assert!(uw.shards.iter().all(|s| !vw.shards.contains(s)), "units never share a shard");
         w.finish().unwrap();
         std::fs::write(dir.join(crate::MANIFEST_FILE), "{\"format\":\"blobmap-model\",\"format_version\":\"3.0.0\",\"unknown\":1}")
@@ -292,7 +292,7 @@ mod tests {
             for i in 0..5u32 {
                 u.put(format!("t/{i}"), Tensor::vec(&[i; 5]));
             }
-            w.write_unit(&u).unwrap();
+            w.write_unit(u).unwrap();
             let names = w.finish().unwrap().shard_files;
             let mut all = Vec::new();
             for f in names.iter().chain(std::iter::once(&INDEX_FILE.to_string())) {
@@ -302,5 +302,40 @@ mod tests {
             all
         };
         assert_eq!(write("d1"), write("d2"));
+    }
+
+    #[test]
+    fn slots_and_streamed_units_same_bytes() {
+        let unit = |p: &str| {
+            let mut u = Unit::default();
+            for i in 0..5u32 {
+                u.put(format!("{p}/{i}"), Tensor::vec(&[i; 5]));
+            }
+            u
+        };
+        let files = |dir: &Path, names: Vec<String>| {
+            let all: Vec<Vec<u8>> = names.iter().chain(std::iter::once(&INDEX_FILE.to_string())).map(|f| std::fs::read(dir.join(f)).unwrap()).collect();
+            std::fs::remove_dir_all(dir).unwrap();
+            all
+        };
+        let limits = ShardLimits { target: 32, max: 64 };
+        let dir = tmp("inorder");
+        let mut w = ModelWriter::create(&dir, limits).unwrap();
+        w.write_unit(unit("a")).unwrap();
+        w.write_unit(unit("b")).unwrap();
+        let in_order = files(&dir, w.finish().unwrap().shard_files);
+        // b first in slot 1, then a in slot 0, one tensor at a time.
+        let dir = tmp("slots");
+        let mut w = ModelWriter::create(&dir, limits).unwrap();
+        w.set_slot(1).unwrap();
+        w.write_unit(unit("b")).unwrap();
+        w.set_slot(0).unwrap();
+        w.begin_unit().unwrap();
+        for (name, t) in unit("a").tensors {
+            w.put(name, t).unwrap();
+        }
+        assert!(w.put("a/0", Tensor::vec(&[0u32])).is_err(), "names come in order");
+        w.end_unit().unwrap();
+        assert_eq!(files(&dir, w.finish().unwrap().shard_files), in_order);
     }
 }
