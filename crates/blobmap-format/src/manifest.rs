@@ -85,7 +85,17 @@ pub struct Build {
     pub shard_target_bytes: u64,
     pub shard_max_bytes: u64,
     pub memory_budget_bytes: u64,
+    /// Added in 3.1; a 3.0 manifest without it built with the 62 GB of SPEC §10.
+    #[serde(default = "order_memory_3_0")]
+    pub order_memory_bytes: u64,
     pub pack_max_nodes: u64,
+}
+
+/// The order memory of models built before the option existed (FORMAT §3).
+pub const ORDER_MEMORY_3_0: u64 = 62_000_000_000;
+
+fn order_memory_3_0() -> u64 {
+    ORDER_MEMORY_3_0
 }
 
 /// A mode family: its graph kind, its metrics, and the size of its one hierarchy (FORMAT §3).

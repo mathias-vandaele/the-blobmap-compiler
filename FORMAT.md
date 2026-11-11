@@ -1,14 +1,15 @@
-# BlobMap model format 3.0.0
+# BlobMap model format 3.1.0
 
 This is the byte-level contract between `blobc` and every runtime. SPEC.md says what a model
 means; this document says only how it is laid out in bytes. Section references such as
 "SPEC §7" point to SPEC.md. Where this document seems to say more than SPEC about meaning,
 SPEC wins and this document is wrong.
 
-- **Format name:** `blobmap-model`. **Version:** `3.0.0` (§12).
+- **Format name:** `blobmap-model`. **Version:** `3.1.0` (§12).
 - **Status:** 2.0.0 approved at milestone 1 (SPEC §13), 2026-11-08. 3.0.0, 2026-11-09: one
   hierarchy per family over all its components, with global layout ids; no experts, groups
-  or manifest entries.
+  or manifest entries. 3.1.0, 2026-11-11: the optional build option `order_memory_bytes`
+  (§3); a 3.0 manifest without it was built with 62 GB.
 
 Contents: §1 conventions · §2 files · §3 manifest · §4 storage units and names · §5 road part ·
 §6 re-customization · §7 vocabulary part · §8 meaning of the bytes · §9 hashes ·
@@ -59,7 +60,7 @@ Each shard is a standard safetensors file:
 - the tensor data.
 
 The header holds:
-- `__metadata__` = `{"format":"blobmap-shard","format_version":"3.0.0"}`;
+- `__metadata__` = `{"format":"blobmap-shard","format_version":"3.1.0"}`;
 - one entry per tensor, `{"dtype","shape","data_offsets"}`;
 - no whitespace other than the padding. `__metadata__` comes first, then the tensors in
   data order.
@@ -89,7 +90,7 @@ cover logical tensors, so chunking never changes a hash.
   "chunks": { "<logical name>": ["<name>@0", "<name>@1"] },
   "metadata": {
     "format": "blobmap-index",
-    "format_version": "3.0.0",
+    "format_version": "3.1.0",
     "total_size": 0
   },
   "shards": [ { "bytes": 0, "file": "model-00001-of-00003.safetensors", "sha256": "…" } ],
@@ -128,14 +129,14 @@ So a shard never mixes units (SPEC §8). Chunks are at most the target, so no sh
 | key | type | meaning |
 | --- | --- | --- |
 | `format` | string | `"blobmap-model"` |
-| `format_version` | string | `"3.0.0"` |
+| `format_version` | string | `"3.1.0"` |
 | `model_id` | string | §9; the identity of the model's content |
 | `inputs_hash` | string | §9; the identity of what the answers depend on, which keys golden files (§11) |
 | `spec_version` | string | the version of SPEC.md the model was built to, read from its "SPEC version" line (`"2.0.0"`) |
 | `compiler` | object | `{name: "blobc", version, commit, dirty}`: commit is the 40-hex git commit, dirty a boolean |
 | `inputs` | object | below |
 | `config` | object | below |
-| `build` | object | `{shard_target_bytes, shard_max_bytes, memory_budget_bytes, pack_max_nodes}`: options that shape the output without changing answers |
+| `build` | object | `{shard_target_bytes, shard_max_bytes, memory_budget_bytes, order_memory_bytes, pack_max_nodes}`: options that shape the output without changing answers. `order_memory_bytes` (3.1) is the memory for ordering one component's whole fine graph, above which it is coarsened first (SPEC §5); absent in 3.0, where it was 62 GB |
 | `families` | object | family → `{graph, metrics, nodes, links, components, packs}` |
 | `modes` | object | mode → `{family, metric, snap_radius_m}` |
 | `parts` | object | `{road: {hash}, vocabulary: {hash, road_hash}}` (§9) |

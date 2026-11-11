@@ -57,7 +57,15 @@ pub struct BuildOptions {
     pub shard_target_bytes: u64,
     pub shard_max_bytes: u64,
     pub memory_budget_bytes: u64,
+    /// Memory for nested dissection on one component's whole fine graph: a component that
+    /// needs more is coarsened first (SPEC §5). By default the build's 62 GB (SPEC §10).
+    #[serde(default = "default_order_memory")]
+    pub order_memory_bytes: u64,
     pub pack_max_nodes: u64,
+}
+
+fn default_order_memory() -> u64 {
+    blobmap_format::manifest::ORDER_MEMORY_3_0
 }
 
 /// A hand-made node order for the ACTIVE family, as OSM node ids from the first contracted
@@ -96,6 +104,7 @@ impl Config {
         let b = &build.build;
         ensure!(b.shard_target_bytes > 0 && b.shard_target_bytes <= b.shard_max_bytes, "build: shard target must be in 1..=max");
         ensure!(b.memory_budget_bytes > 0, "build: memory_budget_bytes must be positive");
+        ensure!(b.order_memory_bytes > 0, "build: order_memory_bytes must be positive");
         Ok(Config { car, active, places, build })
     }
 }

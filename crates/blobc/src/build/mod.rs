@@ -260,7 +260,7 @@ impl Stage<(&dyn Family, &Config, Option<&FixedRanks>)> for Orders {
     fn run(&self, (f, c, fixed): (&dyn Family, &Config, Option<&FixedRanks>)) -> Result<hier::Ordered> {
         let budget = c.build.build.memory_budget_bytes;
         let max_cell = (budget / hier::BYTES_PER_NODE).max(1) as usize;
-        let nd_max = (hier::MEMORY_LIMIT_BYTES / hier::ND_BYTES_PER_NODE) as usize;
+        let nd_max = (c.build.build.order_memory_bytes / hier::ND_BYTES_PER_NODE) as usize;
         hier::order(f, max_cell, nd_max, fixed)
     }
 }
@@ -427,6 +427,7 @@ impl Stage<WriteInput<'_>> for WriteModel {
                 shard_target_bytes: o.shard_target_bytes,
                 shard_max_bytes: o.shard_max_bytes,
                 memory_budget_bytes: o.memory_budget_bytes,
+                order_memory_bytes: o.order_memory_bytes,
                 pack_max_nodes: o.pack_max_nodes,
             },
             families: fams
