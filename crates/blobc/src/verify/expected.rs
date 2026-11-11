@@ -79,11 +79,11 @@ pub enum Cat {
 }
 
 impl Expected<'_> {
-    pub fn new(r: &Reference) -> Expected<'_> {
+    pub fn new(r: &Reference) -> anyhow::Result<Expected<'_>> {
         let max = (MEMO_BYTES / (2 * r.n().max(1))).clamp(8, 4096);
-        let g = Graphs::new(r);
+        let g = Graphs::new(r)?;
         let gate = Gate { free: Mutex::new((SCRATCH_BYTES / g.scratch_bytes(r.n()).max(1)).max(1)), ended: Condvar::new() };
-        Expected { r, g, memo: Mutex::new(Memo { cells: BTreeMap::new(), order: VecDeque::new(), max }), gate }
+        Ok(Expected { r, g, memo: Mutex::new(Memo { cells: BTreeMap::new(), order: VecDeque::new(), max }), gate })
     }
 
     fn mode(&self, name: &str) -> usize {

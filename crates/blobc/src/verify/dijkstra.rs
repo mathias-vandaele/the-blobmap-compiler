@@ -9,9 +9,13 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
+use std::path::Path;
+
+use anyhow::Result;
 
 use blobmap_format::{INF, NONE};
 
+use crate::osm::column::Column;
 use crate::snap::parts;
 use crate::verify::reference::{Entry, Mode, Reference};
 
@@ -88,9 +92,9 @@ fn direct(r: &Reference, m: &Mode, o: &Entry, d: &Entry) -> u32 {
 /// A graph in CSR form: per node, its arcs (head, cost).
 #[derive(Default)]
 struct Csr {
-    first: Vec<u32>,
-    head: Vec<u32>,
-    cost: Vec<u16>,
+    first: Column<u32>,
+    head: Column<u32>,
+    cost: Column<u16>,
 }
 
 impl Csr {
@@ -111,7 +115,14 @@ impl Csr {
             cost[k] = c;
             at[t as usize] += 1;
         }
-        Csr { first, head, cost }
+        Csr { first: first.into(), head: head.into(), cost: cost.into() }
+    }
+
+    /// Its arrays to files of `dir`, mapped.
+    fn spill(&mut self, dir: &Path, name: &str) -> Result<()> {
+        self.first.spill(Some(dir), &format!("{name}.first"))?;
+        self.head.spill(Some(dir), &format!("{name}.head"))?;
+        self.cost.spill(Some(dir), &format!("{name}.cost"))
     }
 
     fn arcs(&self, v: u32) -> impl Iterator<Item = (u32, u16)> + '_ {
@@ -133,7 +144,7 @@ impl Csr {
 /// prefixes of forbidden sequences of length two or more, sorted. A state's turns lead to
 /// the state after driving on, with the turn cost.
 struct CarStates {
-    last: Vec<u32>,
+    last: Column<u32>,
     fwd: Csr,
     rev: Csr,
     /// (segment, state) of the states of length two or more, sorted.
@@ -180,7 +191,7 @@ impl CarStates {
         let rev = fwd.reversed();
         let mut by_last: Vec<(u32, u32)> = (s..last.len()).map(|k| (last[k], k as u32)).collect();
         by_last.sort_unstable();
-        CarStates { last, fwd, rev, by_last }
+        CarStates { last: last.into(), fwd, rev, by_last }
     }
 
     /// Every state whose segment is a.
@@ -216,7 +227,8 @@ pub struct Graphs {
 }
 
 impl Graphs {
-    pub fn new(r: &Reference) -> Graphs {
+    /// The graphs, their arrays then on disk in the reference's directory (SPEC §10, memory).
+    pub fn new(r: &Reference) -> Result<Graphs> {
         let g = &r.active;
         let active = (0..g.w.len())
             .map(|m| {
@@ -227,7 +239,16 @@ impl Graphs {
                 (f, b)
             })
             .collect();
-        Graphs { car: CarStates::new(r), active }
+        let mut g = Graphs { car: CarStates::new(r), active };
+        let dir = r.dir.join("graphs");
+        g.car.last.spill(Some(&dir), "car.last")?;
+        g.car.fwd.spill(&dir, "car.fwd")?;
+        g.car.rev.spill(&dir, "car.rev")?;
+        for (m, (f, b)) in g.active.iter_mut().enumerate() {
+            f.spill(&dir, &format!("active{m}.fwd"))?;
+            b.spill(&dir, &format!("active{m}.rev"))?;
+        }
+        Ok(g)
     }
 
     /// Bytes one run may hold on n IDs: per ID, its best time and its column entry; per

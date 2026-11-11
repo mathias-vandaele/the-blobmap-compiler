@@ -211,7 +211,7 @@ pub fn verify(model: &Path, o: &Options) -> Result<Verified> {
     let mut mutants = Vec::new();
     for (fams, check) in passes {
         let r = phase(&format!("{} reference", fams.iter().map(|f| f.name()).collect::<Vec<_>>().join("+")), || Reference::build(&inputs, fams))?;
-        let ex = phase("dijkstra graphs", || Expected::new(&r));
+        let ex = phase("dijkstra graphs", || Expected::new(&r))?;
         if check {
             guarded(&mut report, "checks", |rep| reference_checks(&rt, &ex, &scenario, &n, rep));
         }

@@ -158,6 +158,8 @@ pub struct Reference {
     /// The antimeridian's twin groups (SPEC §4), found in the `.pbf` apart from the input
     /// modules: per latitude with nodes at both +180° and -180°, their ids ascending.
     pub twins: Vec<Vec<i64>>,
+    /// The directory of its columns, in the verify work directory.
+    pub dir: PathBuf,
     /// The internal indices in the order of their IDs, and the aliases sorted.
     sorted_ids: Vec<u32>,
     sorted_aliases: Vec<(Id, u32)>,
@@ -307,6 +309,7 @@ impl Reference {
             modes: Vec::new(),
             points: column("points", &mut pts.iter().map(|&k| points[k]))?,
             twins: phase("  twins", || twin_groups(&i.pbf))?,
+            dir: dir.clone(),
             sorted_ids: Vec::new(),
             sorted_aliases: Vec::new(),
         };
