@@ -39,24 +39,49 @@ pub(crate) struct Adj {
 }
 
 impl Adj {
-    fn new(n: usize, edges: impl Iterator<Item = (u32, u32, u32)>) -> Adj {
-        let mut e: Vec<(u32, u32, u32)> = edges.filter(|e| e.0 != e.1).flat_map(|(a, b, w)| [(a, b, w), (b, a, w)]).collect();
-        e.sort_unstable();
-        let mut merged: Vec<(u32, u32, u32)> = Vec::with_capacity(e.len());
-        for (a, b, w) in e {
-            match merged.last_mut() {
-                Some(l) if l.0 == a && l.1 == b => l.2 += w,
-                _ => merged.push((a, b, w)),
-            }
-        }
+    /// Each edge both ways, loops dropped, parallel arcs merged with their weights summed, the
+    /// arcs of a node by head. `edges` runs twice, to count and to fill, so the list is never
+    /// held: the CSR is built in place and each row sorted and merged there.
+    fn new<I: Iterator<Item = (u32, u32, u32)>>(n: usize, edges: impl Fn() -> I) -> Adj {
         let mut first = vec![0u32; n + 1];
-        for &(a, _, _) in &merged {
+        for (a, b, _) in edges().filter(|e| e.0 != e.1) {
             first[a as usize + 1] += 1;
+            first[b as usize + 1] += 1;
         }
         for i in 0..n {
             first[i + 1] += first[i];
         }
-        Adj { first, to: merged.iter().map(|e| e.1).collect(), weight: merged.iter().map(|e| e.2).collect() }
+        let m = first[n] as usize;
+        let (mut to, mut weight) = (vec![0u32; m], vec![0u32; m]);
+        let mut at = first[..n].to_vec();
+        for (a, b, w) in edges().filter(|e| e.0 != e.1) {
+            for (x, y) in [(a, b), (b, a)] {
+                let k = at[x as usize] as usize;
+                (to[k], weight[k]) = (y, w);
+                at[x as usize] += 1;
+            }
+        }
+        drop(at);
+        let (mut row, mut out) = (Vec::new(), 0usize);
+        for v in 0..n {
+            let (start, end) = (first[v] as usize, first[v + 1] as usize);
+            row.clear();
+            row.extend((start..end).map(|k| (to[k], weight[k])));
+            row.sort_unstable();
+            first[v] = out as u32;
+            for &(b, w) in &row {
+                if out > first[v] as usize && to[out - 1] == b {
+                    weight[out - 1] += w;
+                } else {
+                    (to[out], weight[out]) = (b, w);
+                    out += 1;
+                }
+            }
+        }
+        first[n] = out as u32;
+        to.truncate(out);
+        weight.truncate(out);
+        Adj { first, to, weight }
     }
 
     pub fn range(&self, v: usize) -> std::ops::Range<usize> {
@@ -185,16 +210,19 @@ fn fine(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
 /// Cells from a coarsened graph, for a component too large to order at once: the fine nodes
 /// clustered, then dissected with the clusters' orders as a guide (`dissect`).
 fn coarse(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
-    let fine = Adj::new(g.n, g.tail.iter().zip(g.head).map(|(&a, &b)| (a, b, 1)));
+    let fine = Adj::new(g.n, || g.tail.iter().zip(g.head).map(|(&a, &b)| (a, b, 1)));
     // Coarsen to clusters of at most a quarter cell, until about 16 fine nodes per cluster.
     let target = (g.n / 16).max(1024);
     let cap = (max_cell as u64 / 4).max(1);
     let mut map: Vec<u32> = (0..g.n as u32).collect();
     let mut w: Vec<u64> = vec![1; g.n];
-    let mut adj = Adj::new(g.n, g.tail.iter().zip(g.head).map(|(&a, &b)| (a, b, 1)));
-    let (mut lat, mut lon): (Vec<f64>, Vec<f64>) = (g.lat.iter().map(|&x| x as f64).collect(), g.lon.iter().map(|&x| x as f64).collect());
+    // The graph of the current clusters; the fine graph itself until the first round.
+    let mut adj: Option<Adj> = None;
+    // The clusters' centres; the fine coordinates themselves until the first round.
+    let (mut lat, mut lon): (Vec<f64>, Vec<f64>) = (Vec::new(), Vec::new());
     while w.len() > target {
-        let (cluster, k) = matching(&adj, &w, cap);
+        let cur = adj.as_ref().unwrap_or(&fine);
+        let (cluster, k) = matching(cur, &w, cap);
         if k * 10 > w.len() * 9 {
             break;
         }
@@ -203,23 +231,27 @@ fn coarse(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
         for v in 0..w.len() {
             let c = cluster[v] as usize;
             nw[c] += w[v];
-            nlat[c] += lat[v] * w[v] as f64;
-            nlon[c] += lon[v] * w[v] as f64;
+            let (la, lo) = if adj.is_none() { (g.lat[v] as f64, g.lon[v] as f64) } else { (lat[v], lon[v]) };
+            nlat[c] += la * w[v] as f64;
+            nlon[c] += lo * w[v] as f64;
         }
         for c in 0..k {
             nlat[c] /= nw[c] as f64;
             nlon[c] /= nw[c] as f64;
         }
-        let edges: Vec<(u32, u32, u32)> = (0..w.len())
-            .flat_map(|v| adj.range(v).map(move |e| (v, e)))
-            .map(|(v, e)| (cluster[v], cluster[adj.to[e] as usize], adj.weight[e]))
-            .collect();
-        adj = Adj::new(k, edges.into_iter().filter(|e| e.0 < e.1));
+        let cluster = &cluster;
+        let next = Adj::new(k, || {
+            (0..w.len())
+                .flat_map(move |v| cur.range(v).map(move |e| (cluster[v], cluster[cur.to[e] as usize], cur.weight[e])))
+                .filter(|e| e.0 < e.1)
+        });
+        adj = Some(next);
         for m in &mut map {
             *m = cluster[*m as usize];
         }
         (w, lat, lon) = (nw, nlat, nlon);
     }
+    drop((adj, w, lat, lon));
     crate::order::dissect::refined(g, &fine, &map, orderer, max_cell)
 }
 
