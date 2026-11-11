@@ -254,7 +254,7 @@ impl Stage<(&Osm, &Config)> for ActiveNetwork {
 
 /// Every component's order and blocks (SPEC §5), a stage of its own so that the build report
 /// shows the memory of nested dissection.
-pub struct Orders(pub &'static str);
+pub struct Orders(pub &'static str, pub PathBuf);
 
 impl Stage<(&dyn Family, &Config, Option<&FixedRanks>)> for Orders {
     type Output = hier::Ordered;
@@ -265,7 +265,7 @@ impl Stage<(&dyn Family, &Config, Option<&FixedRanks>)> for Orders {
         let budget = c.build.build.memory_budget_bytes;
         let max_cell = (budget / hier::BYTES_PER_NODE).max(1) as usize;
         let nd_max = (c.build.build.order_memory_bytes / hier::ND_BYTES_PER_NODE) as usize;
-        hier::order(f, max_cell, nd_max, fixed)
+        hier::order(f, max_cell, nd_max, fixed, &self.1)
     }
 }
 
@@ -593,7 +593,7 @@ pub fn build(a: &Args) -> Result<BuildResult> {
     // vocabulary and the reports read (SPEC §10, memory). Slots: FORMAT §2.4's unit order.
     let (cp, mut cg) = run.run(&CarNetwork, (&osm, c))?;
     let car = Car::new(&cp, &cg);
-    let co = run.run(&Orders("car-order"), (&car as &dyn Family, c, None))?;
+    let co = run.run(&Orders("car-order", osm.dir().join("car-split")), (&car as &dyn Family, c, None))?;
     let (cb, cl) = run.run(&Hierarchies("car-hierarchy"), (&car as &dyn Family, c, co))?;
     let car_road = run.run(&WriteRoad { name: "car-write", slots: (0, 2), arc_local: false }, (&car as &dyn Family, cb, cl, &mut writer))?;
     let ce = car.into_components();
@@ -602,7 +602,7 @@ pub fn build(a: &Args) -> Result<BuildResult> {
     let (ap, mut ag) = run.run(&ActiveNetwork, (&osm, c))?;
     let act = Active::new(&ap, &ag);
     let fixed = fixed_ranks(&ap, &c.build.order.active)?;
-    let ao = run.run(&Orders("active-order"), (&act as &dyn Family, c, fixed.as_ref()))?;
+    let ao = run.run(&Orders("active-order", osm.dir().join("active-split")), (&act as &dyn Family, c, fixed.as_ref()))?;
     let (ab, al) = run.run(&Hierarchies("active-hierarchy"), (&act as &dyn Family, c, ao))?;
     let active_road = run.run(&WriteRoad { name: "active-write", slots: (1, 3), arc_local: true }, (&act as &dyn Family, ab, al, &mut writer))?;
     drop(fixed);

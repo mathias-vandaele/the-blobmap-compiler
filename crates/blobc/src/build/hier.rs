@@ -2,12 +2,15 @@
 //! graph, its plan (whole or cells), contraction, link initialisation (FORMAT §6.2) and
 //! customization (§6.3). Each component is one tree of the family's elimination forest.
 
+use std::path::Path;
+
 use anyhow::{Result, ensure};
 use blobmap_format::NONE;
 use rayon::prelude::*;
 
 use crate::build::family::Family;
 use crate::cch::Hierarchy;
+use crate::osm::column::Column;
 use crate::order::{Block, Fixed, Graph, InertialFlow, Orderer, plan};
 
 /// The memory budget per node of a cell under construction (SPEC §5): a cell has at most
@@ -44,31 +47,32 @@ pub struct Built {
     /// Each node's layout id in the family.
     pub layout_of: Vec<u32>,
     /// The arcs inside one component, CSR by tail node (`arc_count` order inside a node).
-    pub out_first: Vec<u32>,
-    pub out: Vec<u32>,
+    pub out_first: Column<u32>,
+    pub out: Column<u32>,
 }
 
 /// A node order fixed by the config (FORMAT: `build.toml [order]`): each node's rank, or
 /// `NONE` if the list does not name it.
 pub type FixedRanks = Vec<u32>;
 
-/// A family split by component: each component's nodes and the arcs inside it.
+/// A family split by component: each component's nodes and the arcs inside it, in columns
+/// mapped from the work directory.
 pub struct Split {
     /// The nodes of component x, ascending, are `members[first[x] .. first[x + 1]]`.
-    members: Vec<u32>,
+    members: Column<u32>,
     first: Vec<usize>,
     /// A node's position among its component's nodes.
-    local_of: Vec<u32>,
+    local_of: Column<u32>,
     /// The arcs inside component x are `by_component[arc_first[x] .. arc_first[x + 1]]`.
-    by_component: Vec<u32>,
+    by_component: Column<u32>,
     arc_first: Vec<usize>,
     /// The arcs inside one component, CSR by tail node.
-    out_first: Vec<u32>,
-    out: Vec<u32>,
+    out_first: Column<u32>,
+    out: Column<u32>,
 }
 
 impl Split {
-    fn new(f: &dyn Family) -> Split {
+    fn new(f: &dyn Family, dir: &Path) -> Result<Split> {
         let e = f.components();
         let n = f.nodes();
         let mut members: Vec<(u32, u32)> = (0..n as u32).map(|v| (e.of[v as usize], v)).collect();
@@ -118,15 +122,23 @@ impl Split {
             out[fill[t] as usize] = a;
             fill[t] += 1;
         }
-        Split { members, first, local_of, by_component, arc_first, out_first, out }
+        let col = |v: Vec<u32>, name: &str| -> Result<Column<u32>> {
+            let mut c = Column::from(v);
+            c.spill(Some(dir), name)?;
+            Ok(c)
+        };
+        let (members, local_of, by_component) = (col(members, "members")?, col(local_of, "local_of")?, col(by_component, "by_component")?);
+        Ok(Split { members, first, local_of, by_component, arc_first, out_first: col(out_first, "out_first")?, out: col(out, "out")? })
     }
 
-    /// Component x: its nodes, its arcs, and its arcs as local node pairs without loops.
-    fn component(&self, f: &dyn Family, x: usize) -> (Vec<u32>, &[u32], Vec<(u32, u32)>) {
-        let nodes = self.members[self.first[x]..self.first[x + 1]].to_vec();
-        let arcs = &self.by_component[self.arc_first[x]..self.arc_first[x + 1]];
-        let edges = arcs.iter().map(|&a| self.local(f, a)).filter(|(t, h)| t != h).collect();
-        (nodes, arcs, edges)
+    /// Component x: its nodes and its arcs.
+    fn component(&self, x: usize) -> (Vec<u32>, &[u32]) {
+        (self.members[self.first[x]..self.first[x + 1]].to_vec(), &self.by_component[self.arc_first[x]..self.arc_first[x + 1]])
+    }
+
+    /// Arcs as local node pairs without loops.
+    fn edges<'a>(&'a self, f: &'a dyn Family, arcs: &'a [u32]) -> impl Iterator<Item = (u32, u32)> + 'a {
+        arcs.iter().map(move |&a| self.local(f, a)).filter(|(t, h)| t != h)
     }
 
     fn local(&self, f: &dyn Family, a: u32) -> (u32, u32) {
@@ -142,17 +154,17 @@ pub struct Ordered {
 }
 
 /// Orders every component: in one piece if it has at most `max_cell` nodes, else as cells, cut
-/// from its fine graph's order if it has at most `nd_max` nodes.
-pub fn order(f: &dyn Family, max_cell: usize, nd_max: usize, fixed: Option<&FixedRanks>) -> Result<Ordered> {
-    let split = Split::new(f);
+/// from its fine graph's order if it has at most `nd_max` nodes. The family's split by component
+/// is kept in columns under `dir`.
+pub fn order(f: &dyn Family, max_cell: usize, nd_max: usize, fixed: Option<&FixedRanks>, dir: &Path) -> Result<Ordered> {
+    let split = Split::new(f, dir)?;
     let plans: Vec<Result<Vec<Block>>> = (0..f.components().len())
         .into_par_iter()
         .map(|x| {
-            let (nodes, _, edges) = split.component(f, x);
+            let (nodes, arcs) = split.component(x);
             let k = nodes.len();
-            let tail: Vec<u32> = edges.iter().map(|e| e.0).collect();
-            let head: Vec<u32> = edges.iter().map(|e| e.1).collect();
-            drop(edges);
+            let tail: Vec<u32> = split.edges(f, arcs).map(|e| e.0).collect();
+            let head: Vec<u32> = split.edges(f, arcs).map(|e| e.1).collect();
             let (lat, mut lon): (Vec<f32>, Vec<f32>) = nodes.iter().map(|&v| f.coord(v)).unzip();
             // A component across the antimeridian is cut as one region (SPEC §4).
             crate::osm::geo::unwrap_lons(&mut lon);
@@ -181,10 +193,11 @@ pub fn build(f: &dyn Family, o: Ordered) -> Result<Built> {
         .into_par_iter()
         .enumerate()
         .map(|(x, blocks)| {
-            let (nodes, arcs, edges) = split.component(f, x);
+            let (nodes, arcs) = split.component(x);
             let k = nodes.len();
             let local = |a: u32| split.local(f, a);
-            let h = Hierarchy::build(k, &edges, &blocks);
+            let h = Hierarchy::build(k, || split.edges(f, arcs), &blocks);
+            drop(blocks);
             let (mut up, mut down) = (Vec::with_capacity(metrics), Vec::with_capacity(metrics));
             for m in 0..metrics {
                 let (mut u, mut d) = h.unset();

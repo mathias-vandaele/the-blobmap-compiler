@@ -36,8 +36,10 @@ pub struct Hierarchy {
 }
 
 impl Hierarchy {
-    /// `edges` are node pairs in any direction; `plan` is `crate::order::plan`'s.
-    pub fn build(n: usize, edges: &[(u32, u32)], plan: &[Block]) -> Hierarchy {
+    /// `edges` are node pairs in any direction, run twice (to count, then to fill); `plan` is
+    /// `crate::order::plan`'s. The arcs and the upper neighbours are flat arrays, a few words
+    /// per node and per link, so that a component of any size fits (SPEC §10).
+    pub fn build<I: Iterator<Item = (u32, u32)>>(n: usize, edges: impl Fn() -> I, plan: &[Block]) -> Hierarchy {
         const NONE: u32 = u32::MAX;
         let mut block_of = vec![NONE; n];
         let mut rank_in = vec![0u32; n];
@@ -50,17 +52,29 @@ impl Hierarchy {
         }
         assert!(block_of.iter().all(|&b| b != NONE), "a node in no block");
         let top = plan.iter().position(|b| b.kind == Kind::Top);
-        // Arcs by node, both directions.
-        let mut adj: Vec<Vec<u32>> = vec![Vec::new(); n];
-        for &(a, b) in edges {
-            if a != b {
-                adj[a as usize].push(b);
-                adj[b as usize].push(a);
+        // Arcs by node, both directions, in the order given (CSR).
+        let mut adj_first = vec![0u64; n + 1];
+        for (a, b) in edges().filter(|e| e.0 != e.1) {
+            adj_first[a as usize + 1] += 1;
+            adj_first[b as usize + 1] += 1;
+        }
+        for i in 0..n {
+            adj_first[i + 1] += adj_first[i];
+        }
+        let mut adj_to = vec![0u32; adj_first[n] as usize];
+        let mut at = adj_first[..n].to_vec();
+        for (a, b) in edges().filter(|e| e.0 != e.1) {
+            for (x, y) in [(a, b), (b, a)] {
+                adj_to[at[x as usize] as usize] = y;
+                at[x as usize] += 1;
             }
         }
+        drop(at);
+        let adj = |v: u32| &adj_to[adj_first[v as usize] as usize..adj_first[v as usize + 1] as usize];
         // Upper neighbours of each node, as nodes, by the block's rank (externals last, by
-        // their top-block rank).
-        let mut up: Vec<Vec<u32>> = vec![Vec::new(); n];
+        // their top-block rank): node v's are `up_to[up_at[v] ..][.. up_len[v]]`.
+        let (mut up_at, mut up_len) = (vec![0u64; n], vec![0u32; n]);
+        let mut up_to: Vec<u32> = Vec::new();
         let mut top_fill: Vec<(u32, u32)> = Vec::new();
         for (b, bl) in plan.iter().enumerate() {
             if Some(b) == top {
@@ -69,7 +83,7 @@ impl Hierarchy {
             let k = bl.nodes.len() as u32;
             let mut ext: Vec<u32> = Vec::new();
             for &v in &bl.nodes {
-                for &u in &adj[v as usize] {
+                for &u in adj(v) {
                     if block_of[u as usize] != b as u32 {
                         assert_eq!(Some(block_of[u as usize] as usize), top, "an arc joins two cells");
                         ext.push(u);
@@ -83,9 +97,11 @@ impl Hierarchy {
             let node_of_rank = |r: u32| {
                 if r < k { bl.nodes[r as usize] } else { ext[ext.partition_point(|&u| ext_rank(u) < r)] }
             };
-            let el = eliminate(k as usize, bl.nodes.iter().flat_map(|&v| adj[v as usize].iter().map(move |&u| (local(v), local(u)))));
+            let el = eliminate(k as usize, bl.nodes.iter().flat_map(|&v| adj(v).iter().map(move |&u| (local(v), local(u)))));
             for (r, list) in el.up.into_iter().enumerate() {
-                up[bl.nodes[r] as usize] = list.into_iter().map(node_of_rank).collect();
+                let v = bl.nodes[r] as usize;
+                (up_at[v], up_len[v]) = (up_to.len() as u64, list.len() as u32);
+                up_to.extend(list.into_iter().map(node_of_rank));
             }
             top_fill.extend(el.fill.into_iter().map(|(a, c)| (node_of_rank(a), node_of_rank(c))));
         }
@@ -94,26 +110,30 @@ impl Hierarchy {
             let k = bl.nodes.len();
             let r = |v: u32| rank_in[v as usize];
             let tb = t as u32;
-            let (block_of, adj) = (&block_of, &adj);
+            let block_of = &block_of;
             let edges = bl
                 .nodes
                 .iter()
-                .flat_map(move |&v| adj[v as usize].iter().filter(move |&&u| block_of[u as usize] == tb).map(move |&u| (r(v), r(u))))
+                .flat_map(move |&v| adj(v).iter().filter(move |&&u| block_of[u as usize] == tb).map(move |&u| (r(v), r(u))))
                 .chain(top_fill.iter().map(|&(a, c)| (r(a), r(c))));
             let el = eliminate(k, edges);
             assert!(el.fill.is_empty());
             for (rk, list) in el.up.into_iter().enumerate() {
-                up[bl.nodes[rk] as usize] = list.into_iter().map(|x| bl.nodes[x as usize]).collect();
+                let v = bl.nodes[rk] as usize;
+                (up_at[v], up_len[v]) = (up_to.len() as u64, list.len() as u32);
+                up_to.extend(list.into_iter().map(|x| bl.nodes[x as usize]));
             }
         }
+        drop((top_fill, adj_to, adj_first));
         // Heights inside each block: the parent is the lowest-ranked upper neighbour.
         let mut height = vec![0u32; n];
         for bl in plan {
             for &v in &bl.nodes {
-                if let Some(&p) = up[v as usize].first()
-                    && block_of[p as usize] == block_of[v as usize]
-                {
-                    height[p as usize] = height[p as usize].max(height[v as usize] + 1);
+                if up_len[v as usize] > 0 {
+                    let p = up_to[up_at[v as usize] as usize];
+                    if block_of[p as usize] == block_of[v as usize] {
+                        height[p as usize] = height[p as usize].max(height[v as usize] + 1);
+                    }
                 }
             }
         }
@@ -142,11 +162,16 @@ impl Hierarchy {
             }
             blocks.push(LayoutBlock { kind: bl.kind, id_first, nodes: nodes.len() as u32, level_first });
         }
-        let mut up_first = vec![0u64];
-        let mut up_head = Vec::new();
+        drop((block_of, rank_in, height));
+        let mut up_first = Vec::with_capacity(n + 1);
+        up_first.push(0u64);
+        let mut up_head = Vec::with_capacity(up_to.len());
+        let mut row: Vec<u32> = Vec::new();
         for &v in &node_of {
             let id = layout_of[v as usize];
-            let mut row: Vec<u32> = up[v as usize].iter().map(|&u| layout_of[u as usize]).collect();
+            let at = up_at[v as usize] as usize;
+            row.clear();
+            row.extend(up_to[at..at + up_len[v as usize] as usize].iter().map(|&u| layout_of[u as usize]));
             row.sort_unstable();
             assert!(row.last().is_none_or(|&x| x < id), "an upper neighbour after its node");
             up_head.extend_from_slice(&row);
@@ -239,7 +264,7 @@ mod tests {
         arcs.push((1, 2, 4));
         let edges: Vec<(u32, u32)> = arcs.iter().map(|a| (a.0, a.1)).collect();
         let plan = [Block { kind: Kind::Whole, nodes: vec![0, 6, 3, 2, 8, 5, 1, 7, 4] }];
-        let h = Hierarchy::build(9, &edges, &plan);
+        let h = Hierarchy::build(9, || edges.iter().copied(), &plan);
         assert_eq!((h.links(), h.levels()), (17, 5));
         let (mut up, mut down) = h.unset();
         for &(a, b, t) in &arcs {
@@ -291,7 +316,7 @@ mod tests {
         let lon: Vec<f32> = (0..k * k).map(|v| (v % k) as f32 * 0.001).collect();
         let g = crate::order::Graph { n: (k * k) as usize, tail: &tail, head: &head, lat: &lat, lon: &lon };
         // From the fine order (the one-piece hierarchy), then from a coarsened graph.
-        let whole = Hierarchy::build(g.n, &edges, &crate::order::plan(&g, &crate::order::InertialFlow, usize::MAX, 0));
+        let whole = Hierarchy::build(g.n, || edges.iter().copied(), &crate::order::plan(&g, &crate::order::InertialFlow, usize::MAX, 0));
         let pairs = |h: &Hierarchy| {
             let mut p: Vec<(u32, u32)> =
                 (0..h.len() as u32).flat_map(|v| h.row(v).map(move |kk| (v, kk))).map(|(v, kk)| (h.node_of[v as usize], h.node_of[h.up_head[kk] as usize])).collect();
@@ -300,7 +325,7 @@ mod tests {
         };
         for nd_max in [usize::MAX, 0] {
         let plan = crate::order::plan(&g, &crate::order::InertialFlow, 200, nd_max);
-        let h = Hierarchy::build(g.n, &edges, &plan);
+        let h = Hierarchy::build(g.n, || edges.iter().copied(), &plan);
         assert!(h.cells() >= 3);
         if nd_max == usize::MAX {
             assert_eq!(pairs(&h), pairs(&whole), "the links of the one-piece hierarchy");
