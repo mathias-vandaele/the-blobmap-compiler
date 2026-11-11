@@ -66,8 +66,8 @@ pub fn main(a: Vec<String>) -> Result<()> {
         let moves: Vec<Option<(u32, u32, f64)>> = (0..r.n())
             .into_par_iter()
             .map(|i| {
-                let en = mode.at[i].ok()?;
-                let (lat, lon) = r.points[i];
+                let en = mode.at(i).ok()?;
+                let [lat, lon] = r.points[i];
                 let f = grid.find(p, lat, lon, mode.radius, mode.small_max, sets);
                 let (b, a) = (f.nearest.expect("served"), f.servable.expect("served"));
                 assert_eq!(a.piece, en.piece, "the re-snap differs from the reference");

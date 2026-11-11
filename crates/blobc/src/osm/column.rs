@@ -29,6 +29,8 @@ unsafe impl Plain for i64 {}
 unsafe impl Plain for f32 {}
 unsafe impl Plain for f64 {}
 unsafe impl Plain for [f32; 2] {}
+unsafe impl Plain for [f64; 2] {}
+unsafe impl Plain for [u8; 16] {}
 
 const _: () = assert!(cfg!(target_endian = "little"), "columns are read in place as little-endian");
 

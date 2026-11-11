@@ -244,7 +244,7 @@ impl Graphs {
         let mut best = vec![u32::MAX; n];
         let mut by_component: BTreeMap<u32, Vec<(usize, u32)>> = BTreeMap::new();
         for &(s, st) in src {
-            if let Ok(e) = m.at[s] {
+            if let Ok(e) = m.at(s) {
                 by_component.entry(e.component).or_default().push((s, st as u32));
             }
         }
@@ -256,7 +256,7 @@ impl Graphs {
 
     fn component_column(&self, r: &Reference, m: &Mode, x: u32, srcs: &[(usize, u32)], from: bool, best: &mut [u32]) {
         // The sources by piece, for the direct terms.
-        let mut on_piece: Vec<(u32, usize, u32)> = srcs.iter().map(|&(s, st)| (m.at[s].unwrap().piece, s, st)).collect();
+        let mut on_piece: Vec<(u32, usize, u32)> = srcs.iter().map(|&(s, st)| (m.at(s).unwrap().piece, s, st)).collect();
         on_piece.sort_unstable();
         for &(s, st) in srcs {
             best[s] = best[s].min(st);
@@ -266,7 +266,7 @@ impl Graphs {
             let mut dist = vec![u32::MAX; cs.last.len()];
             if from {
                 for &(s, st) in srcs {
-                    for side in sides(r, m, &m.at[s].unwrap()).iter().flatten() {
+                    for side in sides(r, m, &m.at(s).unwrap()).iter().flatten() {
                         let Some((_, after)) = split(side.w, side.g) else { continue };
                         for (k, c) in cs.fwd.arcs(side.tail) {
                             let t = st + after + c as u32;
@@ -281,7 +281,7 @@ impl Graphs {
                 }
             } else {
                 for &(s, st) in srcs {
-                    for side in sides(r, m, &m.at[s].unwrap()).iter().flatten() {
+                    for side in sides(r, m, &m.at(s).unwrap()).iter().flatten() {
                         let Some((before, _)) = split(side.w, side.g) else { continue };
                         for k in cs.of(side.tail) {
                             dist[k as usize] = dist[k as usize].min(st + before);
@@ -304,7 +304,7 @@ impl Graphs {
             let (f, b) = &self.active[m.metric];
             let mut dist = vec![u32::MAX; r.active.nodes];
             for &(s, st) in srcs {
-                for side in sides(r, m, &m.at[s].unwrap()).iter().flatten() {
+                for side in sides(r, m, &m.at(s).unwrap()).iter().flatten() {
                     let Some((before, after)) = split(side.w, side.g) else { continue };
                     let (v, t) = if from { (side.head, st + after) } else { (side.tail, st + before) };
                     dist[v as usize] = dist[v as usize].min(t);
@@ -332,7 +332,7 @@ impl Graphs {
         at: impl Fn(&Side) -> Option<u32>,
     ) {
         for (i, b) in best.iter_mut().enumerate() {
-            let Ok(d) = m.at[i] else { continue };
+            let Ok(d) = m.at(i) else { continue };
             if d.component != x {
                 continue;
             }
@@ -343,7 +343,7 @@ impl Graphs {
             }
             let lo = on_piece.partition_point(|p| p.0 < d.piece);
             for &(_, s, st) in on_piece[lo..].iter().take_while(|p| p.0 == d.piece) {
-                let o = m.at[s].unwrap();
+                let o = m.at(s).unwrap();
                 let t = if from { direct(r, m, &o, &d) } else { direct(r, m, &d, &o) };
                 *b = (*b).min(st.saturating_add(t));
             }
@@ -355,7 +355,7 @@ impl Graphs {
     /// The CAR time from the ID at o to the ID at d (SPEC §9), by a Dijkstra that stops once
     /// no label can improve the arrival.
     pub fn car_pair(&self, r: &Reference, m: &Mode, o: usize, d: usize) -> u16 {
-        let (Ok(eo), Ok(ed)) = (m.at[o], m.at[d]) else { return INF };
+        let (Ok(eo), Ok(ed)) = (m.at(o), m.at(d)) else { return INF };
         if o == d {
             return 0;
         }

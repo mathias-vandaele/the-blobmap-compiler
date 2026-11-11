@@ -111,13 +111,13 @@ pub fn snapping_brute(r: &Reference, max: usize, rep: &mut Report) {
     let step = r.n().div_ceil(max.max(1)).max(1);
     for mode in &r.modes {
         let p = if mode.car { &r.car_pieces } else { &r.active_pieces };
-        let picked: Vec<usize> = (0..r.n()).step_by(step).filter(|&i| !matches!(mode.at[i], Err((FILTERED_PLACE, _)))).collect();
+        let picked: Vec<usize> = (0..r.n()).step_by(step).filter(|&i| !matches!(mode.at(i), Err((FILTERED_PLACE, _)))).collect();
         let results: Vec<Option<String>> = picked
             .par_iter()
             .map(|&i| {
-                let (lat, lon) = r.points[i];
+                let [lat, lon] = r.points[i];
                 let want = crate::snap::find_brute(p, lat, lon, mode.radius, mode.small_max, &mode.sets).outcome();
-                let got = mode.at[i].map(|e| (e.piece, e.frac.to_bits())).map_err(|(c, d)| (c, d.to_bits()));
+                let got = mode.at(i).map(|e| (e.piece, e.frac.to_bits())).map_err(|(c, d)| (c, d.to_bits()));
                 let want = want.map(|h| (h.piece, h.frac.to_bits())).map_err(|(c, d)| (c, d.to_bits()));
                 (got != want).then(|| format!("{} {}: grid {got:?}, every segment {want:?}", mode.name, uuid(&r.ids[i])))
             })
@@ -134,14 +134,14 @@ pub fn snapping_brute(r: &Reference, max: usize, rep: &mut Report) {
 pub fn snapping(rt: &Runtime, r: &Reference, rep: &mut Report) -> Result<()> {
     let o = rep.check("snapping re-check");
     let v = &rt.vocab;
-    let ids: Vec<[u8; 16]> = v.address.iter().chain(&v.place).copied().collect();
-    o.expect(ids == r.ids, || format!("ID tables differ: {} stored, {} expected", ids.len(), r.ids.len()));
+    let same_ids = v.address.len() + v.place.len() == r.ids.len() && v.address.iter().chain(&v.place).eq(r.ids.iter());
+    o.expect(same_ids, || format!("ID tables differ: {} stored, {} expected", v.address.len() + v.place.len(), r.ids.len()));
     let mut al: Vec<([u8; 16], u32)> = v.alias.iter().copied().zip(v.alias_to.iter().copied()).collect();
     al.sort();
     let mut ral = r.aliases.clone();
     ral.sort();
     o.expect(al == ral, || "aliases differ".into());
-    if ids != r.ids {
+    if !same_ids {
         return Ok(());
     }
     // Served IDs, checked one component at a time: (family, component, mode, ID).
@@ -152,7 +152,7 @@ pub fn snapping(rt: &Runtime, r: &Reference, rep: &mut Report) -> Result<()> {
         for i in 0..r.n() {
             o.count();
             let stored_reason = mv.reasons.binary_search_by_key(&(i as u32), |x| x.0).ok().map(|j| (mv.reasons[j].1, mv.reasons[j].2));
-            match mode.at[i] {
+            match mode.at(i) {
                 Err((FILTERED_PLACE, _)) => o.expect(mv.component[i] == NONE && v.status_of(i as u32) == 4, || {
                     format!("{} {}: not a filtered place", mode.name, uuid(&r.ids[i]))
                 }),
@@ -176,7 +176,7 @@ pub fn snapping(rt: &Runtime, r: &Reference, rep: &mut Report) -> Result<()> {
         for &(_, _, m, i) in group {
             let (mode, i) = (&r.modes[m], i as usize);
             let mv = &v.modes[rt.mode(mode.name)?];
-            let Ok(e) = mode.at[i] else { unreachable!("a served ID") };
+            let Ok(e) = mode.at(i) else { unreachable!("a served ID") };
             let (keys, off) = expected_entry(r, m, e.piece as usize, e.frac);
             let stored: [Option<(i64, u32, u8)>; 2] = if mode.car {
                 [0, 1].map(|d| {
@@ -306,7 +306,7 @@ pub fn distances(rt: &Runtime, ex: &Expected, n: &Samples, rep: &mut Report) -> 
     for (m, mode) in r.modes.iter().enumerate() {
         let k = rt.mode(mode.name)?;
         let o = rep.check(&format!("{}: columns against Dijkstra (from, to, starts)", mode.name));
-        let served: Vec<usize> = (0..r.n()).filter(|&i| mode.at[i].is_ok()).collect();
+        let served: Vec<usize> = (0..r.n()).filter(|&i| mode.at(i).is_ok()).collect();
         let step = served.len().div_ceil(n.columns).max(1);
         let mut cases: Vec<(Vec<(usize, u16)>, Dir, &str)> = Vec::new();
         for &s in served.iter().step_by(step) {
@@ -381,7 +381,7 @@ pub fn via_copies(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()> {
     prefixes.dedup();
     // IDs by the segment of each slot, in the ID's component.
     let mut on: Vec<(u32, u32)> = Vec::new();
-    for (i, at) in mode.at.iter().enumerate() {
+    for (i, at) in mode.iter().enumerate() {
         if let Ok(e) = at {
             for s in g.seg_of_piece[e.piece as usize] {
                 if s != NONE && r.car_components.of[s as usize] == e.component {

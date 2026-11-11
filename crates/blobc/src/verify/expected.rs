@@ -95,14 +95,14 @@ impl Expected<'_> {
         let unknown = || json!({"reason": "UnknownId", "id": s});
         let id = crate::overture::parse_uuid(s).map_err(|_| unknown())?;
         let i = self.r.lookup(&id).ok_or_else(unknown)? as usize;
-        match self.r.modes[m].at[i] {
+        match self.r.modes[m].at(i) {
             Ok(_) => Ok(i),
             Err((c, _)) => Err(json!({"reason": reason_name(c), "id": s})),
         }
     }
 
     fn component(&self, m: usize, i: usize) -> u32 {
-        self.r.modes[m].at[i].as_ref().map(|e| e.component).unwrap_or(u32::MAX)
+        self.r.modes[m].at(i).as_ref().map(|e| e.component).unwrap_or(u32::MAX)
     }
 
     pub fn travel_time(&self, a: &str, b: &str, mode: &str) -> Value {
@@ -159,7 +159,7 @@ impl Expected<'_> {
 
     /// The kept places matching a category, by internal index.
     pub fn matching(&self, c: &Cat) -> Vec<usize> {
-        let na = self.r.place_of.iter().take_while(|p| p.is_none()).count();
+        let na = self.r.n_addr;
         (na..self.r.n()).filter(|&p| self.matches(p, c)).collect()
     }
 
@@ -195,7 +195,7 @@ impl Expected<'_> {
 
     /// Whether internal index i is a kept place matching the category.
     pub fn matches(&self, i: usize, c: &Cat) -> bool {
-        let Some(p) = self.r.place_of[i] else { return false };
+        let Some(p) = self.r.place_of(i) else { return false };
         let p = &self.r.catalog.places[p];
         let t = &self.r.catalog.taxonomy;
         if p.status != 0 || p.primary == NONE16 {
@@ -270,7 +270,7 @@ impl Expected<'_> {
         let c = self.category(&a["transfer_category"]).expect("a known category");
         let pen = a["penalty"].as_u64().unwrap() as u16;
         let transfers: Vec<usize> =
-            self.matching(&c).into_iter().filter(|&p| self.r.modes[car].at[p].is_ok() && self.r.modes[walk].at[p].is_ok()).collect();
+            self.matching(&c).into_iter().filter(|&p| self.r.modes[car].at(p).is_ok() && self.r.modes[walk].at(p).is_ok()).collect();
         if op == "chained" {
             let (sa, sb) = (a["a"].as_str().unwrap(), a["b"].as_str().unwrap());
             let x = match self.served(sa, car) {
@@ -303,7 +303,7 @@ impl Expected<'_> {
         let src: Vec<(usize, u16)> = transfers.iter().map(|&p| (p, first[p].saturating_add(pen))).filter(|s| s.1 != INF).collect();
         let mut col: Vec<u16> =
             if src.is_empty() { vec![INF; self.r.n()] } else { self.column(m2, &src, a["dir"].as_str().unwrap()).to_vec() };
-        if self.r.modes[m2].at[i].is_ok() {
+        if self.r.modes[m2].at(i).is_ok() {
             col[i] = 0;
         }
         let mut h = Sha256::new();
@@ -337,7 +337,7 @@ impl Expected<'_> {
             } else {
                 let c = self.category(target).expect("a known category");
                 let places: Vec<(usize, u16)> =
-                    self.matching(&c).into_iter().filter(|&p| self.r.modes[m].at[p].is_ok()).map(|p| (p, 0)).collect();
+                    self.matching(&c).into_iter().filter(|&p| self.r.modes[m].at(p).is_ok()).map(|p| (p, 0)).collect();
                 self.column(m, &places, if dir == "from" { "to" } else { "from" })
             };
             if !modes.contains(&m) {
@@ -345,7 +345,7 @@ impl Expected<'_> {
             }
             times.push(col);
         }
-        let na = self.r.place_of.iter().filter(|p| p.is_none()).count();
+        let na = self.r.n_addr;
         let n = self.r.n();
         let range = match a.get("kind").and_then(Value::as_str).unwrap_or("addresses") {
             "addresses" => 0..na,
@@ -353,7 +353,7 @@ impl Expected<'_> {
             _ => 0..n,
         };
         let matching: Vec<usize> =
-            range.filter(|&i| modes.iter().all(|&m| self.r.modes[m].at[i].is_ok())).filter(|&i| eval(expr, &mut 0, &times, i)).collect();
+            range.filter(|&i| modes.iter().all(|&m| self.r.modes[m].at(i).is_ok())).filter(|&i| eval(expr, &mut 0, &times, i)).collect();
         match a.get("k") {
             None => self.ids_answer(matching.into_iter()),
             Some(k) => {

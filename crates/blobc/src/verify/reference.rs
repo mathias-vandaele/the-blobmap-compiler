@@ -5,7 +5,7 @@
 //! A reference holds the families asked for, so a large input is checked one family at a
 //! time; the other family's fields stay empty and its modes absent.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use blobmap_format::NONE;
@@ -14,6 +14,7 @@ use rayon::prelude::*;
 
 use crate::build::{ActiveNetwork, CarNetwork, ReadCatalog, ReadNodes, Stage};
 use crate::graph::{ActiveGraph, CarGraph, Components, active::METRICS};
+use crate::osm::column::{Column, ColumnWriter, Plain};
 use crate::osm::{Osm, Pieces};
 use crate::overture::{Catalog, Id, Polygon, Release};
 use crate::profile::config::Config;
@@ -28,7 +29,8 @@ pub struct Inputs {
     pub overture: PathBuf,
     pub config: PathBuf,
     pub extent: Option<PathBuf>,
-    /// Scratch space for the node locations (on disk, not in memory).
+    /// Scratch space for the node locations and the reference's columns (on disk, not in
+    /// memory).
     pub work: PathBuf,
 }
 
@@ -40,18 +42,55 @@ pub struct Entry {
     pub frac: f64,
 }
 
+/// An ID's `Entry`, or why it is not served, as a column row of 16 bytes: not served is
+/// `piece == NONE`, with the code in `component` and the metres in `frac`.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+struct At {
+    frac: f64,
+    component: u32,
+    piece: u32,
+}
+
+// SAFETY: `repr(C)` of 8 + 4 + 4 bytes, no padding.
+unsafe impl Plain for At {}
+
+impl At {
+    fn new(x: Result<Entry, (u8, f32)>) -> At {
+        match x {
+            Ok(e) => At { frac: e.frac, component: e.component, piece: e.piece },
+            Err((code, m)) => At { frac: m as f64, component: code as u32, piece: NONE },
+        }
+    }
+
+    fn get(self) -> Result<Entry, (u8, f32)> {
+        if self.piece == NONE { Err((self.component as u8, self.frac as f32)) } else { Ok(Entry { component: self.component, piece: self.piece, frac: self.frac }) }
+    }
+}
+
 pub struct Mode {
     pub name: &'static str,
     pub car: bool,
     /// The metric's index in its family.
     pub metric: usize,
-    /// Per ID (internal-index order): the entry, or (code, metres); code 4 for a filtered
-    /// place.
-    pub at: Vec<Result<Entry, (u8, f32)>>,
+    /// Per ID (internal-index order), on disk.
+    rows: Column<At>,
     /// The snapping sets, the radius and the small-component size (SPEC §6).
     pub sets: Membership,
     pub radius: f64,
     pub small_max: u32,
+}
+
+impl Mode {
+    /// ID i's entry, or (code, metres); code 4 for a filtered place.
+    pub fn at(&self, i: usize) -> Result<Entry, (u8, f32)> {
+        self.rows[i].get()
+    }
+
+    /// Every ID's `at`, in internal-index order.
+    pub fn iter(&self) -> impl Iterator<Item = Result<Entry, (u8, f32)>> + '_ {
+        self.rows.iter().map(|x| x.get())
+    }
 }
 
 pub struct Reference {
@@ -65,21 +104,23 @@ pub struct Reference {
     pub active_components: Components,
     /// The catalog without its address rows, which give only the IDs and points below.
     pub catalog: Catalog,
-    /// Every ID of the model in internal-index order: addresses, then places (catalog
-    /// index), each with its point.
-    pub ids: Vec<Id>,
-    pub place_of: Vec<Option<usize>>,
+    /// Every ID of the model in internal-index order: addresses, then places, on disk.
+    pub ids: Column<Id>,
+    /// The addresses among them, which come first.
+    pub n_addr: usize,
+    /// Each place's catalog index, in internal-index order.
+    places: Vec<u32>,
     /// (alias, internal index).
     pub aliases: Vec<(Id, u32)>,
     /// The modes of the families held, in manifest order.
     pub modes: Vec<Mode>,
-    /// Per ID (internal-index order): its point.
-    pub points: Vec<(f64, f64)>,
+    /// Per ID (internal-index order): its point (lat, lon), on disk.
+    pub points: Column<[f64; 2]>,
     /// The antimeridian's twin groups (SPEC §4), found in the `.pbf` apart from the input
     /// modules: per latitude with nodes at both +180° and -180°, their ids ascending.
     pub twins: Vec<Vec<i64>>,
-    /// The IDs and the aliases, each sorted, with their internal index.
-    sorted_ids: Vec<(Id, u32)>,
+    /// The internal indices in the order of their IDs, and the aliases sorted.
+    sorted_ids: Vec<u32>,
     sorted_aliases: Vec<(Id, u32)>,
 }
 
@@ -91,7 +132,7 @@ struct Snapping {
     active: ActiveGraph,
     components: Components,
     modes: Vec<(&'static str, usize, Membership, f64, u32)>,
-    found: Vec<Vec<Snapped>>,
+    found: Vec<Column<Snapped>>,
 }
 
 /// The `.pbf`'s nodes on the antimeridian, grouped by latitude where both signs of longitude
@@ -122,7 +163,10 @@ fn twin_groups(pbf: &std::path::Path) -> Result<Vec<Vec<i64>>> {
         .collect())
 }
 
-fn snapping(osm: &Osm, config: &Config, fam: Fam, points: &[(f64, f64)]) -> Result<Snapping> {
+/// Points snapped at once, before their outcomes go to the column.
+const SNAP_BATCH: usize = 1 << 22;
+
+fn snapping(osm: &Osm, config: &Config, fam: Fam, points: &[[f64; 2]], dir: &Path) -> Result<Snapping> {
     let car = fam == Fam::Car;
     let (pieces, cg, ag) = if car {
         let (p, g) = phase("  car network", || CarNetwork.run((osm, config)))?;
@@ -142,8 +186,20 @@ fn snapping(osm: &Osm, config: &Config, fam: Fam, points: &[(f64, f64)]) -> Resu
     };
     let grid = Grid::new(&pieces);
     let found = phase(if car { "  car snapping" } else { "  active snapping" }, || {
-        modes.iter().map(|(_, _, sets, radius, small)| points.par_iter().map(|&(lat, lon)| Snapped::new(&grid.find(&pieces, lat, lon, *radius, *small, sets), NONE)).collect()).collect()
-    });
+        modes
+            .iter()
+            .map(|(name, _, sets, radius, small)| {
+                let mut w = ColumnWriter::new(Some(dir), &format!("found-{name}"))?;
+                for batch in points.chunks(SNAP_BATCH) {
+                    let done: Vec<Snapped> = batch.par_iter().map(|&[lat, lon]| Snapped::new(&grid.find(&pieces, lat, lon, *radius, *small, sets), NONE)).collect();
+                    for x in done {
+                        w.push(x)?;
+                    }
+                }
+                w.finish()
+            })
+            .collect::<Result<Vec<_>>>()
+    })?;
     Ok(Snapping { pieces, car: cg, active: ag, components, modes, found })
 }
 
@@ -160,18 +216,28 @@ impl Reference {
         };
         let mut catalog = phase("  catalog", || ReadCatalog.run((&release, &config, polygon.as_ref())))?;
         let osm = phase("  nodes", || ReadNodes.run((i.pbf.as_path(), i.work.join("nodes").as_path(), &config)))?;
-        let points: Vec<(f64, f64)> =
-            catalog.addresses.iter().map(|a| (a.lat, a.lon)).chain(catalog.places.iter().map(|p| (p.lat, p.lon))).collect();
+        // The reference's columns, apart for each set of families (a verify builds several).
+        let dir = i.work.join(format!("ref-{}", fams.iter().map(|f| f.name()).collect::<Vec<_>>().join("+")));
+        let _ = std::fs::remove_dir_all(&dir);
+        let column = |name: &str, xs: &mut dyn Iterator<Item = [f64; 2]>| -> Result<Column<[f64; 2]>> {
+            let mut w = ColumnWriter::new(Some(&dir), name)?;
+            for x in xs {
+                w.push(x)?;
+            }
+            w.finish()
+        };
+        let points = column("points-all", &mut catalog.addresses.iter().map(|a| [a.lat, a.lon]).chain(catalog.places.iter().map(|p| [p.lat, p.lon])))?;
         // Without an extent, an ID is in the model when some mode has a road within its
         // radius (SPEC §3): the families not held are snapped for that alone, one at a time.
         let mut near = vec![polygon.is_some(); points.len()];
         if polygon.is_none() {
             for fam in [Fam::Car, Fam::Active].into_iter().filter(|f| !fams.contains(f)) {
-                let s = snapping(&osm, &config, fam, &points)?;
+                let s = snapping(&osm, &config, fam, &points, &dir)?;
                 s.found.iter().for_each(|f| near.iter_mut().zip(f).for_each(|(n, x)| *n |= x.any));
             }
         }
-        let held: Vec<Snapping> = [Fam::Car, Fam::Active].into_iter().filter(|f| fams.contains(f)).map(|f| snapping(&osm, &config, f, &points)).collect::<Result<_>>()?;
+        let held: Vec<Snapping> =
+            [Fam::Car, Fam::Active].into_iter().filter(|f| fams.contains(f)).map(|f| snapping(&osm, &config, f, &points, &dir)).collect::<Result<_>>()?;
         for s in &held {
             s.found.iter().for_each(|f| near.iter_mut().zip(f).for_each(|(n, x)| *n |= x.any));
         }
@@ -180,8 +246,10 @@ impl Reference {
         let n_addr = pts.len();
         pts.extend((0..catalog.places.len()).filter(|&p| near[na + p]).map(|p| na + p));
         drop(near);
-        let ids: Vec<Id> = pts.iter().map(|&k| if k < na { catalog.addresses[k].id } else { catalog.places[k - na].id }).collect();
-        let place_of: Vec<Option<usize>> = pts.iter().map(|&k| (k >= na).then(|| k - na)).collect();
+        let mut w = ColumnWriter::new(Some(&dir), "ids")?;
+        pts.iter().try_for_each(|&k| w.push(if k < na { catalog.addresses[k].id } else { catalog.places[k - na].id }))?;
+        let ids = w.finish()?;
+        let places: Vec<u32> = pts[n_addr..].iter().map(|&k| (k - na) as u32).collect();
         let index_of_place = |p: u32| pts[n_addr..].binary_search(&(na + p as usize)).ok().map(|i| (n_addr + i) as u32);
         let aliases: Vec<(Id, u32)> = catalog.aliases.iter().filter_map(|&(a, p)| index_of_place(p).map(|i| (a, i))).collect();
         let mut r = Reference {
@@ -194,10 +262,11 @@ impl Reference {
             active_components: Components::default(),
             catalog: Catalog::default(),
             ids,
-            place_of,
+            n_addr,
+            places,
             aliases,
             modes: Vec::new(),
-            points: pts.iter().map(|&k| points[k]).collect(),
+            points: column("points", &mut pts.iter().map(|&k| points[k]))?,
             twins: phase("  twins", || twin_groups(&i.pbf))?,
             sorted_ids: Vec::new(),
             sorted_aliases: Vec::new(),
@@ -205,22 +274,21 @@ impl Reference {
         for s in held {
             let car = !s.modes.is_empty() && s.modes[0].0 == "car";
             for ((name, metric, sets, radius, small_max), found) in s.modes.into_iter().zip(&s.found) {
-                let at = pts
-                    .iter()
-                    .map(|&k| {
-                        if k >= na && catalog.places[k - na].status != 0 {
-                            return Err((FILTERED_PLACE, 0.0));
-                        }
-                        let (piece, frac) = found[k].outcome()?;
-                        let component = if car {
-                            car_component(&s.car, &s.components, piece as usize).expect("servable")
-                        } else {
-                            active_component(&s.pieces, &s.components, piece as usize).expect("servable")
-                        };
-                        Ok(Entry { component, piece, frac })
-                    })
-                    .collect();
-                r.modes.push(Mode { name, car, metric, at, sets, radius, small_max });
+                let at = |k: usize| {
+                    if k >= na && catalog.places[k - na].status != 0 {
+                        return Err((FILTERED_PLACE, 0.0));
+                    }
+                    let (piece, frac) = found[k].outcome()?;
+                    let component = if car {
+                        car_component(&s.car, &s.components, piece as usize).expect("servable")
+                    } else {
+                        active_component(&s.pieces, &s.components, piece as usize).expect("servable")
+                    };
+                    Ok(Entry { component, piece, frac })
+                };
+                let mut w = ColumnWriter::new(Some(&dir), &format!("at-{name}"))?;
+                pts.iter().try_for_each(|&k| w.push(At::new(at(k))))?;
+                r.modes.push(Mode { name, car, metric, rows: w.finish()?, sets, radius, small_max });
             }
             if car {
                 (r.car_pieces, r.car, r.car_components) = (s.pieces, s.car, s.components);
@@ -231,13 +299,11 @@ impl Reference {
         catalog.addresses = Vec::new();
         r.catalog = catalog;
         crate::build::mem::trim();
-        let sorted = |v: Vec<(Id, u32)>| {
-            let mut v = v;
-            v.sort_unstable();
-            v
-        };
-        r.sorted_ids = sorted(r.ids.iter().enumerate().map(|(i, id)| (*id, i as u32)).collect());
-        r.sorted_aliases = sorted(r.aliases.to_vec());
+        let mut order: Vec<u32> = (0..r.ids.len() as u32).collect();
+        order.par_sort_unstable_by_key(|&i| r.ids[i as usize]);
+        r.sorted_ids = order;
+        r.sorted_aliases = r.aliases.to_vec();
+        r.sorted_aliases.sort_unstable();
         Ok(r)
     }
 
@@ -253,9 +319,16 @@ impl Reference {
         self.modes.iter().find(|m| m.name == name).expect("mode")
     }
 
+    /// The catalog index of ID i if it is a place.
+    pub fn place_of(&self, i: usize) -> Option<usize> {
+        i.checked_sub(self.n_addr).map(|p| self.places[p] as usize)
+    }
+
     /// FORMAT §7.1 lookup on the reference IDs.
     pub fn lookup(&self, id: &Id) -> Option<u32> {
-        let find = |v: &[(Id, u32)]| v.binary_search_by(|x| x.0.cmp(id)).ok().map(|k| v[k].1);
-        find(&self.sorted_ids).or_else(|| find(&self.sorted_aliases))
+        let s = &self.sorted_ids;
+        let own = s.binary_search_by(|&i| self.ids[i as usize].cmp(id)).ok().map(|k| s[k]);
+        let a = &self.sorted_aliases;
+        own.or_else(|| a.binary_search_by(|x| x.0.cmp(id)).ok().map(|k| a[k].1))
     }
 }

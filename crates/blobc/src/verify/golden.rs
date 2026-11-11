@@ -54,7 +54,7 @@ pub fn queries(e: &Expected, named: &[String], n: &Samples) -> Vec<Value> {
         let mi = e.r.modes.iter().position(|x| x.name == m).unwrap();
         let served: Vec<&String> = ids
             .iter()
-            .filter(|s| crate::overture::parse_uuid(s).ok().and_then(|id| e.r.lookup(&id)).is_some_and(|i| e.r.modes[mi].at[i as usize].is_ok()))
+            .filter(|s| crate::overture::parse_uuid(s).ok().and_then(|id| e.r.lookup(&id)).is_some_and(|i| e.r.modes[mi].at(i as usize).is_ok()))
             .collect();
         for dir in ["from", "to"] {
             for w in served.windows(3).step_by(3).take(3) {
@@ -97,7 +97,7 @@ pub fn queries(e: &Expected, named: &[String], n: &Samples) -> Vec<Value> {
     // unknown ID and the first IDs not served for car and for walk.
     let unserved = |mode: &str| -> Option<String> {
         let mi = e.r.modes.iter().position(|x| x.name == mode).unwrap();
-        (0..e.r.n()).find(|&i| e.r.modes[mi].at[i].is_err()).map(|i| uuid(&e.r.ids[i]))
+        (0..e.r.n()).find(|&i| e.r.modes[mi].at(i).is_err()).map(|i| uuid(&e.r.ids[i]))
     };
     let mut odd = vec!["00000000-0000-4000-8000-000000000000".to_string()];
     odd.extend(unserved("car"));

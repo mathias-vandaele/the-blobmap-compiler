@@ -47,15 +47,15 @@ pub fn main(a: Vec<String>) -> Result<()> {
         for i in 0..r.n() {
             let mut seen = None;
             for (k, &m) in modes.iter().enumerate() {
-                if let Ok(en) = r.modes[m].at[i] {
+                if let Ok(en) = r.modes[m].at(i) {
                     ids[en.component as usize][k] += 1;
                     seen = Some(en.component);
                 }
             }
             if let Some(x) = seen {
                 let s = &mut sum[x as usize];
-                let (sin, cos) = r.points[i].1.to_radians().sin_cos();
-                s.0 += r.points[i].0;
+                let (sin, cos) = r.points[i][1].to_radians().sin_cos();
+                s.0 += r.points[i][0];
                 s.1 += sin;
                 s.2 += cos;
                 s.3 += 1;
@@ -74,23 +74,23 @@ pub fn main(a: Vec<String>) -> Result<()> {
         );
         for &m in &modes {
             let mut reasons: BTreeMap<&str, u64> = BTreeMap::new();
-            for at in &r.modes[m].at {
+            for at in r.modes[m].iter() {
                 *reasons.entry(match at {
                     Ok(_) => "served",
-                    Err((c, _)) => reason_name(*c),
+                    Err((c, _)) => reason_name(c),
                 }).or_default() += 1;
             }
             println!("  {}: {reasons:?}", r.modes[m].name);
         }
         for &m in &modes {
             let mode = &r.modes[m];
-            let at: Vec<usize> = (0..r.n()).filter(|&i| matches!(mode.at[i], Err((TRAPPED_COMPONENT, _)))).collect();
+            let at: Vec<usize> = (0..r.n()).filter(|&i| matches!(mode.at(i), Err((TRAPPED_COMPONENT, _)))).collect();
             if at.is_empty() {
                 continue;
             }
             // The nearest eligible piece, every piece searched: its component is the trapped one.
             let p = if mode.car { &r.car_pieces } else { &r.active_pieces };
-            let hits: Vec<_> = at.par_iter().map(|&i| find_brute(p, r.points[i].0, r.points[i].1, r.modes[m].radius, r.modes[m].small_max, &r.modes[m].sets).eligible).collect();
+            let hits: Vec<_> = at.par_iter().map(|&i| find_brute(p, r.points[i][0], r.points[i][1], r.modes[m].radius, r.modes[m].small_max, &r.modes[m].sets).eligible).collect();
             println!("  {}: {} IDs unserved because of their component (TrappedComponent)", mode.name, at.len());
             println!("  {:>36} {:>21} {:>7} {:>7} {:>6} {:>11}", "ID", "point", "metres", "component", "nodes", "OSM way");
             for (&i, h) in at.iter().zip(hits) {
@@ -103,7 +103,7 @@ pub fn main(a: Vec<String>) -> Result<()> {
                     let road = r.active.road_of_piece[k].into_iter().find(|&d| d != NONE).context("a road")?;
                     (e.of[r.active.tail[road as usize] as usize], r.active.way[road as usize])
                 };
-                let (lat, lon) = r.points[i];
+                let [lat, lon] = r.points[i];
                 println!("  {:>36} {lat:>10.5},{lon:>10.5} {:>7.1} {x:>7} {:>6} {way:>11}", uuid(&r.ids[i]), h.dist_m, e.nodes[x as usize]);
             }
         }
