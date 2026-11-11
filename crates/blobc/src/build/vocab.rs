@@ -49,9 +49,9 @@ pub fn membership(f: &Families, mode: &str) -> Membership {
     }
 }
 
-/// Snaps points per mode (car, bike, walk), each mode's outcomes into a column of `dir`
-/// (in memory without one).
-pub fn snap(f: &Families, points: &[(f64, f64)], dir: Option<&Path>) -> Result<Vec<ModeSnap>> {
+/// Snaps the points 0 .. n per mode (car, bike, walk), each mode's outcomes into a column of
+/// `dir` (in memory without one).
+pub fn snap(f: &Families, n: usize, point: &(dyn Fn(usize) -> (f64, f64) + Sync), dir: Option<&Path>) -> Result<Vec<ModeSnap>> {
     let (car, act) = (f.car, f.active);
     let cgrid = Grid::new(car.p);
     let agrid = Grid::new(act.p);
@@ -73,10 +73,11 @@ pub fn snap(f: &Families, points: &[(f64, f64)], dir: Option<&Path>) -> Result<V
             }
         };
         let mut at = ColumnWriter::new(dir, mode)?;
-        for batch in points.chunks(SNAP_BATCH) {
-            let done: Vec<Snapped> = batch
-                .par_iter()
-                .map(|&(lat, lon)| {
+        for start in (0..n).step_by(SNAP_BATCH) {
+            let done: Vec<Snapped> = (start..n.min(start + SNAP_BATCH))
+                .into_par_iter()
+                .map(|i| {
+                    let (lat, lon) = point(i);
                     let fd = grid.find(p, lat, lon, radius, small_max, &sets as &dyn Sets);
                     let t = fd.eligible.and_then(|h| trapped(h.piece as usize)).unwrap_or(NONE);
                     Snapped::new(&fd, t)

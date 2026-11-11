@@ -75,6 +75,10 @@ pub struct Mode {
     pub metric: usize,
     /// Per ID (internal-index order), on disk.
     rows: Column<At>,
+    /// The reference split per component, on disk: the served IDs of component x, ascending,
+    /// are `by_component[first[x] .. first[x + 1]]`.
+    by_component: Column<u32>,
+    first: Vec<u64>,
     /// The snapping sets, the radius and the small-component size (SPEC §6).
     pub sets: Membership,
     pub radius: f64,
@@ -90,6 +94,41 @@ impl Mode {
     /// Every ID's `at`, in internal-index order.
     pub fn iter(&self) -> impl Iterator<Item = Result<Entry, (u8, f32)>> + '_ {
         self.rows.iter().map(|x| x.get())
+    }
+
+    /// The served IDs of component x, ascending.
+    pub fn in_component(&self, x: u32) -> &[u32] {
+        &self.by_component[self.first[x as usize] as usize..self.first[x as usize + 1] as usize]
+    }
+
+    /// The family's components.
+    pub fn components(&self) -> u32 {
+        self.first.len() as u32 - 1
+    }
+
+    /// The served IDs.
+    pub fn served(&self) -> usize {
+        self.by_component.len()
+    }
+
+    /// Its served IDs by component (a counting sort), written to `dir`.
+    fn split(rows: &[At], components: usize, dir: &Path, name: &str) -> Result<(Column<u32>, Vec<u64>)> {
+        let mut first = vec![0u64; components + 1];
+        for x in rows.iter().filter(|x| x.piece != NONE) {
+            first[x.component as usize + 1] += 1;
+        }
+        for k in 0..components {
+            first[k + 1] += first[k];
+        }
+        let mut at = first.clone();
+        let mut by = vec![0u32; first[components] as usize];
+        for (i, x) in rows.iter().enumerate().filter(|(_, x)| x.piece != NONE) {
+            by[at[x.component as usize] as usize] = i as u32;
+            at[x.component as usize] += 1;
+        }
+        let mut w = ColumnWriter::new(Some(dir), name)?;
+        by.into_iter().try_for_each(|i| w.push(i))?;
+        Ok((w.finish()?, first))
     }
 }
 
@@ -288,7 +327,9 @@ impl Reference {
                 };
                 let mut w = ColumnWriter::new(Some(&dir), &format!("at-{name}"))?;
                 pts.iter().try_for_each(|&k| w.push(At::new(at(k))))?;
-                r.modes.push(Mode { name, car, metric, rows: w.finish()?, sets, radius, small_max });
+                let rows = w.finish()?;
+                let (by_component, first) = Mode::split(&rows, s.components.len(), &dir, &format!("by-component-{name}"))?;
+                r.modes.push(Mode { name, car, metric, rows, by_component, first, sets, radius, small_max });
             }
             if car {
                 (r.car_pieces, r.car, r.car_components) = (s.pieces, s.car, s.components);

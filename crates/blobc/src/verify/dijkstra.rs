@@ -331,11 +331,9 @@ impl Graphs {
         best: &mut [u32],
         at: impl Fn(&Side) -> Option<u32>,
     ) {
-        for (i, b) in best.iter_mut().enumerate() {
-            let Ok(d) = m.at(i) else { continue };
-            if d.component != x {
-                continue;
-            }
+        for &i in m.in_component(x) {
+            let (i, d) = (i as usize, m.at(i as usize).expect("served"));
+            let b = &mut best[i];
             for s in sides(r, m, &d).iter().flatten() {
                 if let Some(t) = at(s) {
                     *b = (*b).min(t);

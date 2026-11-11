@@ -144,9 +144,7 @@ pub fn snapping(rt: &Runtime, r: &Reference, rep: &mut Report) -> Result<()> {
     if !same_ids {
         return Ok(());
     }
-    // Served IDs, checked one component at a time: (family, component, mode, ID).
-    let mut served: Vec<(Fam, u32, usize, u32)> = Vec::new();
-    for (m, mode) in r.modes.iter().enumerate() {
+    for mode in &r.modes {
         let k = rt.mode(mode.name)?;
         let mv = &v.modes[k];
         for i in 0..r.n() {
@@ -163,42 +161,58 @@ pub fn snapping(rt: &Runtime, r: &Reference, rep: &mut Report) -> Result<()> {
                 Ok(e) => {
                     if mv.component[i] != e.component {
                         o.fail(format!("{} {}: component {} != {}", mode.name, uuid(&r.ids[i]), mv.component[i], e.component));
-                        continue;
                     }
-                    served.push((mv.info.fam, e.component, m, i as u32));
                 }
             }
         }
     }
-    served.sort_unstable();
-    for group in served.chunk_by(|a, b| (a.0, a.1) == (b.0, b.1)) {
-        let x = rt.component(group[0].0, group[0].1)?;
-        for &(_, _, m, i) in group {
-            let (mode, i) = (&r.modes[m], i as usize);
-            let mv = &v.modes[rt.mode(mode.name)?];
-            let Ok(e) = mode.at(i) else { unreachable!("a served ID") };
-            let (keys, off) = expected_entry(r, m, e.piece as usize, e.frac);
-            let stored: [Option<(i64, u32, u8)>; 2] = if mode.car {
-                [0, 1].map(|d| {
-                    let s = mv.node[i][d];
-                    (s != NONE).then(|| (x.way[s as usize], x.way_seq[s as usize], x.way_dir[s as usize]))
-                })
-            } else {
-                let [uu, vv] = mv.node[i];
-                let uv = x.arcs(uu).find(|&a| x.arc_local[a] == mv.road[i] && x.arc_head[a] == vv);
-                let key = |a: usize| (x.way[a], x.way_seq[a], x.way_dir[a]);
-                let vu = uv.and_then(|uv| {
-                    x.arcs(vv)
-                        .find(|&a| x.arc_head[a] == uu && key(a).0 == key(uv).0 && key(a).1 == key(uv).1 && key(a).2 != key(uv).2)
-                });
-                [uv.map(key), vu.map(key)]
-            };
-            o.expect(stored == keys && mv.off[i] == off, || {
-                format!("{} {}: entry {stored:?} {:?}, expected {keys:?} {off:?}", mode.name, uuid(&r.ids[i]), mv.off[i])
-            });
+    // Served IDs whose component matches, checked one component at a time from the reference
+    // split per component: by family, component, mode and ID.
+    let mut fams: Vec<Fam> = Vec::new();
+    for mode in &r.modes {
+        let f = v.modes[rt.mode(mode.name)?].info.fam;
+        if !fams.contains(&f) {
+            fams.push(f);
         }
-        drop(x);
-        rt.release();
+    }
+    fams.sort_unstable();
+    for fam in fams {
+        let modes: Vec<usize> = (0..r.modes.len()).filter(|&m| rt.mode(r.modes[m].name).is_ok_and(|k| v.modes[k].info.fam == fam)).collect();
+        for c in 0..r.modes[modes[0]].components() {
+            if modes.iter().all(|&m| r.modes[m].in_component(c).is_empty()) {
+                continue;
+            }
+            let x = rt.component(fam, c)?;
+            for (m, i) in modes.iter().flat_map(|&m| r.modes[m].in_component(c).iter().map(move |&i| (m, i))) {
+                let (mode, i) = (&r.modes[m], i as usize);
+                let mv = &v.modes[rt.mode(mode.name)?];
+                if mv.component[i] != c {
+                    continue;
+                }
+                let Ok(e) = mode.at(i) else { unreachable!("a served ID") };
+                let (keys, off) = expected_entry(r, m, e.piece as usize, e.frac);
+                let stored: [Option<(i64, u32, u8)>; 2] = if mode.car {
+                    [0, 1].map(|d| {
+                        let s = mv.node[i][d];
+                        (s != NONE).then(|| (x.way[s as usize], x.way_seq[s as usize], x.way_dir[s as usize]))
+                    })
+                } else {
+                    let [uu, vv] = mv.node[i];
+                    let uv = x.arcs(uu).find(|&a| x.arc_local[a] == mv.road[i] && x.arc_head[a] == vv);
+                    let key = |a: usize| (x.way[a], x.way_seq[a], x.way_dir[a]);
+                    let vu = uv.and_then(|uv| {
+                        x.arcs(vv)
+                            .find(|&a| x.arc_head[a] == uu && key(a).0 == key(uv).0 && key(a).1 == key(uv).1 && key(a).2 != key(uv).2)
+                    });
+                    [uv.map(key), vu.map(key)]
+                };
+                o.expect(stored == keys && mv.off[i] == off, || {
+                    format!("{} {}: entry {stored:?} {:?}, expected {keys:?} {off:?}", mode.name, uuid(&r.ids[i]), mv.off[i])
+                });
+            }
+            drop(x);
+            rt.release();
+        }
     }
     Ok(())
 }
@@ -306,15 +320,18 @@ pub fn distances(rt: &Runtime, ex: &Expected, n: &Samples, rep: &mut Report) -> 
     for (m, mode) in r.modes.iter().enumerate() {
         let k = rt.mode(mode.name)?;
         let o = rep.check(&format!("{}: columns against Dijkstra (from, to, starts)", mode.name));
-        let served: Vec<usize> = (0..r.n()).filter(|&i| mode.at(i).is_ok()).collect();
-        let step = served.len().div_ceil(n.columns).max(1);
+        let (n_served, step) = (mode.served(), mode.served().div_ceil(n.columns).max(1));
+        // The served IDs at the positions sampled below (every step-th, and three in a row at
+        // six of every third step), without listing every served ID.
+        let wanted = |k: usize| k.is_multiple_of(step) || (k % (3 * step) < 3 && k / (3 * step) < 6);
+        let at_pos: BTreeMap<usize, usize> = (0..r.n()).filter(|&i| mode.at(i).is_ok()).enumerate().filter(|&(k, _)| wanted(k)).collect();
         let mut cases: Vec<(Vec<(usize, u16)>, Dir, &str)> = Vec::new();
-        for &s in served.iter().step_by(step) {
-            cases.push((vec![(s, 0)], Dir::From, "from"));
-            cases.push((vec![(s, 0)], Dir::To, "to"));
+        for k in (0..n_served).step_by(step) {
+            cases.push((vec![(at_pos[&k], 0)], Dir::From, "from"));
+            cases.push((vec![(at_pos[&k], 0)], Dir::To, "to"));
         }
-        for w in served.chunks(3).step_by(step.max(1)).take(6) {
-            let src: Vec<(usize, u16)> = w.iter().enumerate().map(|(j, &s)| (s, [0u16, 45, 700][j])).collect();
+        for base in (0..n_served).step_by(3 * step).take(6) {
+            let src: Vec<(usize, u16)> = (base..(base + 3).min(n_served)).enumerate().map(|(j, k)| (at_pos[&k], [0u16, 45, 700][j])).collect();
             cases.push((src.clone(), Dir::From, "from"));
             cases.push((src, Dir::To, "to"));
         }

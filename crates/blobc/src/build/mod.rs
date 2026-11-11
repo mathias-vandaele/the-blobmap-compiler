@@ -305,8 +305,12 @@ impl Stage<(&Families<'_>, &Catalog, bool, &Path)> for Snap {
     }
     /// Each mode's outcomes go to a column of `dir` (SPEC §10, memory).
     fn run(&self, (f, c, polygon, dir): (&Families, &Catalog, bool, &Path)) -> Result<(Vec<ModeSnap>, Ids)> {
-        let points: Vec<(f64, f64)> = c.addresses.iter().map(|a| (a.lat, a.lon)).chain(c.places.iter().map(|p| (p.lat, p.lon))).collect();
-        let snaps = vocab::snap(f, &points, Some(dir))?;
+        let na = c.addresses.len();
+        let point = |i: usize| match c.addresses.get(i) {
+            Some(a) => (a.lat, a.lon),
+            None => (c.places[i - na].lat, c.places[i - na].lon),
+        };
+        let snaps = vocab::snap(f, na + c.places.len(), &point, Some(dir))?;
         let ids = vocab::select(c, &snaps, polygon);
         Ok((snaps, ids))
     }
