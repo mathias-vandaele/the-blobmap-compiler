@@ -1,5 +1,5 @@
 //! Columns (FORMAT §8): seeds from the sources' offsets, a full sweep of the component, heads
-//! at every ID, and the direct term on a shared piece.
+//! at every ID, and the direct term on a shared piece; and pairs, over two IDs' ancestors.
 
 use anyhow::Result;
 
@@ -55,7 +55,7 @@ impl Runtime {
             let e = self.component(mv.info.fam, x)?;
             let mut label = vec![INF; e.n];
             for s in &srcs {
-                seed(&e, mv, s, dir, f, &mut label);
+                seed(&e, mv, s, dir, f, &mut |v, t| label[v as usize] = label[v as usize].min(t));
             }
             sweep(&e, mv.info.metric, &mut label, dir, f);
             for i in 0..n {
@@ -76,6 +76,85 @@ impl Runtime {
             }
         }
         Ok(out)
+    }
+
+    /// The time from o to d, o ≠ d, both served for the mode in one component: the value of
+    /// o's `From` column at d, from the ancestors of o's seeds and of d's alone (FORMAT §8,
+    /// hierarchy property). d's labels are those of a `To` column from d.
+    pub fn pair(&self, o: u32, d: u32, mode: usize) -> Result<u16> {
+        let mv = &self.vocab.modes[mode];
+        let f = &self.faults;
+        let x = mv.component[o as usize];
+        anyhow::ensure!(x != NONE && x == mv.component[d as usize], "a pair must be served in one component (internal indices {o}, {d})");
+        let e = self.component(mv.info.fam, x)?;
+        let up = |s: u32, dir: Dir| Ancestors::up(&e, mv, &Source { id: s, start: 0 }, dir, f);
+        let mut t = up(o, Dir::From).meet(&up(d, Dir::To), f);
+        if !f.no_direct && same_piece(mv, o as usize, d as usize) {
+            t = t.min(f.add(0, direct(mv, o as usize, d as usize)));
+        }
+        Ok(t)
+    }
+}
+
+/// A source's labels after the upward half of the sweep, on the nodes its seeds reach over
+/// upper links: every other node keeps `INF`.
+struct Ancestors {
+    /// Ascending layout ids.
+    ids: Vec<u32>,
+    label: Vec<u16>,
+}
+
+impl Ancestors {
+    fn up(e: &Component, mv: &ModeVocab, s: &Source, dir: Dir, f: &Faults) -> Ancestors {
+        let mut seeds = Vec::new();
+        seed(e, mv, s, dir, f, &mut |v, t| seeds.push((v, t)));
+        // Every node reached over upper links: on a valid hierarchy, the seeds' ancestors.
+        let mut seen = std::collections::BTreeSet::new();
+        let mut stack: Vec<u32> = seeds.iter().map(|s| s.0).collect();
+        while let Some(v) = stack.pop() {
+            if seen.insert(v) {
+                stack.extend(e.row(v).map(|k| e.up_head[k]));
+            }
+        }
+        let ids: Vec<u32> = seen.into_iter().collect();
+        let at = |v: u32| ids.binary_search(&v).expect("reached over an upper link");
+        let mut label = vec![INF; ids.len()];
+        for (v, t) in seeds {
+            let i = at(v);
+            label[i] = label[i].min(t);
+        }
+        let go_up = match dir {
+            Dir::From => &e.up[mv.info.metric],
+            Dir::To => &e.down[mv.info.metric],
+        };
+        for i in (0..ids.len()).rev() {
+            let lv = label[i];
+            if lv == INF {
+                continue;
+            }
+            for k in e.row(ids[i]) {
+                let u = at(e.up_head[k]);
+                label[u] = label[u].min(f.add(lv, go_up[k]));
+            }
+        }
+        Ancestors { ids, label }
+    }
+
+    /// The least sum of the two labels over the common ancestors.
+    fn meet(&self, to: &Ancestors, f: &Faults) -> u16 {
+        let (mut i, mut j, mut t) = (0, 0, INF);
+        while i < self.ids.len() && j < to.ids.len() {
+            match self.ids[i].cmp(&to.ids[j]) {
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => j += 1,
+                std::cmp::Ordering::Equal => {
+                    t = t.min(f.add(self.label[i], to.label[j]));
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+        t
     }
 }
 
@@ -105,10 +184,10 @@ pub fn sweep(e: &Component, metric: usize, label: &mut [u16], dir: Dir, f: &Faul
     }
 }
 
-fn seed(e: &Component, mv: &ModeVocab, s: &Source, dir: Dir, f: &Faults, label: &mut [u16]) {
+/// Puts each seed of a source: a node and its label.
+fn seed(e: &Component, mv: &ModeVocab, s: &Source, dir: Dir, f: &Faults, put: &mut impl FnMut(u32, u16)) {
     let i = s.id as usize;
     let (nodes, off) = (mv.node[i], mv.off[i]);
-    let mut put = |v: u32, t: u16| label[v as usize] = label[v as usize].min(t);
     match (mv.info.fam, dir) {
         (Fam::Car, Dir::From) => {
             for k in 0..2 {

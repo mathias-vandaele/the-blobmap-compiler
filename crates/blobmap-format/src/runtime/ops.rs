@@ -163,8 +163,7 @@ impl Runtime {
         if mv.component[ia as usize] != mv.component[ib as usize] {
             return Ok(reason_json(Reason::DifferentComponent, b));
         }
-        let col = self.column(&[Source { id: ia, start: 0 }], mode, Dir::From)?;
-        Ok(json!({"time": time_json(col[ib as usize])}))
+        Ok(json!({"time": time_json(self.pair(ia, ib, mode)?)}))
     }
 
     pub fn nearest(&self, c: Category, id: &str, mode: usize, dir: Dir) -> Result<Value> {
