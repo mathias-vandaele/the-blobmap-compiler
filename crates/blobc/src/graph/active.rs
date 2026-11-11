@@ -2,8 +2,13 @@
 //! usable by bike or on foot, nodes at intersections, one road per direction of a piece that
 //! at least one metric may use, with one weight per metric (`INF` where it may not).
 
+use std::path::Path;
+
+use anyhow::Result;
+
 use crate::graph::components::{Csr, Components, scc};
 use crate::graph::round::{Member, round_all};
+use crate::osm::column::Column;
 use crate::osm::Pieces;
 
 /// The ACTIVE metrics, in the manifest's order (FORMAT §3 `families`).
@@ -13,17 +18,17 @@ pub const METRICS: [&str; 2] = ["bike", "walk"];
 pub struct ActiveGraph {
     pub nodes: usize,
     /// Per road, in (piece, dir) order.
-    pub piece: Vec<u32>,
-    pub way: Vec<i64>,
-    pub dir: Vec<u8>,
-    pub seq: Vec<u32>,
-    pub tail: Vec<u32>,
-    pub head: Vec<u32>,
+    pub piece: Column<u32>,
+    pub way: Column<i64>,
+    pub dir: Column<u8>,
+    pub seq: Column<u32>,
+    pub tail: Column<u32>,
+    pub head: Column<u32>,
     /// Per metric, per road.
-    pub time: Vec<Vec<f32>>,
-    pub w: Vec<Vec<u16>>,
+    pub time: Vec<Column<f32>>,
+    pub w: Vec<Column<u16>>,
     /// Per piece, its roads [along, against] or `NONE`.
-    pub road_of_piece: Vec<[u32; 2]>,
+    pub road_of_piece: Column<[u32; 2]>,
 }
 
 impl ActiveGraph {
@@ -31,16 +36,16 @@ impl ActiveGraph {
         let m = p.time.len();
         let mut g = ActiveGraph {
             nodes: p.node_osm.len(),
-            time: vec![Vec::new(); m],
-            road_of_piece: vec![[blobmap_format::NONE; 2]; p.len()],
+            time: vec![Column::default(); m],
             ..ActiveGraph::default()
         };
+        let mut road_of_piece = vec![[blobmap_format::NONE; 2]; p.len()];
         for i in 0..p.len() {
             for d in 0..2 {
                 if (0..m).all(|k| p.time[k][i][d].is_infinite()) {
                     continue;
                 }
-                g.road_of_piece[i][d] = g.piece.len() as u32;
+                road_of_piece[i][d] = g.piece.len() as u32;
                 g.piece.push(i as u32);
                 g.way.push(p.way[i]);
                 g.dir.push(d as u8);
@@ -53,11 +58,12 @@ impl ActiveGraph {
                 }
             }
         }
+        g.road_of_piece = road_of_piece.into();
         g.w = (0..m)
             .map(|k| {
                 let members: Vec<Member> =
                     (0..g.len()).map(|r| Member { way: g.way[r], dir: g.dir[r], seq: g.seq[r], time: g.time[k][r] }).collect();
-                round_all(&members)
+                round_all(&members).into()
             })
             .collect();
         g
@@ -69,6 +75,25 @@ impl ActiveGraph {
 
     /// Drops what only the order, the hierarchy and the road part read, once the family's road
     /// units are written: the vocabulary and the data report read the rest.
+    /// Moves the graph's arrays to files of `dir`, mapped (SPEC §10, memory).
+    pub fn spill(&mut self, dir: &Path) -> Result<()> {
+        let d = Some(dir);
+        self.piece.spill(d, "piece")?;
+        self.way.spill(d, "way")?;
+        self.dir.spill(d, "dir")?;
+        self.seq.spill(d, "seq")?;
+        self.tail.spill(d, "tail")?;
+        self.head.spill(d, "head")?;
+        for (k, c) in self.time.iter_mut().enumerate() {
+            c.spill(d, &format!("time{k}"))?;
+        }
+        for (k, c) in self.w.iter_mut().enumerate() {
+            c.spill(d, &format!("w{k}"))?;
+        }
+        self.road_of_piece.spill(d, "road_of_piece")?;
+        Ok(())
+    }
+
     pub fn shed(&mut self) {
         (self.tail, self.head) = Default::default();
         (self.way, self.seq, self.dir) = Default::default();

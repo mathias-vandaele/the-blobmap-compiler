@@ -1,0 +1,42 @@
+# Inputs of the country tier (SPEC §10, verify): paths under `blobc verify --data`.
+tier = "country"
+
+[[inputs]]
+name = "europe"
+pbf = "osm/europe.osm.pbf"
+overture = "overture-europe/2026-10-21.0"
+config = "config"
+extent = "poly/europe.poly"
+
+[inputs.files]
+"config/active.toml" = "80ae190a7a6e92fcaa17941ae6ffc9aee52e0d490972bc8aa4bf7f065d4ca0ce"
+"config/build.toml" = "245143b17c43f1d9eb43e3f611c59a15563f2f9b164fc0467d711ef7135fcf4a"
+"config/car.toml" = "6456347d9f330fe92d03b39f3b67cda252dee462e6697bf3a7cab473b653da57"
+"config/places.toml" = "c37fcad0881de6bf6d43ae60198a3e31704937a5afefacdbd7889407c1ced449"
+"osm/europe.osm.pbf" = "8b451ff5eea31dc2294785d0229eb92a01f7536eb1e009e71829cb8d81f0ee28"
+"overture-europe/2026-10-21.0/raw/address.parquet" = "1534443e09d8bd604902c300f8f3b29ed69fd1b595576d98ef8da753ef0d2c3b"
+"overture-europe/2026-10-21.0/raw/place.parquet" = "9874727e5ce60b6cc84c8f18c786f869707f06dec31065c9e3be23c2e8d242cd"
+"overture-europe/2026-10-21.0/taxonomy/basic_categories.csv" = "c0aed53113a825240d71b981746f5296b88a2bb20005528b104045c3c97b7afc"
+"overture-europe/2026-10-21.0/taxonomy/mapping_sheet.csv" = "5dfb038fb8fbadfb31bbb51e577b53eb4488140bc93e1d32b005edba2f212ce6"
+"overture-europe/2026-10-21.0/taxonomy/taxonomy.csv" = "59eecbf9e24859bcdab459e8efeea673b7fcbab06b45bd1c7067f215b3bc25d4"
+"poly/europe.poly" = "1244bf7b4ba17f46a90437e697f3642a85aecf4a576c65aaaac159f6a6e4aafa"
+
+[[inputs]]
+name = "frbeluchde"
+pbf = "osm/frbeluchde.osm.pbf"
+overture = "overture-frbeluchde/2026-10-21.0"
+config = "config"
+extent = "poly/frbeluchde.poly"
+
+[inputs.files]
+"config/active.toml" = "80ae190a7a6e92fcaa17941ae6ffc9aee52e0d490972bc8aa4bf7f065d4ca0ce"
+"config/build.toml" = "245143b17c43f1d9eb43e3f611c59a15563f2f9b164fc0467d711ef7135fcf4a"
+"config/car.toml" = "6456347d9f330fe92d03b39f3b67cda252dee462e6697bf3a7cab473b653da57"
+"config/places.toml" = "c37fcad0881de6bf6d43ae60198a3e31704937a5afefacdbd7889407c1ced449"
+"osm/frbeluchde.osm.pbf" = "293b2b30e93ec29a8500875e0981706c306acd02b728d7d3ffb01a835c223fa3"
+"overture-frbeluchde/2026-10-21.0/raw/address.parquet" = "7ecc7d3ee942bf00ff3daf9e6c21914f60c699c22f69f805caed3bf9f9c5c563"
+"overture-frbeluchde/2026-10-21.0/raw/place.parquet" = "ebf17a76883b9b5cd81fe9c414ac79bde91227b3fbd4caa30993479e73118025"
+"overture-frbeluchde/2026-10-21.0/taxonomy/basic_categories.csv" = "c0aed53113a825240d71b981746f5296b88a2bb20005528b104045c3c97b7afc"
+"overture-frbeluchde/2026-10-21.0/taxonomy/mapping_sheet.csv" = "5dfb038fb8fbadfb31bbb51e577b53eb4488140bc93e1d32b005edba2f212ce6"
+"overture-frbeluchde/2026-10-21.0/taxonomy/taxonomy.csv" = "59eecbf9e24859bcdab459e8efeea673b7fcbab06b45bd1c7067f215b3bc25d4"
+"poly/frbeluchde.poly" = "08d07ebdf0538553b70750a9045bbd8a9df1c2f3982922eb8d82175c4f0ee963"

@@ -4,11 +4,14 @@
 //! with `only_*` rewriting, two or more via ways, and copy rows added.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
+use anyhow::Result;
 use blobmap_format::NONE;
 
 use crate::graph::components::{Csr, Components, scc};
 use crate::graph::round::{Member, round_all};
+use crate::osm::column::Column;
 use crate::osm::geo::{Local, bearing_deg};
 use crate::osm::{Pieces, Restriction, Via, cheap_ruler_m};
 use crate::profile::CarTurns;
@@ -72,23 +75,23 @@ pub struct CarStats {
 #[derive(Clone, Debug, Default)]
 pub struct CarGraph {
     pub originals: usize,
-    pub piece: Vec<u32>,
-    pub way: Vec<i64>,
-    pub dir: Vec<u8>,
-    pub seq: Vec<u32>,
+    pub piece: Column<u32>,
+    pub way: Column<i64>,
+    pub dir: Column<u8>,
+    pub seq: Column<u32>,
     /// Routing nodes at the segment's start and end.
-    pub tail: Vec<u32>,
-    pub head: Vec<u32>,
-    pub time: Vec<f32>,
-    pub w: Vec<u16>,
+    pub tail: Column<u32>,
+    pub head: Column<u32>,
+    pub time: Column<f32>,
+    pub w: Column<u16>,
     /// For a copy, its original; `NONE` for an original.
-    pub copy_of: Vec<u32>,
+    pub copy_of: Column<u32>,
     /// Per piece, the original segments [along, against] its node order, or `NONE`.
-    pub seg_of_piece: Vec<[u32; 2]>,
+    pub seg_of_piece: Column<[u32; 2]>,
     /// Turns, sorted by (from, to).
-    pub turn_from: Vec<u32>,
-    pub turn_to: Vec<u32>,
-    pub turn_cost: Vec<u16>,
+    pub turn_from: Column<u32>,
+    pub turn_to: Column<u32>,
+    pub turn_cost: Column<u16>,
     /// The turns before any restriction, by the original segment they leave, and the
     /// restrictions as forbidden sequences of original segments: what an independent
     /// turn-aware Dijkstra needs (SPEC §11).
@@ -103,9 +106,9 @@ pub struct CarGraph {
 /// Turns by the original segment they leave, CSR: the segment entered and the cost.
 #[derive(Clone, Debug, Default)]
 pub struct BaseTurns {
-    first: Vec<u64>,
-    to: Vec<u32>,
-    cost: Vec<u16>,
+    first: Column<u64>,
+    to: Column<u32>,
+    cost: Column<u16>,
 }
 
 impl BaseTurns {
@@ -205,12 +208,13 @@ impl Automaton {
 
 impl CarGraph {
     pub fn build(p: &Pieces, turns: &CarTurns, restrictions: &[Restriction]) -> CarGraph {
-        let mut g = CarGraph { seg_of_piece: vec![[NONE; 2]; p.len()], ..CarGraph::default() };
+        let mut g = CarGraph::default();
+        let mut seg_of_piece = vec![[NONE; 2]; p.len()];
         for i in 0..p.len() {
             for d in 0..2 {
                 let t = p.time[0][i][d];
                 if t.is_finite() {
-                    g.seg_of_piece[i][d] = g.piece.len() as u32;
+                    seg_of_piece[i][d] = g.piece.len() as u32;
                     g.piece.push(i as u32);
                     g.way.push(p.way[i]);
                     g.dir.push(d as u8);
@@ -222,13 +226,14 @@ impl CarGraph {
                 }
             }
         }
+        g.seg_of_piece = seg_of_piece.into();
         let s = g.piece.len();
         g.originals = s;
         g.stats.segments = s;
         g.stats.left_segments = g.piece[..s].iter().filter(|&&q| p.left[q as usize]).count();
         let members: Vec<Member> = (0..s).map(|k| Member { way: g.way[k], dir: g.dir[k], seq: g.seq[k], time: g.time[k] }).collect();
-        g.w = round_all(&members);
-        g.copy_of = vec![NONE; s];
+        g.w = round_all(&members).into();
+        g.copy_of = vec![NONE; s].into();
 
         // Roads at each node: piece ends, a closed piece counting twice.
         let mut roads = vec![0usize; p.node_osm.len()];
@@ -239,7 +244,7 @@ impl CarGraph {
         let bear: Vec<[(f64, f64); 2]> = (0..p.len()).map(|i| bearings(p, i)).collect();
         let out = Csr::new(p.node_osm.len(), (0..s as u32).map(|k| (g.tail[k as usize], k)));
         // Base turns, by the segment they leave.
-        let mut base = BaseTurns { first: Vec::with_capacity(s + 1), ..BaseTurns::default() };
+        let mut base = BaseTurns::default();
         base.first.push(0);
         for a in 0..s {
             let x = g.head[a] as usize;
@@ -370,6 +375,29 @@ impl CarGraph {
 
     /// Drops what only the order, the hierarchy and the road part read, once the family's road
     /// units are written: the vocabulary and the data report read the rest.
+    /// Moves the graph's arrays to files of `dir`, mapped (SPEC §10, memory).
+    pub fn spill(&mut self, dir: &Path) -> Result<()> {
+        let d = Some(dir);
+        self.piece.spill(d, "piece")?;
+        self.way.spill(d, "way")?;
+        self.dir.spill(d, "dir")?;
+        self.seq.spill(d, "seq")?;
+        self.tail.spill(d, "tail")?;
+        self.head.spill(d, "head")?;
+        self.time.spill(d, "time")?;
+        self.w.spill(d, "w")?;
+        self.copy_of.spill(d, "copy_of")?;
+        self.seg_of_piece.spill(d, "seg_of_piece")?;
+        self.turn_from.spill(d, "turn_from")?;
+        self.turn_to.spill(d, "turn_to")?;
+        self.turn_cost.spill(d, "turn_cost")?;
+        let b = &mut self.base;
+        b.first.spill(d, "base_first")?;
+        b.to.spill(d, "base_to")?;
+        b.cost.spill(d, "base_cost")?;
+        Ok(())
+    }
+
     pub fn shed(&mut self) {
         (self.tail, self.head, self.time) = Default::default();
         (self.turn_from, self.turn_to, self.turn_cost) = Default::default();

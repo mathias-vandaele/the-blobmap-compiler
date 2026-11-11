@@ -30,6 +30,8 @@ unsafe impl Plain for f32 {}
 unsafe impl Plain for f64 {}
 unsafe impl Plain for [f32; 2] {}
 unsafe impl Plain for [f64; 2] {}
+unsafe impl Plain for [u32; 2] {}
+unsafe impl Plain for u16 {}
 unsafe impl Plain for [u8; 16] {}
 
 const _: () = assert!(cfg!(target_endian = "little"), "columns are read in place as little-endian");
@@ -56,6 +58,18 @@ impl<T: Plain> Column<T> {
             Inner::Mem(v) => v.extend(xs),
             Inner::Map(..) => panic!("a mapped column is read-only"),
         }
+    }
+
+    /// Moves an in-memory column to `dir`'s file `name`, mapped; a mapped column, or one
+    /// without a directory, stays as it is.
+    pub fn spill(&mut self, dir: Option<&Path>, name: &str) -> Result<()> {
+        if let (Inner::Mem(v), Some(_)) = (&self.0, dir) {
+            let mut w = ColumnWriter::new(dir, name)?;
+            w.push_slice(v)?;
+            *self = Column::default();
+            *self = w.finish()?;
+        }
+        Ok(())
     }
 
     /// Drops a mapped column's pages from the resident set (they stay in the page cache).
@@ -146,6 +160,19 @@ impl<T: Plain> ColumnWriter<T> {
                 let bytes = unsafe { std::slice::from_raw_parts(&x as *const T as *const u8, size_of::<T>()) };
                 out.write_all(bytes)?;
                 *n += 1;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn push_slice(&mut self, xs: &[T]) -> Result<()> {
+        match self {
+            ColumnWriter::Mem(v) => v.extend_from_slice(xs),
+            ColumnWriter::File { out, n, .. } => {
+                // SAFETY: as in `push`.
+                let bytes = unsafe { std::slice::from_raw_parts(xs.as_ptr() as *const u8, std::mem::size_of_val(xs)) };
+                out.write_all(bytes)?;
+                *n += xs.len();
             }
         }
         Ok(())

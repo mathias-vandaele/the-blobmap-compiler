@@ -226,7 +226,9 @@ impl Stage<(&Osm, &Config)> for CarNetwork {
         let p = net.pieces(&[|a: &WayAttrs| *a])?;
         drop(net);
         let (r, _) = osm.restrictions()?;
-        let g = CarGraph::build(&p, &c.car.config.turns, &r);
+        let mut g = CarGraph::build(&p, &c.car.config.turns, &r);
+        // The graph's arrays on disk, like the pieces' (SPEC §10, memory).
+        g.spill(&osm.dir().join("car-graph"))?;
         Ok((p, g))
     }
 }
@@ -244,7 +246,8 @@ impl Stage<(&Osm, &Config)> for ActiveNetwork {
         let modes: Vec<ActiveMode> = [Mode::Bike, Mode::Walk].map(|mode| ActiveMode { mode, cfg: prof.cfg }).to_vec();
         let p = net.pieces(&modes)?;
         drop(net);
-        let g = ActiveGraph::build(&p);
+        let mut g = ActiveGraph::build(&p);
+        g.spill(&osm.dir().join("active-graph"))?;
         Ok((p, g))
     }
 }
