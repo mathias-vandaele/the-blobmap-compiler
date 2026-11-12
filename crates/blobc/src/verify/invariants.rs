@@ -69,10 +69,13 @@ pub fn structure(rt: &Runtime, rep: &mut Report) -> Result<()> {
                         o.expect(e.blocks[bu].kind == 1, || format!("component {x}: link {v}-{u} joins two cells"));
                     }
                 }
-                for i in 0..row.len() {
-                    for j in 0..i {
-                        o.expect(e.link(row[i], row[j]).is_some(), || format!("component {x}: not chordal at {v}"));
-                    }
+                // Chordality by the perfect elimination test: every upper neighbour of v but its
+                // parent (the last of the row) is an upper neighbour of the parent. With every
+                // row ascending below its node, by induction on the id each row is then a clique,
+                // which is the invariant; one search per link rather than one per pair of them.
+                if let Some((&p, rest)) = row.split_last() {
+                    let up_p = &e.up_head[e.row(p)];
+                    o.expect(rest.iter().all(|u| up_p.binary_search(u).is_ok()), || format!("component {x}: not chordal at {v}"));
                 }
                 // Arcs: sorted by head (CAR: strictly), heads in range.
                 let ar = e.arcs(v);
