@@ -97,61 +97,71 @@ impl Runtime {
 }
 
 /// A source's labels after the upward half of the sweep, on the nodes its seeds reach over
-/// upper links: every other node keeps `INF`.
+/// upper links (on a valid hierarchy, their ancestors): every other node keeps `INF`. The
+/// arrays span the component but start zeroed, so only the pages of the reached nodes are
+/// ever touched.
 struct Ancestors {
-    /// Ascending layout ids.
+    /// The reached nodes, ascending.
     ids: Vec<u32>,
-    label: Vec<u16>,
+    /// Whether each node is reached, a bit per node.
+    reached: Vec<u64>,
+    /// `!label`, so that the zeroed array reads `INF` everywhere.
+    not_label: Vec<u16>,
 }
 
 impl Ancestors {
     fn up(e: &Component, mv: &ModeVocab, s: &Source, dir: Dir, f: &Faults) -> Ancestors {
-        let mut seeds = Vec::new();
-        seed(e, mv, s, dir, f, &mut |v, t| seeds.push((v, t)));
-        // Every node reached over upper links: on a valid hierarchy, the seeds' ancestors.
-        let mut seen = std::collections::BTreeSet::new();
-        let mut stack: Vec<u32> = seeds.iter().map(|s| s.0).collect();
+        let mut a = Ancestors { ids: Vec::new(), reached: vec![0; e.n.div_ceil(64)], not_label: vec![0; e.n] };
+        let mut stack = Vec::new();
+        seed(e, mv, s, dir, f, &mut |v, t| {
+            a.put(v, t);
+            stack.push(v);
+        });
         while let Some(v) = stack.pop() {
-            if seen.insert(v) {
+            let (w, bit) = (v as usize / 64, 1u64 << (v % 64));
+            if a.reached[w] & bit == 0 {
+                a.reached[w] |= bit;
+                a.ids.push(v);
                 stack.extend(e.row(v).map(|k| e.up_head[k]));
             }
         }
-        let ids: Vec<u32> = seen.into_iter().collect();
-        let at = |v: u32| ids.binary_search(&v).expect("reached over an upper link");
-        let mut label = vec![INF; ids.len()];
-        for (v, t) in seeds {
-            let i = at(v);
-            label[i] = label[i].min(t);
-        }
+        a.ids.sort_unstable();
         let go_up = match dir {
             Dir::From => &e.up[mv.info.metric],
             Dir::To => &e.down[mv.info.metric],
         };
-        for i in (0..ids.len()).rev() {
-            let lv = label[i];
+        for i in (0..a.ids.len()).rev() {
+            let v = a.ids[i];
+            let lv = a.label(v);
             if lv == INF {
                 continue;
             }
-            for k in e.row(ids[i]) {
-                let u = at(e.up_head[k]);
-                label[u] = label[u].min(f.add(lv, go_up[k]));
+            for k in e.row(v) {
+                a.put(e.up_head[k], f.add(lv, go_up[k]));
             }
         }
-        Ancestors { ids, label }
+        a
     }
 
-    /// The least sum of the two labels over the common ancestors.
+    fn label(&self, v: u32) -> u16 {
+        !self.not_label[v as usize]
+    }
+
+    fn put(&mut self, v: u32, t: u16) {
+        let x = &mut self.not_label[v as usize];
+        *x = (*x).max(!t);
+    }
+
+    fn reaches(&self, v: u32) -> bool {
+        self.reached[v as usize / 64] & (1u64 << (v % 64)) != 0
+    }
+
+    /// The least sum of the two labels over the nodes both reach.
     fn meet(&self, to: &Ancestors, f: &Faults) -> u16 {
-        let (mut i, mut j, mut t) = (0, 0, INF);
-        while i < self.ids.len() && j < to.ids.len() {
-            match self.ids[i].cmp(&to.ids[j]) {
-                std::cmp::Ordering::Less => i += 1,
-                std::cmp::Ordering::Greater => j += 1,
-                std::cmp::Ordering::Equal => {
-                    t = t.min(f.add(self.label[i], to.label[j]));
-                    i += 1;
-                    j += 1;
-                }
+        let mut t = INF;
+        for &z in &self.ids {
+            if to.reaches(z) {
+                t = t.min(f.add(self.label(z), to.label(z)));
             }
         }
         t
