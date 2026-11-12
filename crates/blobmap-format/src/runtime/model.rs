@@ -2,9 +2,9 @@
 //! demand from their packs (FORMAT §5, §7). A component is a range of the family's layout
 //! ids; loaded, its nodes are numbered from 0, and so are the vocabulary's nodes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -311,8 +311,10 @@ pub struct Runtime {
     pub faults: Faults,
     /// The components loaded, kept until `release`.
     cache: Mutex<BTreeMap<(Fam, u32), Arc<Component>>>,
-    /// Held while a component loads, so that concurrent queries load it once.
-    loading: Mutex<()>,
+    /// The components being loaded, so that concurrent queries load each once while
+    /// different components load at the same time; `loaded` wakes the queries waiting on one.
+    loading: Mutex<BTreeSet<(Fam, u32)>>,
+    loaded: Condvar,
     /// Where the vocabulary and the components go to mapped files (`Arr`), if anywhere.
     scratch: Option<PathBuf>,
 }
@@ -443,7 +445,8 @@ impl Runtime {
             vocab,
             faults: Faults::default(),
             cache: Mutex::new(BTreeMap::new()),
-            loading: Mutex::new(()),
+            loading: Mutex::new(BTreeSet::new()),
+            loaded: Condvar::new(),
             scratch: scratch.map(Path::to_path_buf),
         })
     }
@@ -461,13 +464,24 @@ impl Runtime {
         if let Some(e) = self.cache.lock().unwrap().get(&(fam, x)) {
             return Ok(e.clone());
         }
-        let _one = self.loading.lock().unwrap();
-        if let Some(e) = self.cache.lock().unwrap().get(&(fam, x)) {
-            return Ok(e.clone());
+        let mut busy = self.loading.lock().unwrap();
+        loop {
+            if let Some(e) = self.cache.lock().unwrap().get(&(fam, x)) {
+                return Ok(e.clone());
+            }
+            if busy.insert((fam, x)) {
+                break;
+            }
+            busy = self.loaded.wait(busy).unwrap();
         }
-        let e = Arc::new(self.load(fam, x)?);
-        self.cache.lock().unwrap().insert((fam, x), e.clone());
-        Ok(e)
+        drop(busy);
+        let e = self.load(fam, x).map(Arc::new);
+        if let Ok(e) = &e {
+            self.cache.lock().unwrap().insert((fam, x), e.clone());
+        }
+        self.loading.lock().unwrap().remove(&(fam, x));
+        self.loaded.notify_all();
+        e
     }
 
     /// Drops every component loaded so far; a query still holding one keeps it until it ends.

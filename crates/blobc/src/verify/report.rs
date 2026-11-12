@@ -30,6 +30,15 @@ impl Outcome {
             self.fail(msg());
         }
     }
+
+    /// Adds the cases and mismatches of a part of the check run on its own: absorbing the
+    /// parts in order keeps the examples a single run would have kept.
+    pub fn absorb(&mut self, part: Outcome) {
+        self.checked += part.checked;
+        self.mismatches += part.mismatches;
+        let room = EXAMPLES.saturating_sub(self.examples.len());
+        self.examples.extend(part.examples.into_iter().take(room));
+    }
 }
 
 #[derive(Clone, Debug, Default)]

@@ -18,7 +18,7 @@ use crate::snap::{FILTERED_PLACE, parts};
 use crate::verify::Samples;
 use crate::verify::expected::{Expected, reason_name, uuid};
 use crate::verify::reference::Reference;
-use crate::verify::report::Report;
+use crate::verify::report::{Outcome, Report};
 
 pub fn components(rt: &Runtime, r: &Reference, rep: &mut Report) {
     let o = rep.check("components against the reference (SPEC §5)");
@@ -264,52 +264,102 @@ fn dijkstra(e: &Component, w: &[u16], src: u32) -> Vec<u16> {
     d.into_iter().map(|x| x.min(INF as u32) as u16).collect()
 }
 
+/// A component of at least this many nodes is checked alone, in parallel inside; smaller ones
+/// are checked in parallel with each other.
+const LARGE_COMPONENT: u32 = 1 << 20;
+
+/// Small components checked between two releases of the runtime's component cache.
+const SMALL_AT_ONCE: usize = 4096;
+
+/// Runs `f` on every component of the family and absorbs its outcomes in component order.
+/// `f` gets whether it is checking a large component alone, and may then work in parallel.
+fn each_component(rt: &Runtime, fam: Fam, o: &mut Outcome, f: impl Fn(u32, &Component, bool) -> Result<Outcome> + Sync) -> Result<()> {
+    let t = &rt.tables[&fam];
+    let n = rt.components(fam) as u32;
+    // Components are numbered by node count descending (FORMAT §5.1).
+    let large = (0..n).take_while(|&x| t.nodes(x) >= LARGE_COMPONENT).count() as u32;
+    for x in 0..large {
+        let e = rt.component(fam, x)?;
+        o.absorb(f(x, &e, true)?);
+        drop(e);
+        rt.release();
+    }
+    let small: Vec<u32> = (large..n).collect();
+    for chunk in small.chunks(SMALL_AT_ONCE) {
+        let parts: Vec<Result<Outcome>> = chunk.par_iter().map(|&x| f(x, &*rt.component(fam, x)?, false)).collect();
+        for part in parts {
+            o.absorb(part?);
+        }
+        rt.release();
+    }
+    Ok(())
+}
+
 /// Re-customization (FORMAT §6): the stored master times reproduce the stored weights and
 /// links; random master times give the same distances as Dijkstra (SPEC §11).
 pub fn recustomization(rt: &Runtime, rep: &mut Report) -> Result<()> {
     for fam in [Fam::Car, Fam::Active] {
+        let cross = rt.stored_cross_times(fam)?;
+        let stored = rt.reround(fam, &|e, r, m| match e {
+            Some(e) => e.time_s[m][r.index as usize],
+            None => cross[m][r.index as usize],
+        })?;
         let o = rep.check(&format!("{}: re-customization from the bytes", fam.name()));
-        let stored = rt.reround(fam, &|r, m| rt.stored_time(fam, r, m))?;
-        for x in 0..rt.components(fam) as u32 {
-            let e = rt.component(fam, x)?;
-            for m in 0..e.up.len() {
+        each_component(rt, fam, o, |x, e, alone| {
+            let metric = |m: usize| -> Result<Outcome> {
+                let mut o = Outcome::default();
                 o.count();
                 let w = &stored.w[m][x as usize];
                 o.expect(w[..] == e.w[m][..], || format!("component {x} metric {m}: re-rounded weights differ"));
-                let (up, down) = customize(&e, w)?;
+                let (up, down) = customize(e, w)?;
                 o.expect(up[..] == e.up[m][..] && down[..] == e.down[m][..], || format!("component {x} metric {m}: re-customized links differ"));
-            }
-            drop(e);
-            rt.release();
-        }
+                Ok(o)
+            };
+            in_order(e.up.len(), alone, metric)
+        })?;
         if fam == Fam::Active {
             let cw = rt.model.get::<u16>("road/active/cross/walk.w")?;
+            let o = rep.check(&format!("{}: re-customization from the bytes", fam.name()));
             o.expect(stored.cross[1] == *cw, || "cross roads: re-rounded walk weights differ".into());
         }
-        let o = rep.check(&format!("{}: random metrics against Dijkstra", fam.name()));
-        let random = |r: RoadRef, m: usize| -> f32 {
+        drop(stored);
+        let random = |_: Option<&Component>, r: RoadRef, m: usize| -> f32 {
             let seed = ((r.component as u64) << 40) ^ ((r.index as u64) << 8) ^ m as u64;
             let mut g = rand::rngs::StdRng::seed_from_u64(seed);
             if g.random_bool(0.05) { f32::INFINITY } else { g.random_range(0.0f32..400.0) }
         };
         let rw = rt.reround(fam, &random)?;
-        for x in 0..rt.components(fam) as u32 {
-            let e = rt.component(fam, x)?;
-            for m in 0..e.up.len() {
+        let o = rep.check(&format!("{}: random metrics against Dijkstra", fam.name()));
+        each_component(rt, fam, o, |x, e, alone| {
+            let metric = |m: usize| -> Result<Outcome> {
                 let w = &rw.w[m][x as usize];
-                let (up, down) = customize(&e, w)?;
-                for src in (0..e.n as u32).step_by((e.n / 8).max(1)) {
+                let (up, down) = customize(e, w)?;
+                let srcs: Vec<u32> = (0..e.n as u32).step_by((e.n / 8).max(1)).collect();
+                in_order(srcs.len(), alone, |k| {
+                    let src = srcs[k];
+                    let mut o = Outcome::default();
                     o.count();
-                    let a = sweep(&e, &up, &down, src);
-                    let b = dijkstra(&e, w, src);
+                    let a = sweep(e, &up, &down, src);
+                    let b = dijkstra(e, w, src);
                     o.expect(a == b, || format!("component {x} metric {m} from {src}: CCH and Dijkstra differ"));
-                }
-            }
-            drop(e);
-            rt.release();
-        }
+                    Ok(o)
+                })
+            };
+            // A metric at a time: its eight searches at once already fill the threads.
+            in_order(e.up.len(), false, metric)
+        })?;
     }
     Ok(())
+}
+
+/// The outcomes of `f(0 .. n)`, in parallel when asked, absorbed in order.
+fn in_order(n: usize, parallel: bool, f: impl Fn(usize) -> Result<Outcome> + Sync) -> Result<Outcome> {
+    let parts: Vec<Result<Outcome>> = if parallel { (0..n).into_par_iter().map(&f).collect() } else { (0..n).map(&f).collect() };
+    let mut o = Outcome::default();
+    for part in parts {
+        o.absorb(part?);
+    }
+    Ok(o)
 }
 
 /// Columns from and to `n.columns` sampled sources, multi-source columns with start times,
