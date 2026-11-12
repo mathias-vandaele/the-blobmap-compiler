@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use blobmap_format::{INF, ModelWriter, NONE, Tensor, Unit, UnitWritten};
 use rayon::prelude::*;
 
@@ -51,10 +51,17 @@ pub fn membership(f: &Families, mode: &str) -> Membership {
 
 /// Snaps the points 0 .. n per mode (car, bike, walk), each mode's outcomes into a column of
 /// `dir` (in memory without one).
+///
+/// The points are snapped in a spatial order, so that a continent's piece coordinates, mapped
+/// from the work directory, are read a neighbourhood at a time rather than at random (SPEC
+/// §10, memory); each mode's outcomes are put back in index order once its family's grid is
+/// dropped. The outcomes do not depend on the order.
 pub fn snap(f: &Families, n: usize, point: &(dyn Fn(usize) -> (f64, f64) + Sync), dir: Option<&Path>) -> Result<Vec<ModeSnap>> {
     let (car, act) = (f.car, f.active);
+    let order = spatial_order(n, point)?;
     // One family's grid at a time: the modes of a family are consecutive.
     let mut grid: Option<(bool, Grid)> = None;
+    let mut sorted: Vec<(&str, Column<Snapped>)> = Vec::new();
     let mut out = Vec::new();
     for (mode, _) in MODES {
         let sets = membership(f, mode);
@@ -66,6 +73,7 @@ pub fn snap(f: &Families, n: usize, point: &(dyn Fn(usize) -> (f64, f64) + Sync)
         if grid.as_ref().map(|g| g.0) != Some(is_car) {
             // The old grid goes before the new one is built.
             drop(grid.take());
+            in_index_order(&mut sorted, &order, dir, &mut out)?;
             grid = Some((is_car, Grid::new(p)));
         }
         let grid = &grid.as_ref().unwrap().1;
@@ -79,24 +87,76 @@ pub fn snap(f: &Families, n: usize, point: &(dyn Fn(usize) -> (f64, f64) + Sync)
                 [act.p.u[k], act.p.v[k]].iter().map(|&v| act.e.of[v as usize]).filter(|&x| act.e.trapped[x as usize]).min()
             }
         };
-        let mut at = ColumnWriter::new(dir, mode)?;
-        for start in (0..n).step_by(SNAP_BATCH) {
-            let done: Vec<Snapped> = (start..n.min(start + SNAP_BATCH))
-                .into_par_iter()
-                .map(|i| {
-                    let (lat, lon) = point(i);
+        let mut at = ColumnWriter::new(dir, &format!("{mode}.spatial"))?;
+        for batch in order.chunks(SNAP_BATCH) {
+            let done: Vec<Snapped> = batch
+                .par_iter()
+                .map(|&i| {
+                    let (lat, lon) = point(i as usize);
                     let fd = grid.find(p, lat, lon, radius, small_max, &sets as &dyn Sets);
                     let t = fd.eligible.and_then(|h| trapped(h.piece as usize)).unwrap_or(NONE);
                     Snapped::new(&fd, t)
                 })
                 .collect();
-            for x in done {
-                at.push(x)?;
-            }
+            at.push_slice(&done)?;
+        }
+        sorted.push((mode, at.finish()?));
+    }
+    drop(grid);
+    in_index_order(&mut sorted, &order, dir, &mut out)?;
+    Ok(out)
+}
+
+/// The points 0 .. n by the Morton code of their 0.01° tile, then by index.
+fn spatial_order(n: usize, point: &(dyn Fn(usize) -> (f64, f64) + Sync)) -> Result<Vec<u32>> {
+    anyhow::ensure!(n <= u32::MAX as usize, "{n} points to snap, beyond U32 indices");
+    // Bit k of x goes to bit 2k.
+    let spread = |x: u32| -> u64 {
+        let mut x = x as u64;
+        x = (x | (x << 16)) & 0x0000_ffff_0000_ffff;
+        x = (x | (x << 8)) & 0x00ff_00ff_00ff_00ff;
+        x = (x | (x << 4)) & 0x0f0f_0f0f_0f0f_0f0f;
+        x = (x | (x << 2)) & 0x3333_3333_3333_3333;
+        (x | (x << 1)) & 0x5555_5555_5555_5555
+    };
+    let mut keys: Vec<u64> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let (lat, lon) = point(i);
+            // 18 000 rows and 36 000 columns: 16 bits each, a 32-bit code.
+            let row = ((lat + 90.0) * 100.0).clamp(0.0, 17_999.0) as u32;
+            let col = ((lon + 180.0).rem_euclid(360.0) * 100.0).min(35_999.0) as u32;
+            (spread(row) << 1 | spread(col)) << 32 | i as u64
+        })
+        .collect();
+    keys.par_sort_unstable();
+    Ok(keys.into_iter().map(|k| k as u32).collect())
+}
+
+/// Each mode's outcomes in spatial order, put back in index order as its column, its spatial
+/// column then removed.
+fn in_index_order(sorted: &mut Vec<(&str, Column<Snapped>)>, order: &[u32], dir: Option<&Path>, out: &mut Vec<ModeSnap>) -> Result<()> {
+    if sorted.is_empty() {
+        return Ok(());
+    }
+    let mut rank = vec![0u32; order.len()];
+    for (j, &i) in order.iter().enumerate() {
+        rank[i as usize] = j as u32;
+    }
+    for (mode, col) in sorted.drain(..) {
+        let mut at = ColumnWriter::new(dir, mode)?;
+        for start in (0..rank.len()).step_by(SNAP_BATCH) {
+            let done: Vec<Snapped> = rank[start..rank.len().min(start + SNAP_BATCH)].par_iter().map(|&j| col[j as usize]).collect();
+            at.push_slice(&done)?;
+        }
+        drop(col);
+        if let Some(d) = dir {
+            let path = d.join(format!("{mode}.spatial"));
+            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
         }
         out.push(ModeSnap { at: at.finish()? });
     }
-    Ok(out)
+    Ok(())
 }
 
 /// What the build keeps of the catalog: points in internal-index order.
