@@ -18,6 +18,10 @@ pub use modes::Membership;
 /// Cell size: 0.002° (222 m north-south; 143 m east-west at 50°N).
 pub const CELL_DEG: f64 = 0.002;
 
+/// Grid rows per band while the grid is built: a row in a band fits in 14 bits, a column
+/// (`360 / CELL_DEG` of them) in 18.
+const BAND_ROWS: i64 = 4096;
+
 /// The nearest point of a piece.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Hit {
@@ -191,39 +195,52 @@ impl Grid {
         }
         let wrap = (360.0 / CELL_DEG).round() as i64;
         let half = wrap / 2;
-        let mut pairs: Vec<(u64, u32)> = (0..p.len())
-            .into_par_iter()
-            .flat_map_iter(|k| {
-                let r = p.points(k);
-                let mut out = Vec::new();
-                for i in r.start..r.end - 1 {
-                    let (ay, ax) = grid_units(p.pt_lat[i], p.pt_lon[i]);
-                    let mut dl = p.pt_lon[i + 1] - p.pt_lon[i];
-                    if dl > 180.0 {
-                        dl -= 360.0;
-                    } else if dl < -180.0 {
-                        dl += 360.0;
+        // One band of rows at a time, each (cell, segment) pair packed in a U64: the row in the
+        // band above bit 50, the column from 0 above bit 32, the segment below. Bands ascend and
+        // so do the packed keys, so the cells come out in `cell_key` order.
+        let rows = (90.0 / CELL_DEG).ceil() as i64 + 1;
+        let (mut cells, mut first, mut seg) = (Vec::new(), Vec::new(), Vec::new());
+        for lo in (-rows..=rows).step_by(BAND_ROWS as usize) {
+            let hi = lo + BAND_ROWS;
+            let mut keys: Vec<u64> = (0..p.len())
+                .into_par_iter()
+                .flat_map_iter(|k| {
+                    let r = p.points(k);
+                    let mut out = Vec::new();
+                    for i in r.start..r.end - 1 {
+                        let (ay, ax) = grid_units(p.pt_lat[i], p.pt_lon[i]);
+                        let mut dl = p.pt_lon[i + 1] - p.pt_lon[i];
+                        if dl > 180.0 {
+                            dl -= 360.0;
+                        } else if dl < -180.0 {
+                            dl += 360.0;
+                        }
+                        let (by, bx) = grid_units(p.pt_lat[i + 1], p.pt_lon[i] + dl);
+                        if (ay.min(by).floor() as i64) >= hi || (ay.max(by).floor() as i64) < lo {
+                            continue;
+                        }
+                        supercover(ax, ay, bx, by, |cx, cy| {
+                            if (lo..hi).contains(&cy) {
+                                out.push(((cy - lo) as u64) << 50 | ((cx + half).rem_euclid(wrap) as u64) << 32 | i as u64);
+                            }
+                        });
                     }
-                    let (by, bx) = grid_units(p.pt_lat[i + 1], p.pt_lon[i] + dl);
-                    supercover(ax, ay, bx, by, |cx, cy| {
-                        let cx = (cx + half).rem_euclid(wrap) - half;
-                        out.push((cell_key(cy, cx), i as u32))
-                    });
+                    out
+                })
+                .collect();
+            keys.par_sort_unstable();
+            keys.dedup();
+            for k in keys {
+                let c = cell_key(lo + (k >> 50) as i64, ((k >> 32) & ((1 << 18) - 1)) as i64 - half);
+                if cells.last() != Some(&c) {
+                    cells.push(c);
+                    first.push(seg.len() as u32);
                 }
-                out
-            })
-            .collect();
-        pairs.par_sort_unstable();
-        pairs.dedup();
-        let (mut cells, mut first) = (Vec::new(), Vec::new());
-        for (k, &(c, _)) in pairs.iter().enumerate() {
-            if cells.last() != Some(&c) {
-                cells.push(c);
-                first.push(k as u32);
+                seg.push(k as u32);
             }
         }
-        first.push(pairs.len() as u32);
-        Grid { cells, first, seg: pairs.into_iter().map(|(_, i)| i).collect(), piece_of_point }
+        first.push(seg.len() as u32);
+        Grid { cells, first, seg, piece_of_point }
     }
 
     fn cell(&self, row: i64, col: i64) -> &[u32] {

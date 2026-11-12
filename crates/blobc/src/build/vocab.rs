@@ -53,15 +53,22 @@ pub fn membership(f: &Families, mode: &str) -> Membership {
 /// `dir` (in memory without one).
 pub fn snap(f: &Families, n: usize, point: &(dyn Fn(usize) -> (f64, f64) + Sync), dir: Option<&Path>) -> Result<Vec<ModeSnap>> {
     let (car, act) = (f.car, f.active);
-    let cgrid = Grid::new(car.p);
-    let agrid = Grid::new(act.p);
+    // One family's grid at a time: the modes of a family are consecutive.
+    let mut grid: Option<(bool, Grid)> = None;
     let mut out = Vec::new();
     for (mode, _) in MODES {
         let sets = membership(f, mode);
-        let (grid, p, radius, small_max) = match mode {
-            "car" => (&cgrid, car.p, f.car_radius_m, f.car_small_max),
-            _ => (&agrid, act.p, f.active_radius_m, f.active_small_max),
+        let is_car = mode == "car";
+        let (p, radius, small_max) = match mode {
+            "car" => (car.p, f.car_radius_m, f.car_small_max),
+            _ => (act.p, f.active_radius_m, f.active_small_max),
         };
+        if grid.as_ref().map(|g| g.0) != Some(is_car) {
+            // The old grid goes before the new one is built.
+            drop(grid.take());
+            grid = Some((is_car, Grid::new(p)));
+        }
+        let grid = &grid.as_ref().unwrap().1;
         let trapped = |k: usize| -> Option<u32> {
             if sets.servable(k as u32) {
                 return None;
