@@ -114,6 +114,28 @@ impl NodeSet {
         }
     }
 
+    /// Every id of the set in id order, `chunk` at a time.
+    fn each_chunk(&self, chunk: usize, mut f: impl FnMut(&[i64]) -> Result<()>) -> Result<()> {
+        match self {
+            NodeSet::Sorted(ids) => ids.chunks(chunk).try_for_each(f),
+            NodeSet::Bits { lo, words, .. } => {
+                let mut out = Vec::with_capacity(chunk);
+                for (k, &w) in words.iter().enumerate() {
+                    let mut x = w;
+                    while x != 0 {
+                        out.push(lo + (k as i64) * 64 + x.trailing_zeros() as i64);
+                        x &= x - 1;
+                        if out.len() == chunk {
+                            f(&out)?;
+                            out.clear();
+                        }
+                    }
+                }
+                if out.is_empty() { Ok(()) } else { f(&out) }
+            }
+        }
+    }
+
     /// The ids of the nodes whose numbers have their bit set in `marks`, in id order.
     fn ids_marked(&self, marks: &[AtomicU64]) -> Vec<i64> {
         let mut out = Vec::new();
@@ -146,6 +168,10 @@ pub struct Network<'o, A> {
     refs: Column<i64>,
     first: Vec<u64>,
     nodes: NodeSet,
+    /// The packed coordinates of each node, by node number (`MISSING` when not in the file):
+    /// looked up in one pass over the node files in id order, so that walking the ways reads
+    /// this column rather than the files at random (SPEC §10, memory).
+    at: Column<u64>,
     /// Routing nodes, by node number.
     routing: Vec<AtomicU64>,
     /// Obstacles by OSM id, sorted.
@@ -340,6 +366,10 @@ impl<'o, A: Copy + Send + Sync + Speeds> Network<'o, A> {
         let (mut ways, refs, first) = read_ways(osm, profile, rules, dir)?;
         let nodes = NodeSet::new(&refs)?;
         let n = nodes.len();
+        let mut at = ColumnWriter::new(dir, "node_at.bin")?;
+        nodes.each_chunk(1 << 24, |ids| at.push_slice(&osm.coords(ids)))?;
+        let at = at.finish()?;
+        osm.release_all();
         // A node is routing when it ends a way or is met twice along the ways.
         let (once, routing) = (atomic_bits(n), atomic_bits(n));
         (0..ways.len()).into_par_iter().for_each(|k| {
@@ -355,7 +385,7 @@ impl<'o, A: Copy + Send + Sync + Speeds> Network<'o, A> {
         });
         drop(once);
         ways.par_iter_mut().enumerate().filter(|(_, w)| w.by_location).for_each(|(k, w)| {
-            let c = osm.coord(refs[first[k + 1] as usize - 1]);
+            let c = at[nodes.index(refs[first[k + 1] as usize - 1])];
             w.left = c != MISSING && {
                 let (lat, lon) = unpack(c);
                 profile.keeps_left_at(lat, lon)
@@ -368,7 +398,13 @@ impl<'o, A: Copy + Send + Sync + Speeds> Network<'o, A> {
         let obstacles: Vec<(i64, Obstacle)> = obstacles.iter().copied().filter(|&(id, _)| in_set(id)).collect();
         refs.release();
         osm.release_all();
-        Ok(Network { osm, ways, refs, first, nodes, routing, obstacles, dir: dir.map(Path::to_path_buf) })
+        at.release();
+        Ok(Network { osm, ways, refs, first, nodes, at, routing, obstacles, dir: dir.map(Path::to_path_buf) })
+    }
+
+    /// The packed coordinates of a way node.
+    fn coord(&self, id: i64) -> u64 {
+        self.at[self.nodes.index(id)]
     }
 
     fn obstacle(&self, id: i64) -> Option<&Obstacle> {
@@ -382,7 +418,7 @@ impl<'o, A: Copy + Send + Sync + Speeds> Network<'o, A> {
         let mut pts: Vec<(i64, u64)> = Vec::new();
         for k in ways {
             let (w, refs) = (&self.ways[k], self.refs_of(k));
-            let first = (refs[0], self.osm.coord(refs[0]));
+            let first = (refs[0], self.coord(refs[0]));
             pts.clear();
             pts.push(first);
             let mut len = 0.0f64;
@@ -390,7 +426,7 @@ impl<'o, A: Copy + Send + Sync + Speeds> Network<'o, A> {
             let mut seq = 0u32;
             for &id in &refs[1..] {
                 let a = *pts.last().unwrap();
-                let b = (id, self.osm.coord(id));
+                let b = (id, self.coord(id));
                 pts.push(b);
                 if a.1 != MISSING && b.1 != MISSING {
                     let ((la, oa), (lb, ob)) = (unpack(a.1), unpack(b.1));
@@ -432,7 +468,7 @@ impl<'o, A: Copy + Send + Sync + Speeds> Network<'o, A> {
                 each(o)?;
             }
             self.refs.release();
-            self.osm.release_all();
+            self.at.release();
         }
         Ok(())
     }
@@ -526,7 +562,7 @@ impl<'o, A: Copy + Send + Sync + Speeds> Network<'o, A> {
         let ids = self.nodes.ids_marked(&used);
         let (mut node_osm, mut node_lat, mut node_lon) = (ColumnWriter::new(dir, "node_osm.bin")?, ColumnWriter::new(dir, "node_lat.bin")?, ColumnWriter::new(dir, "node_lon.bin")?);
         for &id in &ids {
-            let (la, lo) = unpack(self.osm.coord(id));
+            let (la, lo) = unpack(self.coord(id));
             node_osm.push(id)?;
             node_lat.push(la)?;
             node_lon.push(lo)?;
