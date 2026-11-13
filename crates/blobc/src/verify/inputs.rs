@@ -101,10 +101,10 @@ pub fn main(a: Vec<String>) -> Result<()> {
         (),
     )?;
     note(&mut read, "active", active);
-    let islands = run.run(&ReadIslands, &osm)?;
+    let islands = run.run(&ReadIslands, (&osm, Some(work.join("islands").as_path())))?;
     note(&mut read, "islands", json!({"polygons": islands.all.len()}));
     drop((islands, osm));
-    let catalog = run.run(&ReadCatalog, (&release, &config, polygon.as_ref()))?;
+    let catalog = run.run(&ReadCatalog, (&release, &config, polygon.as_ref(), Some(work.join("catalog").as_path())))?;
     note(&mut read, "catalog", json!({"addresses": catalog.addresses.len(), "places": catalog.places.len(), "aliases": catalog.aliases.len()}));
     drop(catalog);
     let report = json!({

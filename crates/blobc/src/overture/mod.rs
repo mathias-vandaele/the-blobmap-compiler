@@ -13,6 +13,9 @@ use anyhow::{Result, bail, ensure};
 use blobmap_format::NONE16;
 use rayon::prelude::*;
 
+use std::path::Path;
+
+use crate::osm::column::{Column, Plain};
 use crate::profile::config::PlaceRules;
 
 pub use extent::Polygon;
@@ -43,7 +46,8 @@ pub fn uuid_string(id: &Id) -> String {
     format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
 pub struct Address {
     pub id: Id,
     pub lat: f64,
@@ -54,29 +58,38 @@ pub struct Address {
     pub country: u32,
 }
 
-// The planet's addresses are held in memory, 40 bytes each (SPEC §10).
+// The planet's addresses are a column of the work directory, 40 bytes each (SPEC §10).
 const _: () = assert!(std::mem::size_of::<Address>() == 40);
+// SAFETY: `repr(C)` with no padding (40 bytes of fields), plain numbers only.
+unsafe impl Plain for Address {}
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
 pub struct Place {
     pub id: Id,
     pub lat: f64,
     pub lon: f64,
     /// Its first address's country, as a number in `Catalog::strings` (`NO_STR` if none).
     pub country: u32,
-    /// 0 kept, 4 `FilteredPlace` (FORMAT §7.4).
-    pub status: u8,
-    pub primary: u16,
-    pub basic: u16,
     /// The basic category's key as Overture gives it, as a number in `Catalog::strings`
     /// (the data report counts by it).
     pub basic_key: u32,
     /// The alternate categories are `Catalog::alts[alt_first..][..alt_len]`.
     pub alt_first: u32,
-    pub alt_len: u16,
     /// Index of the row's source licences in `Catalog::license_sets`.
     pub license: u32,
+    pub primary: u16,
+    pub basic: u16,
+    pub alt_len: u16,
+    /// 0 kept, 4 `FilteredPlace` (FORMAT §7.4).
+    pub status: u8,
+    /// Always 0: the column holds no padding.
+    pub pad: u8,
 }
+
+const _: () = assert!(std::mem::size_of::<Place>() == 56);
+// SAFETY: `repr(C)` with no padding (56 bytes of fields), plain numbers only.
+unsafe impl Plain for Place {}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CatalogStats {
@@ -95,9 +108,9 @@ pub struct Catalog {
     pub release: String,
     pub taxonomy: Taxonomy,
     /// Sorted by ID.
-    pub addresses: Vec<Address>,
+    pub addresses: Column<Address>,
     /// Kept and filtered places, sorted by ID.
-    pub places: Vec<Place>,
+    pub places: Column<Place>,
     /// The places' alternate categories: per place ascending, without the primary.
     pub alts: Vec<u16>,
     /// The country codes and category keys addresses and places point to.
@@ -114,8 +127,8 @@ pub struct Catalog {
 impl Catalog {
     /// Reads the release, keeping the points `keep` accepts (the extent polygon, if any).
     /// The places come first, so that their rows as read are dropped before the addresses,
-    /// the larger table, are read.
-    pub fn read(release: &Release, rules: &PlaceRules, keep: &(dyn Fn(f64, f64) -> bool + Sync)) -> Result<Catalog> {
+    /// the larger table, are read. Addresses and places go to `dir` if given.
+    pub fn read(release: &Release, rules: &PlaceRules, keep: &(dyn Fn(f64, f64) -> bool + Sync), dir: Option<&Path>) -> Result<Catalog> {
         let taxonomy = Taxonomy::read(&release.taxonomy_dir())?;
         let lic = release::Licenses::default();
         let raw = release.read_places(keep, &lic)?;
@@ -158,6 +171,7 @@ impl Catalog {
                 alt_first,
                 alt_len: u16::try_from(alt.len())?,
                 license: p.license,
+                pad: 0,
             });
         }
         // Duplicates among the kept places.
@@ -200,6 +214,9 @@ impl Catalog {
         if let Some(id) = twice([&mut addresses.iter().map(|a| &a.id), &mut places.iter().map(|p| &p.id), &mut aliases.iter().map(|a| &a.0)]) {
             bail!("Overture ID {} appears twice in the release", uuid_string(&id));
         }
+        let (mut addresses, mut places) = (Column::from(addresses), Column::from(places));
+        addresses.spill(dir, "addresses")?;
+        places.spill(dir, "places")?;
         Ok(Catalog { release: release.name.clone(), taxonomy, addresses, places, alts, strings, aliases, alias_license, license_sets, stats })
     }
 
@@ -265,7 +282,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("blobmap-overture-{}", std::process::id()));
         let w = crate::fixtures::by_name("town").unwrap().write(&dir).unwrap();
         let cfg = crate::profile::config::Config::load(&w.configs[0].1).unwrap();
-        let c = Catalog::read(&Release::open(&w.overture).unwrap(), &cfg.places.config, &|_, _| true).unwrap();
+        let c = Catalog::read(&Release::open(&w.overture).unwrap(), &cfg.places.config, &|_, _| true, None).unwrap();
         assert_eq!(c.stats.filtered, 2);
         assert_eq!(c.stats.merged, 1);
         assert_eq!(c.aliases.len(), 1);

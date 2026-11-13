@@ -255,7 +255,7 @@ impl Reference {
             Some(p) => Some(Polygon::parse_poly(&std::fs::read_to_string(p)?)?),
             None => None,
         };
-        let mut catalog = phase("  catalog", || ReadCatalog.run((&release, &config, polygon.as_ref())))?;
+        let mut catalog = phase("  catalog", || ReadCatalog.run((&release, &config, polygon.as_ref(), Some(i.work.join("catalog").as_path()))))?;
         let osm = phase("  nodes", || ReadNodes.run((i.pbf.as_path(), i.work.join("nodes").as_path(), &config)))?;
         // The reference's columns, apart for each set of families (a verify builds several).
         let dir = i.work.join(format!("ref-{}", fams.iter().map(|f| f.name()).collect::<Vec<_>>().join("+")));
@@ -340,7 +340,7 @@ impl Reference {
                 (r.active_pieces, r.active, r.active_components) = (s.pieces, s.active, s.components);
             }
         }
-        catalog.addresses = Vec::new();
+        catalog.addresses = Default::default();
         r.catalog = catalog;
         crate::build::mem::trim();
         let mut order: Vec<u32> = (0..r.ids.len() as u32).collect();

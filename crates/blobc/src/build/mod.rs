@@ -286,15 +286,16 @@ impl Stage<(&dyn Family, &Config, hier::Ordered)> for Hierarchies {
 
 pub struct ReadCatalog;
 
-impl Stage<(&Release, &Config, Option<&Polygon>)> for ReadCatalog {
+impl Stage<(&Release, &Config, Option<&Polygon>, Option<&Path>)> for ReadCatalog {
     type Output = Catalog;
     fn name(&self) -> &'static str {
         "catalog"
     }
-    fn run(&self, (r, c, poly): (&Release, &Config, Option<&Polygon>)) -> Result<Catalog> {
+    /// The addresses and places go to `dir` (SPEC §10, memory).
+    fn run(&self, (r, c, poly, dir): (&Release, &Config, Option<&Polygon>, Option<&Path>)) -> Result<Catalog> {
         match poly {
-            Some(p) => Catalog::read(r, &c.places.config, &|lat, lon| p.contains(lat, lon)),
-            None => Catalog::read(r, &c.places.config, &|_, _| true),
+            Some(p) => Catalog::read(r, &c.places.config, &|lat, lon| p.contains(lat, lon), dir),
+            None => Catalog::read(r, &c.places.config, &|_, _| true, dir),
         }
     }
 }
@@ -322,13 +323,14 @@ impl Stage<(&Families<'_>, &Catalog, bool, &Path)> for Snap {
 /// The island polygons of the `.pbf`, for the data report (SPEC §3).
 pub struct ReadIslands;
 
-impl Stage<&Osm> for ReadIslands {
+impl Stage<(&Osm, Option<&Path>)> for ReadIslands {
     type Output = Islands;
     fn name(&self) -> &'static str {
         "islands"
     }
-    fn run(&self, osm: &Osm) -> Result<Islands> {
-        Islands::read(osm)
+    /// The rings' points go to `dir` (SPEC §10, memory).
+    fn run(&self, (osm, dir): (&Osm, Option<&Path>)) -> Result<Islands> {
+        Islands::read(osm, dir)
     }
 }
 
@@ -586,6 +588,11 @@ pub fn build(a: &Args) -> Result<BuildResult> {
     let inputs = run.run(&ReadInputs, a)?;
     let c = &inputs.config;
     let osm = run.run(&ReadNodes, (a.pbf.as_path(), a.work_dir().as_path(), c))?;
+    // The catalog and the island polygons first: their reading peaks well above what they
+    // keep, which is mapped from the work directory, so no peak sits on the families (SPEC
+    // §10, memory).
+    let catalog = run.run(&ReadCatalog, (&inputs.release, c, inputs.polygon.as_ref(), Some(osm.dir().join("catalog").as_path())))?;
+    let islands = run.run(&ReadIslands, (&osm, Some(osm.dir().join("islands").as_path())))?;
     prepare_out(&a.out)?;
     let o = c.build.build;
     let mut writer = ModelWriter::create(&a.out, ShardLimits { target: o.shard_target_bytes, max: o.shard_max_bytes })?;
@@ -609,7 +616,6 @@ pub fn build(a: &Args) -> Result<BuildResult> {
     let parts = act.into_parts();
     ag.shed();
     let act = Active::with(&ap, &ag, parts);
-    let catalog = run.run(&ReadCatalog, (&inputs.release, c, inputs.polygon.as_ref()))?;
     let families = Families {
         car: &car,
         car_road: &car_road,
@@ -622,7 +628,6 @@ pub fn build(a: &Args) -> Result<BuildResult> {
     };
     let (snaps, ids) = run.run(&Snap, (&families, &catalog, inputs.polygon.is_some(), osm.dir().join("snap").as_path()))?;
     let wo = run.run(&WriteModel, WriteInput { args: a, inputs: &inputs, families: &families, catalog: &catalog, snaps: &snaps, ids: &ids, writer })?;
-    let islands = run.run(&ReadIslands, &osm)?;
     let data = report::data(a, &families, &catalog, &snaps, &ids, &wo.served, &islands)?;
     blobmap_format::json::write_file(&a.report_path("data"), &data)?;
     let hierarchies: Vec<&serde_json::Value> = car_road.hierarchies.iter().chain(&active_road.hierarchies).collect();

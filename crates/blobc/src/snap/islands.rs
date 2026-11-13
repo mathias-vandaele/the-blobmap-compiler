@@ -7,6 +7,7 @@
 //! component; a fragment on it is no island.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -14,6 +15,7 @@ use anyhow::Result;
 use osmpbf::{BlobDecode, BlobReader, RelMemberType};
 use rayon::prelude::*;
 
+use crate::osm::column::{Column, ColumnWriter};
 use crate::osm::nodes::MISSING;
 use crate::osm::{Osm, Pieces};
 use crate::osm::geo::{lon_shifts, unwrap_ring};
@@ -25,43 +27,37 @@ const NO_ISLAND: u32 = u32::MAX;
 /// Cell size of the polygon index, in degrees.
 const CELL: f64 = 0.05;
 
-/// An island polygon: its outer ring as (lat, lon), bounding box, a planar area for
+/// An island polygon: its outer ring (`Islands::ring`), bounding box, a planar area for
 /// choosing the smallest, and what OSM calls it.
 pub struct Island {
-    ring: Vec<(f64, f64)>,
+    first: u64,
+    len: u32,
     bbox: (f64, f64, f64, f64),
     area: f64,
     pub label: String,
 }
 
-impl Island {
-    /// The ring is unwrapped across the antimeridian (`geo::unwrap_ring`).
-    fn new(mut ring: Vec<(f64, f64)>, label: String) -> Island {
-        unwrap_ring(&mut ring);
-        let mut b = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
-        for &(la, lo) in &ring {
-            b = (b.0.min(la), b.1.min(lo), b.2.max(la), b.3.max(lo));
-        }
-        let c = ((b.0 + b.2) / 2.0).to_radians().cos();
-        let area = ring.windows(2).map(|w| (w[0].1 * w[1].0 - w[1].1 * w[0].0) * c).sum::<f64>().abs() / 2.0;
-        Island { ring, bbox: b, area, label }
+/// A ring unwrapped across the antimeridian (`geo::unwrap_ring`): its bounding box and area.
+fn shape(ring: &mut [(f64, f64)]) -> ((f64, f64, f64, f64), f64) {
+    unwrap_ring(ring);
+    let mut b = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for &(la, lo) in ring.iter() {
+        b = (b.0.min(la), b.1.min(lo), b.2.max(la), b.3.max(lo));
     }
+    let c = ((b.0 + b.2) / 2.0).to_radians().cos();
+    let area = ring.windows(2).map(|w| (w[0].1 * w[1].0 - w[1].1 * w[0].0) * c).sum::<f64>().abs() / 2.0;
+    (b, area)
+}
 
-    pub fn contains(&self, (la, lo): (f64, f64)) -> bool {
-        let b = self.bbox;
-        lon_shifts(lo, b.1, b.3).any(|lo| la >= b.0 && la <= b.2 && self.contains_at(la, lo))
-    }
-
-    fn contains_at(&self, la: f64, lo: f64) -> bool {
-        let mut inside = false;
-        for w in self.ring.windows(2) {
-            let ((ya, xa), (yb, xb)) = (w[0], w[1]);
-            if (ya > la) != (yb > la) && lo < xa + (la - ya) / (yb - ya) * (xb - xa) {
-                inside = !inside;
-            }
+fn contains_at(ring: &[[f64; 2]], la: f64, lo: f64) -> bool {
+    let mut inside = false;
+    for w in ring.windows(2) {
+        let ([ya, xa], [yb, xb]) = (w[0], w[1]);
+        if (ya > la) != (yb > la) && lo < xa + (la - ya) / (yb - ya) * (xb - xa) {
+            inside = !inside;
         }
-        inside
     }
+    inside
 }
 
 /// Index cells per turn of longitude.
@@ -82,9 +78,11 @@ fn wrap_col(x: i32) -> i32 {
     (x + TURN / 2).rem_euclid(TURN) - TURN / 2
 }
 
-/// The islands of a `.pbf`, with an index by cell (looked up only, never iterated).
+/// The islands of a `.pbf`, with an index by cell (looked up only, never iterated). The
+/// rings' points are a column of the work directory (SPEC §10, memory).
 pub struct Islands {
     pub all: Vec<Island>,
+    points: Column<[f64; 2]>,
     by_cell: HashMap<(i32, i32), Vec<u32>>,
 }
 
@@ -111,7 +109,8 @@ fn rings(mut parts: Vec<Vec<i64>>) -> Vec<Vec<i64>> {
 }
 
 impl Islands {
-    pub fn read(osm: &Osm) -> Result<Islands> {
+    /// Reads the island polygons, their points to `dir` if given.
+    pub fn read(osm: &Osm, dir: Option<&Path>) -> Result<Islands> {
         let pbf = osm.pbf.as_path();
         let is_island = |k: &str, v: &str| k == "place" && (v == "island" || v == "islet");
         // Pass 1: closed island and coastline ways; island multipolygons' outer ways.
@@ -197,18 +196,27 @@ impl Islands {
         let at = osm.coords(&nodes);
         let deg = |x: u32| x as i32 as f64 * 1e-7;
         let mut all = Vec::new();
+        let mut points = ColumnWriter::new(dir, "island-points")?;
+        let mut ring = Vec::new();
         for (label, refs) in polys {
-            let ring: Option<Vec<(f64, f64)>> = refs
-                .iter()
-                .map(|r| {
-                    let c = at[nodes.binary_search(r).ok()?];
-                    (c != MISSING).then(|| (deg((c >> 32) as u32), deg(c as u32)))
-                })
-                .collect();
-            if let Some(ring) = ring {
-                all.push(Island::new(ring, label));
+            ring.clear();
+            for r in &refs {
+                let c = at[nodes.binary_search(r).expect("ring node")];
+                if c == MISSING {
+                    break;
+                }
+                ring.push((deg((c >> 32) as u32), deg(c as u32)));
+            }
+            if ring.len() == refs.len() {
+                let (bbox, area) = shape(&mut ring);
+                all.push(Island { first: points.len() as u64, len: u32::try_from(ring.len())?, bbox, area, label });
+                for &(la, lo) in &ring {
+                    points.push([la, lo])?;
+                }
             }
         }
+        drop((at, nodes));
+        let points = points.finish()?;
         let mut by_cell: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
         for (k, p) in all.iter().enumerate() {
             let (a, b) = (cell(p.bbox.0, p.bbox.1), cell(p.bbox.2, p.bbox.3));
@@ -218,12 +226,22 @@ impl Islands {
                 }
             }
         }
-        Ok(Islands { all, by_cell })
+        Ok(Islands { all, points, by_cell })
+    }
+
+    fn ring(&self, j: usize) -> &[[f64; 2]] {
+        let x = &self.all[j];
+        &self.points[x.first as usize..][..x.len as usize]
+    }
+
+    fn contains(&self, j: usize, (la, lo): (f64, f64)) -> bool {
+        let b = self.all[j].bbox;
+        lon_shifts(lo, b.1, b.3).any(|lo| la >= b.0 && la <= b.2 && contains_at(self.ring(j), la, lo))
     }
 
     /// The islands around a point.
     fn around(&self, pt: (f64, f64)) -> impl Iterator<Item = u32> + '_ {
-        self.by_cell.get(&cell_of(pt)).into_iter().flatten().copied().filter(move |&k| self.all[k as usize].contains(pt))
+        self.by_cell.get(&cell_of(pt)).into_iter().flatten().copied().filter(move |&k| self.contains(k as usize, pt))
     }
 
     /// The smallest island around a point, ties to the first read.
@@ -269,7 +287,7 @@ impl Islands {
             let (size, pt) = (sets.size(k), first_point(p, k));
             for &j in self.by_cell.get(&cell_of(pt)).into_iter().flatten() {
                 let j = j as usize;
-                if wanted[j] && size > largest[j].load(Ordering::Relaxed) && self.all[j].contains(pt) {
+                if wanted[j] && size > largest[j].load(Ordering::Relaxed) && self.contains(j, pt) {
                     largest[j].fetch_max(size, Ordering::Relaxed);
                 }
             }

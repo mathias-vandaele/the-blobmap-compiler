@@ -5,10 +5,14 @@
 //! trapped). Their absence gives the reason codes; the offsets follow SPEC §7. A piece of a
 //! small component is passed over for one of a larger component within the radius (SPEC §6).
 
+use std::path::Path;
+
+use anyhow::Result;
 use blobmap_format::{INF, rnd};
 use rayon::prelude::*;
 
 use crate::osm::Pieces;
+use crate::osm::column::{Column, ColumnWriter};
 use crate::osm::geo::Local;
 
 pub mod islands;
@@ -21,6 +25,10 @@ pub const CELL_DEG: f64 = 0.002;
 /// Grid rows per band while the grid is built: a row in a band fits in 14 bits, a column
 /// (`360 / CELL_DEG` of them) in 18.
 const BAND_ROWS: i64 = 4096;
+
+/// Grid entries per band at most (8 bytes each while the band is sorted), unless one row
+/// holds more.
+const BAND_ENTRIES: u64 = 1 << 28;
 
 /// The nearest point of a piece.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -117,12 +125,13 @@ pub trait Sets: Sync {
     }
 }
 
+/// Columns in memory, or of a work directory (SPEC §10, memory).
 pub struct Grid {
-    cells: Vec<u64>,
-    first: Vec<u32>,
+    cells: Column<u64>,
+    first: Column<u32>,
     /// Segment = global index i of its first point (i → i + 1 inside one piece).
-    seg: Vec<u32>,
-    piece_of_point: Vec<u32>,
+    seg: Column<u32>,
+    piece_of_point: Column<u32>,
 }
 
 fn cell_key(row: i64, col: i64) -> u64 {
@@ -189,37 +198,88 @@ fn frac_along(p: &Pieces, piece: usize, i: usize, t: f64) -> f64 {
 
 impl Grid {
     pub fn new(p: &Pieces) -> Grid {
-        let mut piece_of_point = vec![0u32; p.pt_lat.len()];
+        Grid::new_in(p, None).expect("an in-memory grid")
+    }
+
+    /// The grid, its columns written to `dir`'s files `grid.*` if given.
+    pub fn new_in(p: &Pieces, dir: Option<&Path>) -> Result<Grid> {
+        let mut piece_of_point = ColumnWriter::new(dir, "grid.piece_of_point")?;
         for k in 0..p.len() {
-            piece_of_point[p.points(k)].fill(k as u32);
+            for _ in p.points(k) {
+                piece_of_point.push(k as u32)?;
+            }
         }
+        let piece_of_point = piece_of_point.finish()?;
         let wrap = (360.0 / CELL_DEG).round() as i64;
         let half = wrap / 2;
         // One band of rows at a time, each (cell, segment) pair packed in a U64: the row in the
         // band above bit 50, the column from 0 above bit 32, the segment below. Bands ascend and
         // so do the packed keys, so the cells come out in `cell_key` order.
         let rows = (90.0 / CELL_DEG).ceil() as i64 + 1;
-        let (mut cells, mut first, mut seg) = (Vec::new(), Vec::new(), Vec::new());
-        for lo in (-rows..=rows).step_by(BAND_ROWS as usize) {
-            let hi = lo + BAND_ROWS;
+        // A segment's cells, (column, row) in grid units, its longitudes unwrapped.
+        let cover = |i: usize, lo: i64, hi: i64, f: &mut dyn FnMut(i64, i64)| {
+            let (ay, ax) = grid_units(p.pt_lat[i], p.pt_lon[i]);
+            let mut dl = p.pt_lon[i + 1] - p.pt_lon[i];
+            if dl > 180.0 {
+                dl -= 360.0;
+            } else if dl < -180.0 {
+                dl += 360.0;
+            }
+            let (by, bx) = grid_units(p.pt_lat[i + 1], p.pt_lon[i] + dl);
+            if (ay.min(by).floor() as i64) >= hi || (ay.max(by).floor() as i64) < lo {
+                return;
+            }
+            supercover(ax, ay, bx, by, &mut *f);
+        };
+        // Entries per row, so that each band's keys stay within `BAND_ENTRIES` (SPEC §10,
+        // memory) however dense the input; a row denser than that is a band of its own.
+        let span = (2 * rows + 1) as usize;
+        let per_row: Vec<u64> = (0..p.len())
+            .into_par_iter()
+            .with_min_len(1 << 14)
+            .fold(
+                || vec![0u64; span],
+                |mut h, k| {
+                    let r = p.points(k);
+                    for i in r.start..r.end - 1 {
+                        cover(i, -rows, rows + 1, &mut |_, cy| {
+                            if (-rows..=rows).contains(&cy) {
+                                h[(cy + rows) as usize] += 1;
+                            }
+                        });
+                    }
+                    h
+                },
+            )
+            .reduce(
+                || vec![0u64; span],
+                |mut a, b| {
+                    a.iter_mut().zip(&b).for_each(|(x, y)| *x += y);
+                    a
+                },
+            );
+        let mut bands = Vec::new();
+        let (mut lo, mut n) = (-rows, 0u64);
+        for r in -rows..=rows {
+            let c = per_row[(r + rows) as usize];
+            if r > lo && (r - lo >= BAND_ROWS || n + c > BAND_ENTRIES) {
+                bands.push((lo, r));
+                (lo, n) = (r, 0);
+            }
+            n += c;
+        }
+        bands.push((lo, rows + 1));
+        drop(per_row);
+        let (mut cells, mut first, mut seg) = (ColumnWriter::new(dir, "grid.cells")?, ColumnWriter::new(dir, "grid.first")?, ColumnWriter::new(dir, "grid.seg")?);
+        let mut last = None;
+        for (lo, hi) in bands {
             let mut keys: Vec<u64> = (0..p.len())
                 .into_par_iter()
                 .flat_map_iter(|k| {
                     let r = p.points(k);
                     let mut out = Vec::new();
                     for i in r.start..r.end - 1 {
-                        let (ay, ax) = grid_units(p.pt_lat[i], p.pt_lon[i]);
-                        let mut dl = p.pt_lon[i + 1] - p.pt_lon[i];
-                        if dl > 180.0 {
-                            dl -= 360.0;
-                        } else if dl < -180.0 {
-                            dl += 360.0;
-                        }
-                        let (by, bx) = grid_units(p.pt_lat[i + 1], p.pt_lon[i] + dl);
-                        if (ay.min(by).floor() as i64) >= hi || (ay.max(by).floor() as i64) < lo {
-                            continue;
-                        }
-                        supercover(ax, ay, bx, by, |cx, cy| {
+                        cover(i, lo, hi, &mut |cx, cy| {
                             if (lo..hi).contains(&cy) {
                                 out.push(((cy - lo) as u64) << 50 | ((cx + half).rem_euclid(wrap) as u64) << 32 | i as u64);
                             }
@@ -232,15 +292,17 @@ impl Grid {
             keys.dedup();
             for k in keys {
                 let c = cell_key(lo + (k >> 50) as i64, ((k >> 32) & ((1 << 18) - 1)) as i64 - half);
-                if cells.last() != Some(&c) {
-                    cells.push(c);
-                    first.push(seg.len() as u32);
+                if last != Some(c) {
+                    last = Some(c);
+                    cells.push(c)?;
+                    first.push(seg.len() as u32)?;
                 }
-                seg.push(k as u32);
+                seg.push(k as u32)?;
             }
         }
-        first.push(seg.len() as u32);
-        Grid { cells, first, seg, piece_of_point }
+        assert!(seg.len() < u32::MAX as usize, "a snap grid of {} entries", seg.len());
+        first.push(seg.len() as u32)?;
+        Ok(Grid { cells: cells.finish()?, first: first.finish()?, seg: seg.finish()?, piece_of_point })
     }
 
     fn cell(&self, row: i64, col: i64) -> &[u32] {

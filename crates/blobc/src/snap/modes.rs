@@ -55,9 +55,12 @@ impl Membership {
     pub fn car(p: &Pieces, g: &CarGraph, e: &Components) -> Membership {
         let graph: Vec<bool> = g.seg_of_piece.iter().map(|s| s.iter().any(|&x| x != NONE)).collect();
         let eligible: Vec<bool> = (0..p.len()).map(|k| graph[k] && p.eligible[k]).collect();
-        let component: Vec<Option<u32>> = (0..p.len()).map(|k| car_component(g, e, k).filter(|_| eligible[k])).collect();
-        let servable = component.iter().map(Option::is_some).collect();
-        let size = component.iter().map(|x| x.map_or(0, |x| e.nodes[x as usize])).collect();
+        let (servable, size) = (0..p.len())
+            .map(|k| {
+                let x = car_component(g, e, k).filter(|_| eligible[k]);
+                (x.is_some(), x.map_or(0, |x| e.nodes[x as usize]))
+            })
+            .unzip();
         Membership { graph, eligible, servable, size }
     }
 
@@ -66,9 +69,12 @@ impl Membership {
         let graph: Vec<bool> = g.road_of_piece.iter().map(|r| r.iter().any(|&x| x != NONE64)).collect();
         let usable = |k: usize| g.road_of_piece[k].iter().any(|&r| r != NONE64 && g.time[m][r as usize].is_finite());
         let eligible: Vec<bool> = (0..p.len()).map(|k| graph[k] && p.eligible[k] && usable(k)).collect();
-        let component: Vec<Option<u32>> = (0..p.len()).map(|k| active_component(p, e, k).filter(|_| eligible[k])).collect();
-        let servable = component.iter().map(Option::is_some).collect();
-        let size = component.iter().map(|x| x.map_or(0, |x| e.nodes[x as usize])).collect();
+        let (servable, size) = (0..p.len())
+            .map(|k| {
+                let x = active_component(p, e, k).filter(|_| eligible[k]);
+                (x.is_some(), x.map_or(0, |x| e.nodes[x as usize]))
+            })
+            .unzip();
         Membership { graph, eligible, servable, size }
     }
 }

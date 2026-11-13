@@ -33,6 +33,19 @@ impl Tensor {
         Tensor::new(&[data.len() as u64 / width, width], data)
     }
 
+    /// A tensor of `n` rows of `W` elements, row `i` being `f(i)`, made in place in its
+    /// bytes (no second copy of the data). `shape` must hold `n * W` elements.
+    pub fn from_rows<T: Element, const W: usize>(shape: &[u64], n: usize, f: impl Fn(usize) -> [T; W] + Sync) -> Tensor {
+        use rayon::prelude::*;
+        let row = W * std::mem::size_of::<T>();
+        assert_eq!(shape.iter().product::<u64>(), (n * W) as u64, "tensor shape {shape:?} does not hold {n} rows of {W}");
+        let mut data = vec![0u8; n * row];
+        if row > 0 {
+            data.par_chunks_mut(row).enumerate().for_each(|(i, b)| b.copy_from_slice(bytemuck::cast_slice(&f(i)[..])));
+        }
+        Tensor { dtype: T::DTYPE, shape: shape.to_vec(), data }
+    }
+
     /// A `U8` tensor that takes its bytes without copying them.
     pub fn of_bytes(shape: &[u64], data: Vec<u8>) -> Tensor {
         assert_eq!(shape.iter().product::<u64>(), data.len() as u64, "tensor shape {shape:?} does not hold {} bytes", data.len());

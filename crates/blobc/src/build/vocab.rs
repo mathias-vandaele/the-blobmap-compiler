@@ -74,7 +74,9 @@ pub fn snap(f: &Families, n: usize, point: &(dyn Fn(usize) -> (f64, f64) + Sync)
             // The old grid goes before the new one is built.
             drop(grid.take());
             in_index_order(&mut sorted, &order, dir, &mut out)?;
-            grid = Some((is_car, Grid::new(p)));
+            grid = Some((is_car, Grid::new_in(p, dir)?));
+            // What building it freed goes back to the system (SPEC §10, memory).
+            crate::build::mem::trim();
         }
         let grid = &grid.as_ref().unwrap().1;
         let trapped = |k: usize| -> Option<u32> {
@@ -103,6 +105,11 @@ pub fn snap(f: &Families, n: usize, point: &(dyn Fn(usize) -> (f64, f64) + Sync)
         sorted.push((mode, at.finish()?));
     }
     drop(grid);
+    if let Some(d) = dir {
+        for name in ["grid.piece_of_point", "grid.cells", "grid.first", "grid.seg"] {
+            let _ = std::fs::remove_file(d.join(name));
+        }
+    }
     in_index_order(&mut sorted, &order, dir, &mut out)?;
     Ok(out)
 }
@@ -218,8 +225,7 @@ pub fn write(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash
     for m in modes {
         let (mode, family) = MODES[m];
         let counts = served.entry(mode.to_string()).or_default();
-        let road_rows = if mode == "car" { 0 } else { n };
-        let (mut node, mut road, mut off) = (vec![NONE; 2 * n], vec![NONE; road_rows], vec![INF; 4 * n]);
+        // The reasons, in internal-index order.
         let (mut rid, mut rcode, mut rm) = (Vec::new(), Vec::new(), Vec::new());
         for i in 0..n {
             let (pt, filtered) = pt(i);
@@ -227,17 +233,24 @@ pub fn write(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash
                 *counts.entry("FilteredPlace".into()).or_default() += 1;
                 continue;
             }
-            let (piece, frac) = match snaps[m].at[pt].outcome() {
-                Ok(h) => h,
+            match snaps[m].at[pt].outcome() {
+                Ok(_) => *counts.entry("served".into()).or_default() += 1,
                 Err((code, dist)) => {
                     rid.push(i as u32);
                     rcode.push(code);
                     rm.push(dist);
                     *counts.entry(REASONS[code as usize].into()).or_default() += 1;
-                    continue;
                 }
+            }
+        }
+        // Point i's entry: its two nodes, its four offsets, and its road for ACTIVE; `NONE`
+        // and `INF` when it is not served.
+        let entry = |i: usize| -> ([u32; 2], [u16; 4], u32) {
+            let (mut node, mut off, mut road) = ([NONE; 2], [INF; 4], NONE);
+            let (pt, filtered) = pt(i);
+            let Some((piece, frac)) = (!filtered).then(|| snaps[m].at[pt].outcome().ok()).flatten() else {
+                return (node, off, road);
             };
-            *counts.entry("served".into()).or_default() += 1;
             let k = piece as usize;
             if mode == "car" {
                 let (car, b) = (f.car, f.car_road);
@@ -247,11 +260,11 @@ pub fn write(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash
                     if s == NONE || car.e.of[s as usize] != x {
                         continue;
                     }
-                    node[2 * i + d] = b.layout_of[s as usize];
+                    node[d] = b.layout_of[s as usize];
                     let g = if d == 0 { frac } else { 1.0 - frac };
                     let (before, after) = parts(car.g.w[s as usize], g);
-                    off[4 * i + 2 * d] = before;
-                    off[4 * i + 2 * d + 1] = after;
+                    off[2 * d] = before;
+                    off[2 * d + 1] = after;
                 }
             } else {
                 let (act, b) = (f.active, f.active_road);
@@ -263,29 +276,30 @@ pub fn write(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash
                 } else {
                     (act.p.v[k], act.p.u[k], 1.0 - frac, against, along)
                 };
-                node[2 * i] = b.layout_of[uu as usize];
-                node[2 * i + 1] = b.layout_of[vv as usize];
-                road[i] = b.arc_local[ruv as usize];
+                node = [b.layout_of[uu as usize], b.layout_of[vv as usize]];
+                road = b.arc_local[ruv as usize];
                 let (u_id, id_v) = parts(act.g.w[metric][ruv as usize], fu);
                 let (v_id, id_u) = if rvu != NONE64 { parts(act.g.w[metric][rvu as usize], 1.0 - fu) } else { (INF, INF) };
-                off[4 * i..4 * i + 4].copy_from_slice(&[u_id, id_u, v_id, id_v]);
+                off = [u_id, id_u, v_id, id_v];
             }
-        }
-        // In full-name order, each vector dropped as it becomes a tensor.
+            (node, off, road)
+        };
+        // In full-name order, each tensor made from the entries on its own (SPEC §10, memory).
         let p = format!("vocab/{family}/{mode}.");
+        let (n64, node_shape) = (n as u64, [n as u64, 2]);
         if mode == "car" {
-            w.put(format!("{p}off"), Tensor::new(&[n as u64, 2, 2], &std::mem::take(&mut off)))?;
+            w.put(format!("{p}off"), Tensor::from_rows(&[n64, 2, 2], n, |i| entry(i).1))?;
         } else {
-            w.put(format!("{p}node"), Tensor::rows(2, &std::mem::take(&mut node)))?;
-            w.put(format!("{p}off"), Tensor::rows(4, &std::mem::take(&mut off)))?;
+            w.put(format!("{p}node"), Tensor::from_rows(&node_shape, n, |i| entry(i).0))?;
+            w.put(format!("{p}off"), Tensor::from_rows(&[n64, 4], n, |i| entry(i).1))?;
         }
         w.put(format!("{p}reason_code"), Tensor::vec(&rcode))?;
         w.put(format!("{p}reason_id"), Tensor::vec(&rid))?;
         w.put(format!("{p}reason_m"), Tensor::vec(&rm))?;
         if mode == "car" {
-            w.put(format!("{p}seg"), Tensor::rows(2, &std::mem::take(&mut node)))?;
+            w.put(format!("{p}seg"), Tensor::from_rows(&node_shape, n, |i| entry(i).0))?;
         } else {
-            w.put(format!("{p}road"), Tensor::vec(&std::mem::take(&mut road)))?;
+            w.put(format!("{p}road"), Tensor::from_rows(&[n64], n, |i| [entry(i).2]))?;
         }
     }
     let id_rows = |v: &mut dyn Iterator<Item = &Id>| {

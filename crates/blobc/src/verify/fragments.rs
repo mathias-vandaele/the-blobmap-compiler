@@ -53,7 +53,7 @@ pub fn main(a: Vec<String>) -> Result<()> {
         extent: set.extent.as_ref().map(|e| data.join(e)),
         work: data.join(format!("{name}.fragments-work")),
     };
-    let islands = Islands::read(&crate::osm::Osm::open(&inputs.pbf, &inputs.work.join("islands"), &Config::load(&inputs.config)?)?)?;
+    let islands = Islands::read(&crate::osm::Osm::open(&inputs.pbf, &inputs.work.join("islands"), &Config::load(&inputs.config)?)?, Some(&inputs.work.join("island-points")))?;
     println!("{} island polygons", islands.all.len());
     let r = Reference::build(&inputs, &[Fam::Car, Fam::Active])?;
     let (cgrid, agrid) = (Grid::new(&r.car_pieces), Grid::new(&r.active_pieces));
