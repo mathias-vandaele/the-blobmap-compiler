@@ -31,6 +31,7 @@ unsafe impl Plain for f64 {}
 unsafe impl Plain for [f32; 2] {}
 unsafe impl Plain for [f64; 2] {}
 unsafe impl Plain for [u32; 2] {}
+unsafe impl Plain for [u64; 2] {}
 unsafe impl Plain for u16 {}
 unsafe impl Plain for [u8; 16] {}
 

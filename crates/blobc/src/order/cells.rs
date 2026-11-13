@@ -31,9 +31,10 @@ pub struct Block {
     pub nodes: Vec<u32>,
 }
 
-/// Undirected adjacency without loops or parallel arcs, with arc multiplicities.
+/// Undirected adjacency without loops or parallel arcs, with arc multiplicities. Arc
+/// positions are u64: a whole component's arcs, both ways, may pass 2^32.
 pub(crate) struct Adj {
-    first: Vec<u32>,
+    first: Vec<u64>,
     pub to: Vec<u32>,
     weight: Vec<u32>,
 }
@@ -43,7 +44,7 @@ impl Adj {
     /// arcs of a node by head. `edges` runs twice, to count and to fill, so the list is never
     /// held: the CSR is built in place and each row sorted and merged there.
     fn new<I: Iterator<Item = (u32, u32, u32)>>(n: usize, edges: impl Fn() -> I) -> Adj {
-        let mut first = vec![0u32; n + 1];
+        let mut first = vec![0u64; n + 1];
         for (a, b, _) in edges().filter(|e| e.0 != e.1) {
             first[a as usize + 1] += 1;
             first[b as usize + 1] += 1;
@@ -68,7 +69,7 @@ impl Adj {
             row.clear();
             row.extend((start..end).map(|k| (to[k], weight[k])));
             row.sort_unstable();
-            first[v] = out as u32;
+            first[v] = out as u64;
             for &(b, w) in &row {
                 if out > first[v] as usize && to[out - 1] == b {
                     weight[out - 1] += w;
@@ -78,7 +79,7 @@ impl Adj {
                 }
             }
         }
-        first[n] = out as u32;
+        first[n] = out as u64;
         to.truncate(out);
         weight.truncate(out);
         Adj { first, to, weight }

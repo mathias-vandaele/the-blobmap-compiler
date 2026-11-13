@@ -31,7 +31,7 @@ pub trait Family: Sync {
     /// The family's per-row tensors of a pack, for its rows (nodes in row order).
     fn row_tensors(&self, rows: &[u32], layout_of: &[u32], unit: &mut Unit, prefix: &str);
     /// The family's per-arc tensors of a pack, for its arcs in stored order.
-    fn arc_tensors(&self, arcs: &[u32], unit: &mut Unit, prefix: &str);
+    fn arc_tensors(&self, arcs: &[u64], unit: &mut Unit, prefix: &str);
     /// Extra family tables (FORMAT §5.4 `road/active/cross/`).
     fn table_tensors(&self, unit: &mut Unit);
     /// The smallest road key (way, way_seq, way_dir) at node v (FORMAT §4).
@@ -140,7 +140,7 @@ impl Family for Car<'_> {
         unit.put_in(prefix, "copy_first", Tensor::vec(&first));
         unit.put_in(prefix, "copies", Tensor::vec(&copies));
     }
-    fn arc_tensors(&self, arcs: &[u32], unit: &mut Unit, prefix: &str) {
+    fn arc_tensors(&self, arcs: &[u64], unit: &mut Unit, prefix: &str) {
         unit.put_in(prefix, "car.turn_cost", Tensor::vec(&arcs.iter().map(|&a| self.g.turn_cost[a as usize]).collect::<Vec<u16>>()));
     }
     fn table_tensors(&self, _: &mut Unit) {}
@@ -220,12 +220,12 @@ impl Family for Active<'_> {
         "road"
     }
     fn row_tensors(&self, _: &[u32], _: &[u32], _: &mut Unit, _: &str) {}
-    fn arc_tensors(&self, arcs: &[u32], unit: &mut Unit, prefix: &str) {
+    fn arc_tensors(&self, arcs: &[u64], unit: &mut Unit, prefix: &str) {
         road_tensors(self.g, arcs, unit, prefix);
     }
     fn table_tensors(&self, unit: &mut Unit) {
         let g = self.g;
-        let mut cross: Vec<u32> = (0..g.len()).filter(|&r| self.cross(r)).map(|r| r as u32).collect();
+        let mut cross: Vec<u64> = (0..g.len()).filter(|&r| self.cross(r)).map(|r| r as u64).collect();
         cross.sort_by_key(|&r| (g.way[r as usize], g.dir[r as usize], g.seq[r as usize]));
         road_tensors(g, &cross, unit, "road/active/cross");
     }
@@ -234,8 +234,8 @@ impl Family for Active<'_> {
     }
 }
 
-fn road_tensors(g: &ActiveGraph, roads: &[u32], unit: &mut Unit, prefix: &str) {
-    let at = |r: &u32| *r as usize;
+fn road_tensors(g: &ActiveGraph, roads: &[u64], unit: &mut Unit, prefix: &str) {
+    let at = |r: &u64| *r as usize;
     unit.put_in(prefix, "way", Tensor::vec(&roads.iter().map(|r| g.way[at(r)]).collect::<Vec<i64>>()));
     unit.put_in(prefix, "way_dir", Tensor::vec(&roads.iter().map(|r| g.dir[at(r)]).collect::<Vec<u8>>()));
     unit.put_in(prefix, "way_seq", Tensor::vec(&roads.iter().map(|r| g.seq[at(r)]).collect::<Vec<u32>>()));

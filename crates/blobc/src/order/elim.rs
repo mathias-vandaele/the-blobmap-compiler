@@ -83,7 +83,7 @@ pub fn etree(n: usize, edges: impl Iterator<Item = (u32, u32)>) -> Vec<Option<u3
     const NONE: u32 = u32::MAX;
     // The lower neighbours of each rank, CSR.
     let pairs: Vec<(u32, u32)> = edges.filter(|(a, b)| a != b).map(|(a, b)| (a.max(b), a.min(b))).collect();
-    let mut first = vec![0u32; n + 1];
+    let mut first = vec![0u64; n + 1];
     for &(hi, _) in &pairs {
         first[hi as usize + 1] += 1;
     }

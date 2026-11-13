@@ -238,7 +238,7 @@ One command builds a model from a `.pbf` and an Overture release, deterministica
 
 ```
 blobc build   --pbf <file.osm.pbf> --overture <release dir> --config <config dir> --out <model dir> [--extent <poly>] [--previous-report <file>]
-blobc verify  <model dir> --tier tiny|small|region|country --data <dir> [--golden <dir>] [--mutants]
+blobc verify  <model dir> --tier tiny|small|region|country|world --data <dir> [--golden <dir>] [--mutants]
 blobc inspect <model dir>
 ```
 
@@ -260,13 +260,16 @@ A model is correct when the CPU reference runtime matches Dijkstra on the origin
 | small | a city-sized `.pbf` | every commit |
 | region | a region-sized `.pbf` | by hand |
 | country | France | by hand, every release |
+| world | the planet | by hand, every release |
 
 Checks:
 
 - CCH against Dijkstra: single and multi-source columns, start times, the reversed graph, both ACTIVE metrics, turn-aware Dijkstra for CAR.
 - Via-way restrictions:
   - every forbidden sequence is avoided, against a turn-aware Dijkstra that tracks the segments driven;
-  - an address on a via segment, reached through a restricted prefix, gets its exact time, in both directions.
+  - an address on a via segment, reached through a restricted prefix, gets its exact time, in both directions;
+  - each case is one pair search on each side: the runtime's value from the two endpoints' ancestors in the hierarchy, against a Dijkstra that stops at its target;
+  - these checks cover every prefix at every tier up to country; at the world tier, a random sample of 100,000 prefixes, drawn with a fixed seed, in both directions.
 - Re-customization with random metrics on the same hierarchy.
 - The address and place heads, including same-piece pairs and same-ID queries.
 - Snapping re-check: re-snapping, trapped skips and the small-component rule included, reproduces the stored entries exactly; an ID beside a fragment snaps to the street, and IDs on a large island within the radius and on a small one beyond it stay on their islands.

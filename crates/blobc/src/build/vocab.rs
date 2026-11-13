@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use blobmap_format::{INF, ModelWriter, NONE, Tensor, Unit, UnitWritten};
+use blobmap_format::{INF, ModelWriter, NONE, NONE64, Tensor, Unit, UnitWritten};
 use rayon::prelude::*;
 
 use crate::build::family::{Active, Car};
@@ -258,7 +258,7 @@ pub fn write(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash
                 let metric = m - 1;
                 debug_assert!(active_component(act.p, &act.e, k).is_some(), "a served piece is servable");
                 let [along, against] = act.g.road_of_piece[k];
-                let (uu, vv, fu, ruv, rvu) = if along != NONE {
+                let (uu, vv, fu, ruv, rvu) = if along != NONE64 {
                     (act.p.u[k], act.p.v[k], frac, along, against)
                 } else {
                     (act.p.v[k], act.p.u[k], 1.0 - frac, against, along)
@@ -267,7 +267,7 @@ pub fn write(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash
                 node[2 * i + 1] = b.layout_of[vv as usize];
                 road[i] = b.arc_local[ruv as usize];
                 let (u_id, id_v) = parts(act.g.w[metric][ruv as usize], fu);
-                let (v_id, id_u) = if rvu != NONE { parts(act.g.w[metric][rvu as usize], 1.0 - fu) } else { (INF, INF) };
+                let (v_id, id_u) = if rvu != NONE64 { parts(act.g.w[metric][rvu as usize], 1.0 - fu) } else { (INF, INF) };
                 off[4 * i..4 * i + 4].copy_from_slice(&[u_id, id_u, v_id, id_v]);
             }
         }

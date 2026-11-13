@@ -3,15 +3,15 @@
 //! trapped: in each group of components joined by roads ignoring direction, the largest is
 //! served and the others are trapped, ties to the smaller component index.
 
-/// A directed graph as CSR.
+/// A directed graph as CSR; arc positions are u64, as a family's arcs may pass 2^32.
 pub struct Csr {
-    pub first: Vec<u32>,
+    pub first: Vec<u64>,
     pub head: Vec<u32>,
 }
 
 impl Csr {
     pub fn new(n: usize, arcs: impl Iterator<Item = (u32, u32)> + Clone) -> Csr {
-        let mut first = vec![0u32; n + 1];
+        let mut first = vec![0u64; n + 1];
         for (t, _) in arcs.clone() {
             first[t as usize + 1] += 1;
         }
@@ -42,7 +42,7 @@ pub fn scc(g: &Csr) -> Vec<u32> {
     const NONE: u32 = u32::MAX;
     let n = g.len();
     let (mut index, mut low, mut on_stack, mut comp) = (vec![NONE; n], vec![0u32; n], vec![false; n], vec![NONE; n]);
-    let (mut stack, mut call): (Vec<u32>, Vec<(u32, u32)>) = (Vec::new(), Vec::new());
+    let (mut stack, mut call): (Vec<u32>, Vec<(u32, u64)>) = (Vec::new(), Vec::new());
     let (mut next_index, mut next_comp) = (0u32, 0u32);
     for root in 0..n as u32 {
         if index[root as usize] != NONE {

@@ -86,14 +86,19 @@ pub struct Samples {
     /// Aliases and category keys in the golden queries.
     pub aliases: usize,
     pub categories: usize,
+    /// Via-way prefixes checked (SPEC §11): every one up to the country tier; at the world
+    /// tier, a sample of this many, drawn with a fixed seed.
+    pub via: usize,
 }
 
 impl Samples {
     pub fn for_tier(tier: &str) -> Samples {
         if tier == "tiny" {
-            Samples { columns: 48, pairs: 20, brute: 5000, aliases: usize::MAX, categories: usize::MAX }
+            Samples { columns: 48, pairs: 20, brute: 5000, aliases: usize::MAX, categories: usize::MAX, via: usize::MAX }
+        } else if tier == "world" {
+            Samples { columns: 12, pairs: 12, brute: 200, aliases: 16, categories: 8, via: 100_000 }
         } else {
-            Samples { columns: 12, pairs: 12, brute: 200, aliases: 16, categories: 8 }
+            Samples { columns: 12, pairs: 12, brute: 200, aliases: 16, categories: 8, via: usize::MAX }
         }
     }
 }
@@ -159,8 +164,8 @@ fn reference_checks(rt: &Runtime, ex: &Expected, s: &Facts, n: &Samples, rep: &m
         Ok(())
     })?;
     released(rt, &p("distances"), rep, |rep| checks::distances(rt, ex, n, rep))?;
-    released(rt, &p("via copies"), rep, |rep| checks::via_copies(rt, ex, rep))?;
-    released(rt, &p("via segments"), rep, |rep| checks::via_segments(rt, ex, rep))?;
+    released(rt, &p("via copies"), rep, |rep| checks::via_copies(rt, ex, n.via, rep))?;
+    released(rt, &p("via segments"), rep, |rep| checks::via_segments(rt, ex, n.via, rep))?;
     if ex.r.has(Fam::Active) {
         released(rt, &p("scenario"), rep, |rep| checks::scenario(rt, ex, &s.checks, s.cells, rep))?;
     }

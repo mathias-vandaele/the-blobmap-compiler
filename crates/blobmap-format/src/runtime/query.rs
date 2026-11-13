@@ -1,5 +1,7 @@
 //! Columns (FORMAT §8): seeds from the sources' offsets, a full sweep of the component, heads
-//! at every ID, and the direct term on a shared piece; and pairs, over two IDs' ancestors.
+//! at every ID, and the direct term on a shared piece; and pairs, over two IDs' ancestors. One
+//! value of a column, or the labels of a few nodes, from ancestors alone (`column_at`,
+//! `labels_at`), for the checks that need one value per case (SPEC §11, via-way restrictions).
 
 use anyhow::Result;
 
@@ -62,7 +64,7 @@ impl Runtime {
                 if mv.component[i] != x {
                     continue;
                 }
-                let mut t = head(&e, mv, i, &label, dir, f);
+                let mut t = head(&e, mv, i, |v| label[v as usize], dir, f);
                 for s in &srcs {
                     let si = s.id as usize;
                     if si == i {
@@ -94,6 +96,58 @@ impl Runtime {
         }
         Ok(t)
     }
+
+    /// `column(&[Source { id: o, start: 0 }], mode, dir)[d]`, from the ancestors of o's seeds and
+    /// of the nodes d's head reads, not the whole component: on a valid hierarchy every label
+    /// those nodes take in the sweep comes from their ancestors (FORMAT §8). o and d must be
+    /// served in one component.
+    pub fn column_at(&self, o: u32, d: u32, mode: usize, dir: Dir) -> Result<u16> {
+        let mv = &self.vocab.modes[mode];
+        let f = &self.faults;
+        let x = mv.component[o as usize];
+        anyhow::ensure!(x != NONE && x == mv.component[d as usize], "column_at: both must be served in one component (internal indices {o}, {d})");
+        if o == d {
+            return Ok(0);
+        }
+        let e = self.component(mv.info.fam, x)?;
+        let mut seeds = Vec::new();
+        seed(&e, mv, &Source { id: o, start: 0 }, dir, f, &mut |v, t| seeds.push((v, t)));
+        let mut targets = Vec::new();
+        head(&e, mv, d as usize, |v| {
+            targets.push(v);
+            INF
+        }, dir, f);
+        let at = labels_at(&e, mv.info.metric, &seeds, &targets, dir, f);
+        let mut next = at.iter();
+        let mut t = head(&e, mv, d as usize, |_| *next.next().unwrap(), dir, f);
+        if !f.no_direct && same_piece(mv, o as usize, d as usize) {
+            let dd = if dir == Dir::From { direct(mv, o as usize, d as usize) } else { direct(mv, d as usize, o as usize) };
+            t = t.min(f.add(0, dd));
+        }
+        Ok(t)
+    }
+}
+
+/// The labels a full `sweep` from `seeds` gives `targets`, from ancestors alone: the upward
+/// half over the seeds' ancestors, then the downward half over the targets' ancestors, by
+/// increasing layout id (every upper neighbour of an ancestor is an ancestor).
+pub fn labels_at(e: &Component, metric: usize, seeds: &[(u32, u16)], targets: &[u32], dir: Dir, f: &Faults) -> Vec<u16> {
+    let up = Ancestors::from_seeds(e, seeds.iter().copied(), metric, dir, f);
+    let go_down = match dir {
+        Dir::From => &e.down[metric],
+        Dir::To => &e.up[metric],
+    };
+    let below = Ancestors::closure(e, targets.iter().copied());
+    let mut label = vec![INF; below.ids.len()];
+    for (i, &v) in below.ids.iter().enumerate() {
+        let mut lv = up.label(v);
+        for k in e.row(v) {
+            let j = below.ids.binary_search(&e.up_head[k]).expect("an ancestor's upper neighbour is an ancestor");
+            lv = lv.min(f.add(label[j], go_down[k]));
+        }
+        label[i] = lv;
+    }
+    targets.iter().map(|v| label[below.ids.binary_search(v).unwrap()]).collect()
 }
 
 /// A source's labels after the upward half of the sweep, on the nodes its seeds reach over
@@ -111,12 +165,15 @@ struct Ancestors {
 
 impl Ancestors {
     fn up(e: &Component, mv: &ModeVocab, s: &Source, dir: Dir, f: &Faults) -> Ancestors {
+        let mut seeds = Vec::new();
+        seed(e, mv, s, dir, f, &mut |v, t| seeds.push((v, t)));
+        Ancestors::from_seeds(e, seeds, mv.info.metric, dir, f)
+    }
+
+    /// The nodes `from` reach over upper links, ascending, every label `INF`.
+    fn closure(e: &Component, from: impl IntoIterator<Item = u32>) -> Ancestors {
         let mut a = Ancestors { ids: Vec::new(), reached: vec![0; e.n.div_ceil(64)], not_label: vec![0; e.n] };
-        let mut stack = Vec::new();
-        seed(e, mv, s, dir, f, &mut |v, t| {
-            a.put(v, t);
-            stack.push(v);
-        });
+        let mut stack: Vec<u32> = from.into_iter().collect();
         while let Some(v) = stack.pop() {
             let (w, bit) = (v as usize / 64, 1u64 << (v % 64));
             if a.reached[w] & bit == 0 {
@@ -126,9 +183,18 @@ impl Ancestors {
             }
         }
         a.ids.sort_unstable();
+        a
+    }
+
+    fn from_seeds(e: &Component, seeds: impl IntoIterator<Item = (u32, u16)>, metric: usize, dir: Dir, f: &Faults) -> Ancestors {
+        let seeds: Vec<(u32, u16)> = seeds.into_iter().collect();
+        let mut a = Ancestors::closure(e, seeds.iter().map(|s| s.0));
+        for (v, t) in seeds {
+            a.put(v, t);
+        }
         let go_up = match dir {
-            Dir::From => &e.up[mv.info.metric],
-            Dir::To => &e.down[mv.info.metric],
+            Dir::From => &e.up[metric],
+            Dir::To => &e.down[metric],
         };
         for i in (0..a.ids.len()).rev() {
             let v = a.ids[i];
@@ -230,7 +296,8 @@ fn seed(e: &Component, mv: &ModeVocab, s: &Source, dir: Dir, f: &Faults, put: &m
     }
 }
 
-fn head(e: &Component, mv: &ModeVocab, i: usize, label: &[u16], dir: Dir, f: &Faults) -> u16 {
+/// The head of ID i (FORMAT §8) from `label`, called on its nodes in a fixed order.
+fn head(e: &Component, mv: &ModeVocab, i: usize, mut label: impl FnMut(u32) -> u16, dir: Dir, f: &Faults) -> u16 {
     let (nodes, off) = (mv.node[i], mv.off[i]);
     let mut t = INF;
     match (mv.info.fam, dir) {
@@ -240,7 +307,7 @@ fn head(e: &Component, mv: &ModeVocab, i: usize, label: &[u16], dir: Dir, f: &Fa
                     continue;
                 }
                 for y in e.arrivals(nodes[k], f) {
-                    t = t.min(f.add(label[y as usize], off[2 * k]));
+                    t = t.min(f.add(label(y), off[2 * k]));
                 }
             }
         }
@@ -250,15 +317,15 @@ fn head(e: &Component, mv: &ModeVocab, i: usize, label: &[u16], dir: Dir, f: &Fa
                     continue;
                 }
                 for a in e.arcs(nodes[k]) {
-                    t = t.min(f.add(f.add(off[2 * k + 1], e.turn_cost[a]), label[e.arc_head[a] as usize]));
+                    t = t.min(f.add(f.add(off[2 * k + 1], e.turn_cost[a]), label(e.arc_head[a])));
                 }
             }
         }
         (Fam::Active, Dir::From) => {
-            t = f.add(label[nodes[0] as usize], off[0]).min(f.add(label[nodes[1] as usize], off[2]));
+            t = f.add(label(nodes[0]), off[0]).min(f.add(label(nodes[1]), off[2]));
         }
         (Fam::Active, Dir::To) => {
-            t = f.add(off[1], label[nodes[0] as usize]).min(f.add(off[3], label[nodes[1] as usize]));
+            t = f.add(off[1], label(nodes[0])).min(f.add(off[3], label(nodes[1])));
         }
     }
     t

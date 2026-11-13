@@ -10,14 +10,14 @@ use anyhow::{Context, Result};
 use rayon::prelude::*;
 
 use crate::runtime::model::{Component, Fam, Runtime};
-use crate::{INF, NONE, rnd};
+use crate::{INF, NONE, NONE64, rnd};
 
 /// A road of a family: (component, index) — a CAR node or an ACTIVE arc — or an ACTIVE cross
 /// road (`component = NONE`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RoadRef {
     pub component: u32,
-    pub index: u32,
+    pub index: u64,
 }
 
 /// The integer weights of every road (FORMAT §6.1) for one metric. `roads` are (key way,
@@ -26,18 +26,18 @@ pub struct RoadRef {
 pub fn round(roads: &[(i64, u8, u32, bool, f32)]) -> Vec<u16> {
     let mut w = vec![INF; roads.len()];
     // The finite members by group (way, direction), along the way, ties by road index.
-    let mut idx: Vec<u32> = (0..roads.len() as u32).into_par_iter().filter(|&k| roads[k as usize].3 && roads[k as usize].4.is_finite()).collect();
+    let mut idx: Vec<u64> = (0..roads.len() as u64).into_par_iter().filter(|&k| roads[k as usize].3 && roads[k as usize].4.is_finite()).collect();
     idx.par_sort_unstable_by_key(|&k| {
         let r = &roads[k as usize];
         (r.0, r.1, r.2, k)
     });
-    let group = |k: u32| (roads[k as usize].0, roads[k as usize].1);
+    let group = |k: u64| (roads[k as usize].0, roads[k as usize].1);
     let mut starts: Vec<usize> = (0..idx.len()).into_par_iter().filter(|&i| i == 0 || group(idx[i]) != group(idx[i - 1])).collect();
     starts.push(idx.len());
     let vals: Vec<u16> = starts
         .par_windows(2)
         .flat_map_iter(|b| {
-            let mut g: Vec<u32> = idx[b[0]..b[1]].to_vec();
+            let mut g: Vec<u64> = idx[b[0]..b[1]].to_vec();
             if roads[g[0] as usize].1 == 1 {
                 g.reverse();
             }
@@ -65,10 +65,10 @@ pub fn round(roads: &[(i64, u8, u32, bool, f32)]) -> Vec<u16> {
     }
     // Copies take their original's weight: the member with the same key (the last one, if
     // several have it).
-    let mut members: Vec<u32> = (0..roads.len() as u32).into_par_iter().filter(|&k| roads[k as usize].3).collect();
-    let key = |k: u32| (roads[k as usize].0, roads[k as usize].1, roads[k as usize].2);
+    let mut members: Vec<u64> = (0..roads.len() as u64).into_par_iter().filter(|&k| roads[k as usize].3).collect();
+    let key = |k: u64| (roads[k as usize].0, roads[k as usize].1, roads[k as usize].2);
     members.par_sort_unstable_by_key(|&k| (key(k), k));
-    let copied: Vec<(usize, u16)> = (0..roads.len() as u32)
+    let copied: Vec<(usize, u16)> = (0..roads.len() as u64)
         .into_par_iter()
         .filter(|&k| !roads[k as usize].3)
         .filter_map(|k| {
@@ -96,7 +96,7 @@ pub fn customize(e: &Component, w: &[u16]) -> Result<(Vec<u16>, Vec<u16>)> {
     (0..e.n as u32).into_par_iter().for_each(|v| {
         for a in e.arcs(v) {
             let l = e.arc_link[a];
-            if l == NONE {
+            if l == NONE64 {
                 continue;
             }
             let x = match e.fam {
@@ -191,10 +191,10 @@ impl Runtime {
                 .par_iter()
                 .enumerate()
                 .flat_map_iter(|(x, e)| {
-                    (0..e.way.len()).map(move |k| (e.way[k], e.way_dir[k], e.way_seq[k], e.kind[k] != 2, time(Some(e), RoadRef { component: x as u32, index: k as u32 }, m)))
+                    (0..e.way.len()).map(move |k| (e.way[k], e.way_dir[k], e.way_seq[k], e.kind[k] != 2, time(Some(e), RoadRef { component: x as u32, index: k as u64 }, m)))
                 })
                 .collect();
-            roads.extend((0..way.len()).map(|k| (way[k], dir[k], seq[k], true, time(None, RoadRef { component: NONE, index: k as u32 }, m))));
+            roads.extend((0..way.len()).map(|k| (way[k], dir[k], seq[k], true, time(None, RoadRef { component: NONE, index: k as u64 }, m))));
             let w = round(&roads);
             drop(roads);
             let mut per = Vec::with_capacity(comps.len());

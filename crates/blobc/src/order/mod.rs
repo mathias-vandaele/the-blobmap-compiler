@@ -31,6 +31,9 @@ impl Orderer for InertialFlow {
         if g.n <= 2 || g.tail.is_empty() {
             return (0..g.n as u32).collect();
         }
+        // RoutingKit numbers arcs in 32 bits; the order budget keeps a graph ordered whole far
+        // below that (SPEC §5).
+        assert!(g.tail.len() < u32::MAX as usize, "{} arcs: beyond RoutingKit's 32-bit arc ids", g.tail.len());
         routingkit_cch::compute_order_inertial(g.n as u32, g.tail, g.head, g.lat, g.lon)
     }
 }

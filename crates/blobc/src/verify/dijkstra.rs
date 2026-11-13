@@ -62,7 +62,7 @@ fn sides(r: &Reference, m: &Mode, e: &Entry) -> Vec<Option<Side>> {
         (0..2)
             .map(|d| {
                 let road = g.road_of_piece[k][d];
-                (road != NONE).then(|| {
+                (road != blobmap_format::NONE64).then(|| {
                     let (t, h) = if d == 0 { (p.u[k], p.v[k]) } else { (p.v[k], p.u[k]) };
                     Side { w: g.w[m.metric][road as usize], g: if d == 0 { e.frac } else { 1.0 - e.frac }, tail: t, head: h }
                 })
@@ -89,10 +89,11 @@ fn direct(r: &Reference, m: &Mode, o: &Entry, d: &Entry) -> u32 {
     t
 }
 
-/// A graph in CSR form: per node, its arcs (head, cost).
+/// A graph in CSR form: per node, its arcs (head, cost); arc positions are u64, as a
+/// family's arcs may pass 2^32.
 #[derive(Default)]
 struct Csr {
-    first: Column<u32>,
+    first: Column<u64>,
     head: Column<u32>,
     cost: Column<u16>,
 }
@@ -100,7 +101,7 @@ struct Csr {
 impl Csr {
     /// From arcs (tail, head, cost) of n nodes, in their order within each tail.
     fn new(n: usize, arcs: &[(u32, u32, u16)]) -> Csr {
-        let mut first = vec![0u32; n + 1];
+        let mut first = vec![0u64; n + 1];
         for &(t, _, _) in arcs {
             first[t as usize + 1] += 1;
         }

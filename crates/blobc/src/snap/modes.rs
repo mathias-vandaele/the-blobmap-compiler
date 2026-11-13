@@ -9,7 +9,7 @@
 //!   two ends lie in different components never lies on a route (FORMAT §5.4), so it is skipped
 //!   like a trapped one.
 
-use blobmap_format::NONE;
+use blobmap_format::{NONE, NONE64};
 
 use crate::graph::{ActiveGraph, CarGraph, Components};
 use crate::osm::Pieces;
@@ -63,8 +63,8 @@ impl Membership {
 
     /// For ACTIVE metric `m` (an index into `crate::graph::active::METRICS`).
     pub fn active(p: &Pieces, g: &ActiveGraph, e: &Components, m: usize) -> Membership {
-        let graph: Vec<bool> = g.road_of_piece.iter().map(|r| r.iter().any(|&x| x != NONE)).collect();
-        let usable = |k: usize| g.road_of_piece[k].iter().any(|&r| r != NONE && g.time[m][r as usize].is_finite());
+        let graph: Vec<bool> = g.road_of_piece.iter().map(|r| r.iter().any(|&x| x != NONE64)).collect();
+        let usable = |k: usize| g.road_of_piece[k].iter().any(|&r| r != NONE64 && g.time[m][r as usize].is_finite());
         let eligible: Vec<bool> = (0..p.len()).map(|k| graph[k] && p.eligible[k] && usable(k)).collect();
         let component: Vec<Option<u32>> = (0..p.len()).map(|k| active_component(p, e, k).filter(|_| eligible[k])).collect();
         let servable = component.iter().map(Option::is_some).collect();

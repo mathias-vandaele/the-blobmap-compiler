@@ -36,8 +36,8 @@ pub struct Member {
 /// finite members, in travel order (`seq` ascending for dir 0, descending for dir 1).
 pub fn round_all(roads: &[Member]) -> Vec<u16> {
     let mut w = vec![INF; roads.len()];
-    let mut idx: Vec<u32> = (0..roads.len() as u32).filter(|&i| roads[i as usize].time.is_finite()).collect();
-    let key = |i: u32| {
+    let mut idx: Vec<u64> = (0..roads.len() as u64).filter(|&i| roads[i as usize].time.is_finite()).collect();
+    let key = |i: u64| {
         let r = &roads[i as usize];
         (r.way, r.dir, if r.dir == 0 { r.seq as i64 } else { -(r.seq as i64) })
     };

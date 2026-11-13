@@ -14,8 +14,8 @@ pub struct PackPlan {
     /// Nodes in row order.
     pub rows: Vec<u32>,
     pub links: u64,
-    /// Arcs in stored order, CSR by row.
-    pub arcs: Vec<u32>,
+    /// Arcs in stored order (the family's arc indices), CSR by row.
+    pub arcs: Vec<u64>,
     pub arc_first: Vec<u32>,
 }
 
@@ -92,7 +92,7 @@ pub fn plan(f: &dyn Family, b: &Built, pack_max_nodes: u64) -> Result<Layout> {
                 let v = e.node(l);
                 p.rows.push(v);
                 p.links += e.h.row(l).len() as u64;
-                let mut arcs: Vec<u32> = b.out[b.out_first[v as usize] as usize..b.out_first[v as usize + 1] as usize].to_vec();
+                let mut arcs: Vec<u64> = b.out[b.out_first[v as usize] as usize..b.out_first[v as usize + 1] as usize].to_vec();
                 arcs.sort_by_key(|&a| (b.layout_of[f.arc(a as usize).1 as usize], f.arc_key(a as usize)));
                 for a in arcs {
                     arc_local[a as usize] = p.arcs.len() as u32;

@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail, ensure};
 
 use crate::manifest::Manifest;
 use crate::runtime::arr::{Arr, ArrWriter};
-use crate::{Model, NONE};
+use crate::{Model, NONE, NONE64};
 
 pub type Id = [u8; 16];
 
@@ -256,7 +256,7 @@ pub struct Component {
     pub arc_first: Arr<u64>,
     pub arc_head: Arr<u32>,
     /// Component-local link of each arc, `NONE` when tail = head.
-    pub arc_link: Arr<u32>,
+    pub arc_link: Arr<u64>,
     /// The pack-local index of each arc (ACTIVE `road`).
     pub arc_local: Arr<u32>,
     pub turn_cost: Arr<u16>,
@@ -615,7 +615,7 @@ impl Runtime {
             let h = e.arc_head[a];
             if raw == NONE {
                 ensure!(h == tail, "{f} component {x}: a NONE link on an arc {tail} -> {h}");
-                arc_link.push(NONE)?;
+                arc_link.push(NONE64)?;
                 continue;
             }
             let lo = tail.max(h);
@@ -623,7 +623,7 @@ impl Runtime {
             let local = e.up_first[bl.id_first as usize] + (raw as u64 - bl.pack_link_first);
             let expect = e.link(tail, h).with_context(|| format!("{f} component {x}: arc {tail} -> {h} has no link"))?;
             ensure!(local as usize == expect, "{f} component {x}: arc {tail} -> {h} names link {local}, not {expect}");
-            arc_link.push(local as u32)?;
+            arc_link.push(local)?;
         }
         e.arc_link = arc_link.finish()?;
         Ok(e)

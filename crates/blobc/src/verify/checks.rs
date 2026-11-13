@@ -5,10 +5,10 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 
 use anyhow::Result;
-use blobmap_format::runtime::query::Source;
+use blobmap_format::runtime::query::{Source, labels_at};
 use blobmap_format::runtime::recustomize::{RoadRef, customize};
 use blobmap_format::runtime::{Dir, Component, Fam, Runtime};
-use blobmap_format::{INF, NONE};
+use blobmap_format::{INF, NONE, NONE64};
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 use serde_json::{Value, json};
@@ -94,12 +94,12 @@ fn expected_entry(r: &Reference, m: usize, piece: usize, frac: f64) -> ([Option<
     } else {
         let g = &r.active;
         let [along, against] = g.road_of_piece[piece];
-        let (fu, ruv, rvu) = if along != NONE { (frac, along, against) } else { (1.0 - frac, against, along) };
+        let (fu, ruv, rvu) = if along != NONE64 { (frac, along, against) } else { (1.0 - frac, against, along) };
         let mi = mode.metric;
         let (u_id, id_v) = parts(g.w[mi][ruv as usize], fu);
-        let (v_id, id_u) = if rvu != NONE { parts(g.w[mi][rvu as usize], 1.0 - fu) } else { (INF, INF) };
-        let key = |k: u32| (g.way[k as usize], g.seq[k as usize], g.dir[k as usize]);
-        ([Some(key(ruv)), (rvu != NONE).then(|| key(rvu))], [u_id, id_u, v_id, id_v])
+        let (v_id, id_u) = if rvu != NONE64 { parts(g.w[mi][rvu as usize], 1.0 - fu) } else { (INF, INF) };
+        let key = |k: u64| (g.way[k as usize], g.seq[k as usize], g.dir[k as usize]);
+        ([Some(key(ruv)), (rvu != NONE64).then(|| key(rvu))], [u_id, id_u, v_id, id_v])
     }
 }
 
@@ -324,7 +324,7 @@ pub fn recustomization(rt: &Runtime, rep: &mut Report) -> Result<()> {
         }
         drop(stored);
         let random = |_: Option<&Component>, r: RoadRef, m: usize| -> f32 {
-            let seed = ((r.component as u64) << 40) ^ ((r.index as u64) << 8) ^ m as u64;
+            let seed = ((r.component as u64) << 40) ^ (r.index << 8) ^ m as u64;
             let mut g = rand::rngs::StdRng::seed_from_u64(seed);
             if g.random_bool(0.05) { f32::INFINITY } else { g.random_range(0.0f32..400.0) }
         };
@@ -432,20 +432,39 @@ pub fn distances(rt: &Runtime, ex: &Expected, n: &Samples, rep: &mut Report) -> 
     Ok(())
 }
 
+/// The proper prefixes (length ≥ 2) of the forbidden sequences, sorted, and how many there
+/// are: all of them, or `at_most` drawn with a fixed seed (SPEC §11, world tier), sorted.
+fn via_prefixes(forbidden: &[Vec<u32>], at_most: usize) -> (Vec<&[u32]>, usize) {
+    let mut prefixes: Vec<&[u32]> = forbidden.iter().flat_map(|f| (2..f.len()).map(move |j| &f[..j])).collect();
+    prefixes.sort_unstable();
+    prefixes.dedup();
+    let total = prefixes.len();
+    if total > at_most {
+        let mut g = rand::rngs::StdRng::seed_from_u64(0x5649_4157_4159);
+        let mut keep = rand::seq::index::sample(&mut g, total, at_most).into_vec();
+        keep.sort_unstable();
+        prefixes = keep.into_iter().map(|i| prefixes[i]).collect();
+    }
+    (prefixes, total)
+}
+
+/// How a via-way check names the prefixes it covers.
+fn via_scope(checked: usize, total: usize) -> String {
+    if checked == total { format!("every via-way prefix ({total})") } else { format!("{checked} of {total} via-way prefixes, sampled") }
+}
+
 /// Every via-way copy (SPEC §11): for every proper prefix of every forbidden sequence, an
 /// ID on its last segment, reached from an ID on its first segment (or, when that has none,
 /// the nearest segment within three turns before it), in both directions, against a
 /// point-to-point reference Dijkstra. Prefixes whose last segment carries no ID are counted.
-pub fn via_copies(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()> {
+pub fn via_copies(rt: &Runtime, ex: &Expected, at_most: usize, rep: &mut Report) -> Result<()> {
     let r = ex.r;
     if !r.has(Fam::Car) {
         return Ok(());
     }
     let (g, mode) = (&r.car, r.mode("car"));
     let k = rt.mode("car")?;
-    let mut prefixes: Vec<&[u32]> = g.forbidden.iter().flat_map(|f| (2..f.len()).map(move |j| &f[..j])).collect();
-    prefixes.sort_unstable();
-    prefixes.dedup();
+    let (prefixes, total) = via_prefixes(&g.forbidden, at_most);
     // IDs by the segment of each slot, in the ID's component.
     let mut on: Vec<(u32, u32)> = Vec::new();
     for (i, at) in mode.iter().enumerate() {
@@ -499,19 +518,21 @@ pub fn via_copies(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()> {
             _ => no_source += 1,
         }
     }
-    let results: Vec<Result<Option<String>>> = crate::verify::columns_at_once(rt, k, || cases
+    // One value of each column, from the two IDs' ancestors (SPEC §11): the `from` column of
+    // s at t and the `to` column of t at s.
+    let results: Vec<Result<Option<String>>> = cases
         .par_iter()
         .map(|&(s, t)| {
             let want = ex.car_pair(s, t);
-            let from = rt.column(&[Source { id: s as u32, start: 0 }], k, Dir::From)?[t];
-            let to = rt.column(&[Source { id: t as u32, start: 0 }], k, Dir::To)?[s];
+            let from = rt.column_at(s as u32, t as u32, k, Dir::From)?;
+            let to = rt.column_at(t as u32, s as u32, k, Dir::To)?;
             Ok((from != want || to != want)
                 .then(|| format!("{} -> {}: from {from}, to {to}, reference {want}", uuid(&r.ids[s]), uuid(&r.ids[t]))))
         })
-        .collect());
+        .collect();
     let o = rep.check(&format!(
-        "car: every via-way prefix, both directions ({} prefixes; {no_target} with no ID on the copied segment, {no_source} with no ID before it)",
-        prefixes.len()
+        "car: {}, both directions ({no_target} with no ID on the copied segment, {no_source} with no ID before it)",
+        via_scope(prefixes.len(), total)
     ));
     for res in results {
         o.count();
@@ -525,7 +546,7 @@ pub fn via_copies(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()> {
 /// Every via-way copy at segment level (SPEC §5): from the start of the first segment of
 /// each forbidden sequence to the arrival at the original of each of its copies (the least
 /// over the original and its copies), from and to, against the reference.
-pub fn via_segments(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()> {
+pub fn via_segments(rt: &Runtime, ex: &Expected, at_most: usize, rep: &mut Report) -> Result<()> {
     let r = ex.r;
     if !r.has(Fam::Car) {
         return Ok(());
@@ -533,9 +554,7 @@ pub fn via_segments(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()>
     let g = &r.car;
     let k = rt.mode("car")?;
     let (metric, f) = (rt.vocab.modes[k].info.metric, &rt.faults);
-    let mut prefixes: Vec<&[u32]> = g.forbidden.iter().flat_map(|f| (2..f.len()).map(move |j| &f[..j])).collect();
-    prefixes.sort_unstable();
-    prefixes.dedup();
+    let (prefixes, total) = via_prefixes(&g.forbidden, at_most);
     let mut pairs: Vec<(u32, u32)> = prefixes.iter().map(|p| (p[0], *p.last().unwrap())).collect();
     pairs.sort_unstable();
     pairs.dedup();
@@ -561,59 +580,29 @@ pub fn via_segments(rt: &Runtime, ex: &Expected, rep: &mut Report) -> Result<()>
         l.binary_search_by_key(&key(s), |e| e.0).ok().map(|i| l[i].1)
     };
     let want: Vec<u16> = pairs.par_iter().map(|&(a, b)| ex.car_segments(a, b)).collect();
-    // One sweep per first segment (from) and per original (to).
-    let label = |x: u32, seeds: &mut dyn Iterator<Item = u32>, dir: Dir| -> Result<(std::sync::Arc<Component>, Vec<u16>)> {
-        let e = rt.component(Fam::Car, x)?;
-        let mut l = vec![INF; e.n];
-        for v in seeds {
-            l[v as usize] = 0;
-        }
-        blobmap_format::runtime::query::sweep(&e, metric, &mut l, dir, f);
-        Ok((e, l))
-    };
-    let group = |by: fn(&(u32, u32)) -> u32| -> Vec<Vec<usize>> {
-        let mut m: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
-        for (i, p) in pairs.iter().enumerate() {
-            m.entry(by(p)).or_default().push(i);
-        }
-        m.into_values().collect()
-    };
     let missing = |s: u32| anyhow::anyhow!("car segment {s} (way {}) has no node in its component", g.way[s as usize]);
-    let from: Vec<Result<Vec<(usize, u16)>>> = crate::verify::columns_at_once(rt, k, || group(|p| p.0)
+    // Per pair, the labels a full sweep would give, from ancestors alone (SPEC §11): from the
+    // first segment to the arrivals at the original, and to the first segment from them.
+    let both: Vec<Result<(u16, u16)>> = pairs
         .par_iter()
-        .map(|ks| {
-            let a = pairs[ks[0]].0;
-            let (e, l) = label(x_of(a), &mut std::iter::once(node(a).ok_or_else(|| missing(a))?), Dir::From)?;
-            ks.iter()
-                .map(|&i| {
-                    let b = pairs[i].1;
-                    Ok((i, e.arrivals(node(b).ok_or_else(|| missing(b))?, f).map(|y| l[y as usize]).min().unwrap()))
-                })
-                .collect()
-        })
-        .collect());
-    let to: Vec<Result<Vec<(usize, u16)>>> = crate::verify::columns_at_once(rt, k, || group(|p| p.1)
-        .par_iter()
-        .map(|ks| {
-            let b = pairs[ks[0]].1;
-            let nb = node(b).ok_or_else(|| missing(b))?;
+        .map(|&(a, b)| {
             let e = rt.component(Fam::Car, x_of(b))?;
-            let (_, l) = label(x_of(b), &mut e.arrivals(nb, f), Dir::To)?;
-            ks.iter()
-                .map(|&i| {
-                    let a = pairs[i].0;
-                    Ok((i, l[node(a).ok_or_else(|| missing(a))? as usize]))
-                })
-                .collect()
+            let (na, nb) = (node(a).ok_or_else(|| missing(a))?, node(b).ok_or_else(|| missing(b))?);
+            let arr: Vec<u32> = e.arrivals(nb, f).collect();
+            let from = labels_at(&e, metric, &[(na, 0)], &arr, Dir::From, f).into_iter().min().unwrap();
+            let seeds: Vec<(u32, u16)> = arr.iter().map(|&y| (y, 0)).collect();
+            let to = labels_at(&e, metric, &seeds, &[na], Dir::To, f)[0];
+            Ok((from, to))
         })
-        .collect());
+        .collect();
+    let both: Vec<(u16, u16)> = both.into_iter().collect::<Result<_>>()?;
     let o = rep.check(&format!(
-        "car: every via-way copy, segment to segment, both directions ({} prefixes, {} first and last segment pairs; {elsewhere} with the first segment in another component)",
-        prefixes.len(),
+        "car: via-way copies segment to segment, {}, both directions ({} first and last segment pairs; {elsewhere} with the first segment in another component)",
+        via_scope(prefixes.len(), total),
         pairs.len() + elsewhere
     ));
-    for (side, res) in [("from", from), ("to", to)] {
-        for (i, t) in res.into_iter().collect::<Result<Vec<_>>>()?.into_iter().flatten() {
+    for (side, pick) in [("from", 0), ("to", 1)] {
+        for (i, t) in both.iter().map(|t| if pick == 0 { t.0 } else { t.1 }).enumerate() {
             o.count();
             let (a, b) = pairs[i];
             o.expect(t == want[i], || {
@@ -763,4 +752,20 @@ pub fn scenario(rt: &Runtime, ex: &Expected, checks: &[Check], cells_variant: bo
     }
     let _ = reason_name;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn via_prefixes_all_or_a_fixed_sample() {
+        let forbidden: Vec<Vec<u32>> = (0..500u32).map(|i| vec![i, i + 1, i + 2, i + 3]).collect();
+        let (all, total) = via_prefixes(&forbidden, usize::MAX);
+        assert_eq!((all.len(), total), (1000, 1000));
+        let (some, total) = via_prefixes(&forbidden, 100);
+        assert_eq!((some.len(), total), (100, 1000));
+        assert!(some.windows(2).all(|w| w[0] < w[1]) && some.iter().all(|p| all.contains(p)));
+        assert_eq!(some, via_prefixes(&forbidden, 100).0);
+    }
 }

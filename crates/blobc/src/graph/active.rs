@@ -27,8 +27,8 @@ pub struct ActiveGraph {
     /// Per metric, per road.
     pub time: Vec<Column<f32>>,
     pub w: Vec<Column<u16>>,
-    /// Per piece, its roads [along, against] or `NONE`.
-    pub road_of_piece: Column<[u32; 2]>,
+    /// Per piece, its roads [along, against] or `NONE64`: road indices of the whole family.
+    pub road_of_piece: Column<[u64; 2]>,
 }
 
 impl ActiveGraph {
@@ -39,13 +39,13 @@ impl ActiveGraph {
             time: vec![Column::default(); m],
             ..ActiveGraph::default()
         };
-        let mut road_of_piece = vec![[blobmap_format::NONE; 2]; p.len()];
+        let mut road_of_piece = vec![[blobmap_format::NONE64; 2]; p.len()];
         for i in 0..p.len() {
             for d in 0..2 {
                 if (0..m).all(|k| p.time[k][i][d].is_infinite()) {
                     continue;
                 }
-                road_of_piece[i][d] = g.piece.len() as u32;
+                road_of_piece[i][d] = g.piece.len() as u64;
                 g.piece.push(i as u32);
                 g.way.push(p.way[i]);
                 g.dir.push(d as u8);

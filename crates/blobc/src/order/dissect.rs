@@ -357,6 +357,8 @@ struct Flow {
 
 impl Flow {
     fn new(n: usize, arcs: &[(u32, u32, u32)]) -> Flow {
+        // Arc positions are u32: a band of a separator, far below 2^32 arcs.
+        assert!(2 * arcs.len() < u32::MAX as usize, "{} arcs in a flow network", arcs.len());
         let mut deg = vec![0u32; n + 1];
         for &(a, b, _) in arcs {
             deg[a as usize + 1] += 1;

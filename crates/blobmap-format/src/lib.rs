@@ -29,6 +29,8 @@ pub const LICENSES_FILE: &str = "LICENSES";
 /// `NONE` in a `U32` index, `NONE16` in a `U16` taxonomy index, `INF` in a `U16` time
 /// (FORMAT §1).
 pub const NONE: u32 = u32::MAX;
+/// `NONE` for an index over a whole component's or family's links, turns or roads.
+pub const NONE64: u64 = u64::MAX;
 pub const NONE16: u16 = u16::MAX;
 pub const INF: u16 = u16::MAX;
 
