@@ -1,8 +1,8 @@
 # PLAN
 
 How the milestones of SPEC §13 get built. SPEC.md says what; FORMAT.md says the bytes; this
-file only orders the work. Status: approved 2026-11-08; milestones 2, 3 and 4 closed (3 on
-2026-11-10, 4 on 2026-11-11).
+file only orders the work. Status: approved 2026-11-08; milestones 2, 3, 4 and 5 closed (3 on
+2026-11-10, 4 on 2026-11-11, 5 on 2026-11-13).
 
 ## Milestone 2: toy and synthetic
 
