@@ -12,8 +12,15 @@
 //! is ordered on its own (the top block by the coarse order, which is the separator
 //! hierarchy).
 
-use blobmap_model::NONE;
+use std::fs::File;
+use std::io::{BufWriter, Read, Write};
+use std::path::Path;
 
+use anyhow::{Context, Result};
+use blobmap_model::NONE;
+use rayon::prelude::*;
+
+use crate::osm::column::{Column, ColumnWriter};
 use crate::order::elim::etree;
 use crate::order::{Graph, Orderer, ranks};
 
@@ -34,10 +41,15 @@ pub struct Block {
 /// Undirected adjacency without loops or parallel arcs, with arc multiplicities. Arc
 /// positions are u64: a whole component's arcs, both ways, may pass 2^32.
 pub(crate) struct Adj {
-    first: Vec<u64>,
-    pub to: Vec<u32>,
-    weight: Vec<u32>,
+    first: Column<u64>,
+    pub to: Column<u32>,
+    weight: Column<u32>,
 }
+
+/// Records per bucket of a spilled adjacency (`Adj::spilled`): 12 bytes each, sorted in memory.
+const BUCKET_RECORDS: u64 = 1 << 25;
+/// Nodes per counting span when buckets are drawn.
+const SPAN: usize = 1 << 12;
 
 impl Adj {
     /// Each edge both ways, loops dropped, parallel arcs merged with their weights summed, the
@@ -82,7 +94,93 @@ impl Adj {
         first[n] = out as u64;
         to.truncate(out);
         weight.truncate(out);
-        Adj { first, to, weight }
+        Adj { first: first.into(), to: to.into(), weight: weight.into() }
+    }
+
+    /// `Adj::new` in memory without a directory; with one, `Adj::spilled` into its files `name.*`.
+    pub(crate) fn build<I: Iterator<Item = (u32, u32, u32)>>(n: usize, edges: impl Fn() -> I, dir: Option<&Path>, name: &str) -> Result<Adj> {
+        match dir {
+            None => Ok(Adj::new(n, edges)),
+            Some(d) => Adj::spilled(n, edges, d, name, SPAN, BUCKET_RECORDS),
+        }
+    }
+
+    /// The same adjacency as `Adj::new`, built on disk: each arc, both ways, is appended to the
+    /// bucket file of its row (buckets are runs of rows of at most about `BUCKET_RECORDS` arcs);
+    /// each bucket is then read, sorted and merged in memory, and its rows appended to the
+    /// columns, which are mapped from `dir`. Memory holds one bucket. Buckets are drawn from
+    /// counts per `span` rows.
+    fn spilled<I: Iterator<Item = (u32, u32, u32)>>(n: usize, edges: impl Fn() -> I, dir: &Path, name: &str, span: usize, bucket_records: u64) -> Result<Adj> {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        let spans = n.div_ceil(span);
+        let mut count = vec![0u64; spans];
+        for (a, b, _) in edges().filter(|e| e.0 != e.1) {
+            count[a as usize / span] += 1;
+            count[b as usize / span] += 1;
+        }
+        // Each span's bucket, and each bucket's first row.
+        let (mut bucket, mut start, mut held) = (vec![0u32; spans], vec![0usize], 0u64);
+        for s in 0..spans {
+            if held > 0 && held + count[s] > bucket_records {
+                start.push(s * span);
+                held = 0;
+            }
+            held += count[s];
+            bucket[s] = (start.len() - 1) as u32;
+        }
+        start.push(n);
+        drop(count);
+        let paths: Vec<_> = (0..start.len() - 1).map(|b| dir.join(format!("{name}.b{b}"))).collect();
+        let mut files = paths
+            .iter()
+            .map(|p| Ok(BufWriter::with_capacity(1 << 20, File::create(p).with_context(|| format!("creating {}", p.display()))?)))
+            .collect::<Result<Vec<_>>>()?;
+        for (a, b, w) in edges().filter(|e| e.0 != e.1) {
+            for (x, y) in [(a, b), (b, a)] {
+                let mut r = [0u8; 12];
+                r[..4].copy_from_slice(&x.to_le_bytes());
+                r[4..8].copy_from_slice(&y.to_le_bytes());
+                r[8..].copy_from_slice(&w.to_le_bytes());
+                files[bucket[x as usize / span] as usize].write_all(&r)?;
+            }
+        }
+        for f in &mut files {
+            f.flush()?;
+        }
+        drop((files, bucket));
+        let d = Some(dir);
+        let (mut first, mut to, mut weight) = (
+            ColumnWriter::<u64>::new(d, &format!("{name}.first"))?,
+            ColumnWriter::<u32>::new(d, &format!("{name}.to"))?,
+            ColumnWriter::<u32>::new(d, &format!("{name}.weight"))?,
+        );
+        let mut out = 0u64;
+        for (b, p) in paths.iter().enumerate() {
+            let mut bytes = Vec::new();
+            File::open(p).with_context(|| format!("opening {}", p.display()))?.read_to_end(&mut bytes)?;
+            std::fs::remove_file(p).with_context(|| format!("removing {}", p.display()))?;
+            let word = |r: &[u8], i: usize| u32::from_le_bytes(r[4 * i..4 * i + 4].try_into().unwrap());
+            let mut recs: Vec<[u32; 3]> = bytes.as_chunks::<12>().0.iter().map(|r| [word(r, 0), word(r, 1), word(r, 2)]).collect();
+            drop(bytes);
+            recs.par_sort_unstable();
+            let mut k = 0;
+            for v in start[b]..start[b + 1] {
+                first.push(out)?;
+                while k < recs.len() && recs[k][0] as usize == v {
+                    let (y, mut w) = (recs[k][1], recs[k][2]);
+                    k += 1;
+                    while k < recs.len() && recs[k][0] as usize == v && recs[k][1] == y {
+                        w += recs[k][2];
+                        k += 1;
+                    }
+                    to.push(y)?;
+                    weight.push(w)?;
+                    out += 1;
+                }
+            }
+        }
+        first.push(out)?;
+        Ok(Adj { first: first.finish()?, to: to.finish()?, weight: weight.finish()? })
     }
 
     pub fn range(&self, v: usize) -> std::ops::Range<usize> {
@@ -147,8 +245,20 @@ pub fn plan(g: &Graph, orderer: &dyn Orderer, max_cell: usize, nd_max: usize) ->
     if g.n <= max_cell.max(1) {
         return vec![Block { kind: Kind::Whole, nodes: orderer.order(g) }];
     }
-    if g.n <= nd_max { fine(g, orderer, max_cell) } else { coarse(g, orderer, max_cell) }
+    if g.n <= nd_max {
+        return fine(g, orderer, max_cell);
+    }
+    let edges = || Box::new(g.tail.iter().zip(g.head).map(|(&a, &b)| (a, b))) as Edges<'_>;
+    coarse(g, &edges, &|| orderer.order(g), orderer, max_cell, None).expect("an adjacency in memory")
 }
+
+/// Whether `plan` coarsens a component of `n` nodes.
+pub fn coarsened(n: usize, max_cell: usize, nd_max: usize) -> bool {
+    n > max_cell.max(1) && n > nd_max
+}
+
+/// A component's arcs, as node pairs in any direction.
+pub type Edges<'a> = Box<dyn Iterator<Item = (u32, u32)> + 'a>;
 
 /// The cut of an elimination tree over ranks, with `sub[r]` the weight of r's subtree: the
 /// ranks whose subtree weighs more than `max_cell` are the top (`NONE`); the subtrees below
@@ -209,9 +319,13 @@ fn fine(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
 }
 
 /// Cells from a coarsened graph, for a component too large to order at once: the fine nodes
-/// clustered, then dissected with the clusters' orders as a guide (`dissect`).
-fn coarse(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
-    let fine = Adj::new(g.n, || g.tail.iter().zip(g.head).map(|(&a, &b)| (a, b, 1)));
+/// clustered, then dissected with the clusters' orders as a guide (`dissect`). `g` gives the
+/// node count and coordinates (its arcs are not read); `edges` gives the arcs each time it is
+/// called, and `whole` the order in one piece should the dissection not split the component.
+/// With `spill`, the fine and coarse adjacencies are built in files there (`Adj::spilled`);
+/// the blocks are the same either way.
+pub fn coarse<'e>(g: &Graph, edges: &dyn Fn() -> Edges<'e>, whole: &dyn Fn() -> Vec<u32>, orderer: &dyn Orderer, max_cell: usize, spill: Option<&Path>) -> Result<Vec<Block>> {
+    let fine = Adj::build(g.n, || edges().map(|(a, b)| (a, b, 1)), spill, "fine")?;
     crate::build::mem::phase("fine adjacency");
     // Coarsen to clusters of at most a quarter cell, until about 16 fine nodes per cluster.
     let target = (g.n / 16).max(1024);
@@ -242,11 +356,16 @@ fn coarse(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
             nlon[c] /= nw[c] as f64;
         }
         let cluster = &cluster;
-        let next = Adj::new(k, || {
-            (0..w.len())
-                .flat_map(move |v| cur.range(v).map(move |e| (cluster[v], cluster[cur.to[e] as usize], cur.weight[e])))
-                .filter(|e| e.0 < e.1)
-        });
+        let next = Adj::build(
+            k,
+            || {
+                (0..w.len())
+                    .flat_map(move |v| cur.range(v).map(move |e| (cluster[v], cluster[cur.to[e] as usize], cur.weight[e])))
+                    .filter(|e| e.0 < e.1)
+            },
+            spill,
+            "coarse",
+        )?;
         adj = Some(next);
         for m in &mut map {
             *m = cluster[*m as usize];
@@ -255,7 +374,7 @@ fn coarse(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
     }
     drop((adj, w, lat, lon));
     crate::build::mem::phase("coarsened");
-    crate::order::dissect::refined(g, &fine, &map, orderer, max_cell)
+    Ok(crate::order::dissect::refined(g, &fine, &map, whole, orderer, max_cell))
 }
 
 #[cfg(test)]
@@ -309,6 +428,40 @@ mod tests {
             assert_eq!(blocks, plan(&g, &InertialFlow, 300, nd_max));
         }
         assert_eq!(plan(&g, &InertialFlow, 2000, 0)[0].kind, Kind::Whole);
+    }
+
+    fn same(a: &Adj, b: &Adj) {
+        assert_eq!((&a.first[..], &a.to[..], &a.weight[..]), (&b.first[..], &b.to[..], &b.weight[..]));
+    }
+
+    #[test]
+    fn spilled_adjacency_is_the_same() {
+        // Loops, parallel arcs both ways, weights, an isolated node at the end, many buckets.
+        let mut edges: Vec<(u32, u32, u32)> = Vec::new();
+        let mut x = 7u64;
+        for _ in 0..5000 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let (a, b, w) = ((x >> 33) as u32 % 900, (x >> 13) as u32 % 900, (x >> 50) as u32 % 5 + 1);
+            edges.push((a, b, w));
+        }
+        let dir = std::env::temp_dir().join(format!("blobc-adj-{}", std::process::id()));
+        let mem = Adj::new(901, || edges.iter().copied());
+        for (span, bucket) in [(1, 1), (3, 100), (64, 2000), (4096, 1 << 25)] {
+            same(&mem, &Adj::spilled(901, || edges.iter().copied(), &dir, "t", span, bucket).unwrap());
+        }
+        assert!(std::fs::read_dir(&dir).unwrap().next().is_none(), "bucket files left");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn spilled_coarsening_gives_the_same_blocks() {
+        let (tail, head, lat, lon) = grid(40);
+        let g = Graph { n: 1600, tail: &tail, head: &head, lat: &lat, lon: &lon };
+        let dir = std::env::temp_dir().join(format!("blobc-coarse-{}", std::process::id()));
+        let edges = || Box::new(tail.iter().zip(&head).map(|(&a, &b)| (a, b))) as Edges<'_>;
+        let spilled = coarse(&g, &edges, &|| InertialFlow.order(&g), &InertialFlow, 300, Some(&dir)).unwrap();
+        assert_eq!(spilled, plan(&g, &InertialFlow, 300, 0));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

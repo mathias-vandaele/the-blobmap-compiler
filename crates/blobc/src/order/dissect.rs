@@ -47,7 +47,8 @@ struct Dissect<'a> {
 
 /// The blocks of a component from the dissection: the top block (the separators, deepest
 /// first), then the cells, the regions packed in dissection order up to `max_cell` nodes.
-pub(crate) fn refined(g: &Graph, fine: &Adj, cluster: &[u32], orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
+/// `whole` orders the component in one piece, for a dissection that does not split it.
+pub(crate) fn refined(g: &Graph, fine: &Adj, cluster: &[u32], whole: &dyn Fn() -> Vec<u32>, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
     let d = Dissect {
         g,
         fine,
@@ -70,7 +71,7 @@ pub(crate) fn refined(g: &Graph, fine: &Adj, cluster: &[u32], orderer: &dyn Orde
         }
     }
     if top.is_empty() || packs.len() < 2 {
-        return vec![Block { kind: Kind::Whole, nodes: orderer.order(g) }];
+        return vec![Block { kind: Kind::Whole, nodes: whole() }];
     }
     let mut out = vec![Block { kind: Kind::Top, nodes: top }];
     for mut p in packs {

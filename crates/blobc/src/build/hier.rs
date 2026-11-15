@@ -134,36 +134,123 @@ pub struct Ordered {
     pub(crate) plans: Vec<Vec<Block>>,
 }
 
+/// Memory per node of a coarsened component's order with its adjacencies in memory, at the
+/// stage's peak above what the stage holds before it (FR+5: CAR 6.6 GB for 46.3 M nodes,
+/// ACTIVE 8.3 GB for 42.4 M, about 143 and 196 bytes).
+pub const COARSE_BYTES_PER_NODE: u64 = 200;
+/// The same with its adjacencies spilled to the work directory.
+pub const COARSE_SPILLED_BYTES_PER_NODE: u64 = 120;
+
+/// The memory the order stage may take: what this process may still take (`mem::free`, the
+/// system's available memory or its scope's limit), at most the build's 62 GB (SPEC §10).
+/// `BLOBC_ORDER_ROOM_BYTES` sets it instead, to force the spilled paths on a small input;
+/// it changes where the order works, never the order.
+pub fn order_room() -> u64 {
+    if let Some(b) = std::env::var("BLOBC_ORDER_ROOM_BYTES").ok().and_then(|v| v.parse::<u64>().ok()) {
+        return b;
+    }
+    crate::build::mem::free().unwrap_or(u64::MAX).min(62 << 30)
+}
+
+/// The memory one component's order takes: in one piece or from its fine graph's order, the
+/// nested dissection's per-node cost; coarsened, the coarse one, spilled or not.
+fn order_bytes(k: usize, max_cell: usize, nd_max: usize, spill: bool) -> u64 {
+    let per = if !crate::order::cells::coarsened(k, max_cell, nd_max) {
+        ND_BYTES_PER_NODE
+    } else if spill {
+        COARSE_SPILLED_BYTES_PER_NODE
+    } else {
+        COARSE_BYTES_PER_NODE
+    };
+    k as u64 * per
+}
+
 /// Orders every component: in one piece if it has at most `max_cell` nodes, else as cells, cut
-/// from its fine graph's order if it has at most `nd_max` nodes. The family's split by component
-/// is kept in columns under `dir`.
+/// from its fine graph's order if it has at most `nd_max` nodes, else from a coarsened graph.
+/// The family's split by component is kept in columns under `dir`.
+///
+/// Memory is measured against the largest component before any order starts: a coarsened
+/// component whose order in memory would pass the room (`order_room`) builds its adjacencies
+/// in files under `dir/order`, and if even that would pass it the stage fails before it
+/// starts. Components are ordered in runs, largest first, each run as many as fit the room
+/// together (at least one), each run in parallel; the blocks are the same in any grouping.
 pub fn order(f: &dyn Family, max_cell: usize, nd_max: usize, fixed: Option<&FixedRanks>, dir: &Path) -> Result<Ordered> {
     let split = Split::new(f, dir)?;
     crate::build::mem::phase("split");
-    let plans: Vec<Result<Vec<Block>>> = (0..f.components().len())
-        .into_par_iter()
-        .map(|x| {
-            let (nodes, arcs) = split.component(x);
-            let k = nodes.len();
-            let tail: Vec<u32> = split.edges(f, arcs).map(|e| e.0).collect();
-            let head: Vec<u32> = split.edges(f, arcs).map(|e| e.1).collect();
-            let (lat, mut lon): (Vec<f32>, Vec<f32>) = nodes.iter().map(|&v| f.coord(v)).unzip();
-            // A component across the antimeridian is cut as one region (SPEC §4).
-            crate::osm::geo::unwrap_lons(&mut lon);
-            let g = Graph { n: k, tail: &tail, head: &head, lat: &lat, lon: &lon };
-            Ok(match fixed {
-                Some(rank) => {
-                    ensure!(nodes.iter().all(|&v| rank[v as usize] != NONE), "{} component {x}: the fixed order misses a node", f.name());
-                    ensure!(k <= max_cell, "{} component {x}: a fixed order cannot be built as cells", f.name());
-                    let mut order: Vec<u32> = (0..k as u32).collect();
-                    order.sort_by_key(|&i| rank[nodes[i as usize] as usize]);
-                    plan(&g, &Fixed(order), max_cell, nd_max)
-                }
-                None => plan(&g, &InertialFlow as &dyn Orderer, max_cell, nd_max),
-            })
+    let room = order_room();
+    let count = f.components().len();
+    let size = |x: usize| split.first[x + 1] - split.first[x];
+    let mut by_size: Vec<usize> = (0..count).collect();
+    by_size.sort_by_key(|&x| (std::cmp::Reverse(size(x)), x));
+    let largest = by_size.first().map_or(0, |&x| size(x));
+    let spill = order_bytes(largest, max_cell, nd_max, false) > room;
+    let need = order_bytes(largest, max_cell, nd_max, spill);
+    ensure!(
+        need <= room,
+        "{} order: the largest component, {largest} nodes, needs about {need} bytes, more than the {room} bytes free",
+        f.name()
+    );
+    eprintln!(
+        "    {} order: largest component {largest} nodes, about {:.1} GB{}, room {:.1} GB",
+        f.name(),
+        need as f64 / 1e9,
+        if spill { " with its adjacencies on disk" } else { "" },
+        room as f64 / 1e9
+    );
+    let spill_dir = dir.join("order");
+    let one = |x: usize| -> Result<Vec<Block>> {
+        let (nodes, arcs) = split.component(x);
+        let k = nodes.len();
+        let (lat, mut lon): (Vec<f32>, Vec<f32>) = nodes.iter().map(|&v| f.coord(v)).unzip();
+        // A component across the antimeridian is cut as one region (SPEC §4).
+        crate::osm::geo::unwrap_lons(&mut lon);
+        let materialize = || -> (Vec<u32>, Vec<u32>) { split.edges(f, arcs).unzip() };
+        if fixed.is_none() && crate::order::cells::coarsened(k, max_cell, nd_max) {
+            // Coarsened: the arcs are read from the split each time, never held.
+            let g = Graph { n: k, tail: &[], head: &[], lat: &lat, lon: &lon };
+            let edges = || Box::new(split.edges(f, arcs)) as crate::order::cells::Edges<'_>;
+            let whole = || {
+                let (tail, head) = materialize();
+                InertialFlow.order(&Graph { n: k, tail: &tail, head: &head, lat: &lat, lon: &lon })
+            };
+            let dir = spill.then(|| spill_dir.join(x.to_string()));
+            let blocks = crate::order::cells::coarse(&g, &edges, &whole, &InertialFlow, max_cell, dir.as_deref());
+            if let Some(d) = &dir {
+                let _ = std::fs::remove_dir_all(d);
+            }
+            return blocks;
+        }
+        let (tail, head) = materialize();
+        let g = Graph { n: k, tail: &tail, head: &head, lat: &lat, lon: &lon };
+        Ok(match fixed {
+            Some(rank) => {
+                ensure!(nodes.iter().all(|&v| rank[v as usize] != NONE), "{} component {x}: the fixed order misses a node", f.name());
+                ensure!(k <= max_cell, "{} component {x}: a fixed order cannot be built as cells", f.name());
+                let mut order: Vec<u32> = (0..k as u32).collect();
+                order.sort_by_key(|&i| rank[nodes[i as usize] as usize]);
+                plan(&g, &Fixed(order), max_cell, nd_max)
+            }
+            None => plan(&g, &InertialFlow as &dyn Orderer, max_cell, nd_max),
         })
-        .collect();
+    };
+    let mut plans: Vec<Option<Vec<Block>>> = (0..count).map(|_| None).collect();
+    let mut at = 0;
+    while at < by_size.len() {
+        let (mut end, mut held) = (at, 0u64);
+        while end < by_size.len() {
+            let b = order_bytes(size(by_size[end]), max_cell, nd_max, spill);
+            if end > at && held + b > room {
+                break;
+            }
+            held += b;
+            end += 1;
+        }
+        let run: Vec<(usize, Result<Vec<Block>>)> = by_size[at..end].par_iter().map(|&x| (x, one(x))).collect();
+        for (x, p) in run {
+            plans[x] = Some(p?);
+        }
+        at = end;
+    }
     crate::build::mem::phase("plans");
-    Ok(Ordered { split, plans: plans.into_iter().collect::<Result<_>>()? })
+    Ok(Ordered { split, plans: plans.into_iter().map(|p| p.expect("every component ordered")).collect() })
 }
-
