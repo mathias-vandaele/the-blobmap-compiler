@@ -168,12 +168,14 @@ fn in_index_order(sorted: &mut Vec<(&str, Column<Snapped>)>, order: &[u32], dir:
 
 /// What the build keeps of the catalog: points in internal-index order.
 pub struct Ids {
-    pub addresses: Vec<usize>,
-    pub places: Vec<usize>,
+    /// Catalog rows of the addresses and places kept, as u32 (the catalog is bounded below
+    /// `NONE`, checked in `select`).
+    pub addresses: Vec<u32>,
+    pub places: Vec<u32>,
     /// (alias, internal index of its kept place).
     pub aliases: Vec<(Id, u32)>,
     /// Indices into `Catalog::aliases` of the aliases kept.
-    pub alias_rows: Vec<usize>,
+    pub alias_rows: Vec<u32>,
 }
 
 /// Without `--extent`, an ID is in the model when some mode's family graph has a piece
@@ -181,14 +183,15 @@ pub struct Ids {
 pub fn select(c: &Catalog, snaps: &[ModeSnap], polygon: bool) -> Ids {
     let na = c.addresses.len();
     let inside = |i: usize| polygon || snaps.iter().any(|s| s.at[i].any);
-    let addresses: Vec<usize> = (0..na).filter(|&i| inside(i)).collect();
-    let places: Vec<usize> = (0..c.places.len()).filter(|&p| inside(na + p)).collect();
+    assert!(na + c.places.len() < NONE as usize && c.aliases.len() < NONE as usize, "the catalog has more rows than a u32 index holds");
+    let addresses: Vec<u32> = (0..na as u32).filter(|&i| inside(i as usize)).collect();
+    let places: Vec<u32> = (0..c.places.len() as u32).filter(|&p| inside(na + p as usize)).collect();
     let mut new_place = vec![NONE; c.places.len()];
     for (k, &p) in places.iter().enumerate() {
-        new_place[p] = (addresses.len() + k) as u32;
+        new_place[p as usize] = (addresses.len() + k) as u32;
     }
-    let alias_rows: Vec<usize> = (0..c.aliases.len()).filter(|&k| new_place[c.aliases[k].1 as usize] != NONE).collect();
-    let aliases = alias_rows.iter().map(|&k| (c.aliases[k].0, new_place[c.aliases[k].1 as usize])).collect();
+    let alias_rows: Vec<u32> = (0..c.aliases.len() as u32).filter(|&k| new_place[c.aliases[k as usize].1 as usize] != NONE).collect();
+    let aliases = alias_rows.iter().map(|&k| (c.aliases[k as usize].0, new_place[c.aliases[k as usize].1 as usize])).collect();
     Ids { addresses, places, aliases, alias_rows }
 }
 
@@ -212,9 +215,9 @@ pub fn write(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash
     // Point i of the model in internal-index order: its catalog point index, and whether it
     // is a filtered place.
     let pt = |i: usize| match ids.addresses.get(i) {
-        Some(&a) => (a, false),
+        Some(&a) => (a as usize, false),
         None => {
-            let p = ids.places[i - ids.addresses.len()];
+            let p = ids.places[i - ids.addresses.len()] as usize;
             (na + p, c.places[p].status != 0)
         }
     };
@@ -306,18 +309,18 @@ pub fn write(f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, road_hash
         let b: Vec<u8> = v.flatten().copied().collect();
         Tensor::of_bytes(&[b.len() as u64 / 16, 16], b)
     };
-    w.put("vocab/ids/address", id_rows(&mut ids.addresses.iter().map(|&i| &c.addresses[i].id)))?;
+    w.put("vocab/ids/address", id_rows(&mut ids.addresses.iter().map(|&i| &c.addresses[i as usize].id)))?;
     w.put("vocab/ids/alias", id_rows(&mut ids.aliases.iter().map(|a| &a.0)))?;
     w.put("vocab/ids/alias_to", Tensor::vec(&ids.aliases.iter().map(|a| a.1).collect::<Vec<u32>>()))?;
-    w.put("vocab/ids/place", id_rows(&mut ids.places.iter().map(|&p| &c.places[p].id)))?;
+    w.put("vocab/ids/place", id_rows(&mut ids.places.iter().map(|&p| &c.places[p as usize].id)))?;
     let mut u = Unit::default();
-    let places: Vec<&crate::overture::Place> = ids.places.iter().map(|&p| &c.places[p]).collect();
-    u.put("vocab/places/status", Tensor::vec(&places.iter().map(|p| p.status).collect::<Vec<u8>>()));
-    u.put("vocab/places/primary", Tensor::vec(&places.iter().map(|p| p.primary).collect::<Vec<u16>>()));
-    u.put("vocab/places/basic", Tensor::vec(&places.iter().map(|p| p.basic).collect::<Vec<u16>>()));
+    let places = || ids.places.iter().map(|&p| &c.places[p as usize]);
+    u.put("vocab/places/status", Tensor::vec(&places().map(|p| p.status).collect::<Vec<u8>>()));
+    u.put("vocab/places/primary", Tensor::vec(&places().map(|p| p.primary).collect::<Vec<u16>>()));
+    u.put("vocab/places/basic", Tensor::vec(&places().map(|p| p.basic).collect::<Vec<u16>>()));
     let mut alt_first = vec![0u32];
     let mut alt = Vec::new();
-    for p in &places {
+    for p in places() {
         alt.extend_from_slice(c.alt(p));
         alt_first.push(alt.len() as u32);
     }

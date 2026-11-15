@@ -607,9 +607,14 @@ pub fn build(a: &Args) -> Result<BuildResult> {
     cg.shed();
     let car = Car::with(&cp, &cg, ce);
     let (ap, mut ag) = run.run(&ActiveNetwork, (&osm, c))?;
+    // The node index (16 bytes a node) has no reader after the networks: its files go now,
+    // not at the end, so they never share the disk with the hierarchies, the snap and the
+    // model (on the planet, over 100 GB).
+    let dir = osm.dir().to_path_buf();
+    drop(osm);
     let act = Active::new(&ap, &ag);
     let fixed = fixed_ranks(&ap, &c.build.order.active)?;
-    let ao = run.run(&Orders("active-order", osm.dir().join("active-split")), (&act as &dyn Family, c, fixed.as_ref()))?;
+    let ao = run.run(&Orders("active-order", dir.join("active-split")), (&act as &dyn Family, c, fixed.as_ref()))?;
     let (ab, al) = run.run(&Hierarchies("active-hierarchy"), (&act as &dyn Family, c, ao))?;
     let active_road = run.run(&WriteRoad { name: "active-write", slots: (1, 3), arc_local: true }, (&act as &dyn Family, ab, al, &mut writer))?;
     drop(fixed);
@@ -626,7 +631,7 @@ pub fn build(a: &Args) -> Result<BuildResult> {
         car_small_max: c.car.config.snap.small_component_max_nodes,
         active_small_max: c.active.config.snap.small_component_max_nodes,
     };
-    let (snaps, ids) = run.run(&Snap, (&families, &catalog, inputs.polygon.is_some(), osm.dir().join("snap").as_path()))?;
+    let (snaps, ids) = run.run(&Snap, (&families, &catalog, inputs.polygon.is_some(), dir.join("snap").as_path()))?;
     let wo = run.run(&WriteModel, WriteInput { args: a, inputs: &inputs, families: &families, catalog: &catalog, snaps: &snaps, ids: &ids, writer })?;
     let data = report::data(a, &families, &catalog, &snaps, &ids, &wo.served, &islands)?;
     blobmap_format::json::write_file(&a.report_path("data"), &data)?;

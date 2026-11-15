@@ -24,7 +24,7 @@ pub const FLAG_CHANGE: f64 = 0.2;
 pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, served: &Served, islands: &Islands) -> Result<Value> {
     let mut places: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
     for &p in &ids.places {
-        let p = &c.places[p];
+        let p = &c.places[p as usize];
         if p.status == 0 {
             let country = c.str(p.country).unwrap_or("none").to_string();
             *places.entry(country).or_default().entry(c.str(p.basic_key).unwrap_or("none").to_string()).or_default() += 1;
@@ -34,10 +34,10 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
     // countries with places but no address, where Overture has none.
     let mut coverage: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     for &i in &ids.addresses {
-        coverage.entry(c.str(c.addresses[i].country).unwrap_or("none").to_string()).or_default().0 += 1;
+        coverage.entry(c.str(c.addresses[i as usize].country).unwrap_or("none").to_string()).or_default().0 += 1;
     }
     for &p in &ids.places {
-        let p = &c.places[p];
+        let p = &c.places[p as usize];
         if p.status == 0 {
             coverage.entry(c.str(p.country).unwrap_or("none").to_string()).or_default().1 += 1;
         }
@@ -60,7 +60,7 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
             if *family != fam.name() {
                 continue;
             }
-            let kept = ids.addresses.iter().copied().chain(ids.places.iter().map(|&p| c.addresses.len() + p));
+            let kept = ids.addresses.iter().map(|&i| i as usize).chain(ids.places.iter().map(|&p| c.addresses.len() + p as usize));
             for i in kept {
                 let x = snaps[m].at[i].trapped;
                 if x != blobmap_format::NONE {
@@ -97,7 +97,7 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
             b.1 = b.1.min(p.way[k as usize]);
             b.2 = b.2.min(k);
         };
-        let kept = ids.addresses.iter().copied().chain(ids.places.iter().filter(|&&q| c.places[q].status == 0).map(|&q| c.addresses.len() + q));
+        let kept = ids.addresses.iter().map(|&i| i as usize).chain(ids.places.iter().filter(|&&q| c.places[q as usize].status == 0).map(|&q| c.addresses.len() + q as usize));
         for i in kept {
             let s = &snaps[m].at[i];
             if s.moved_from != blobmap_format::NONE {

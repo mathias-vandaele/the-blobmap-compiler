@@ -232,10 +232,10 @@ impl Catalog {
 
     /// Source licences with the number of rows carrying each, over the given rows: address
     /// indices, place indices and alias indices (SPEC §12: the rows in the model).
-    pub fn license_counts(&self, addresses: &[usize], places: &[usize], aliases: &[usize]) -> BTreeMap<String, u64> {
+    pub fn license_counts(&self, addresses: &[u32], places: &[u32], aliases: &[u32]) -> BTreeMap<String, u64> {
         let mut per_set = vec![0u64; self.license_sets.len()];
-        let sets = addresses.iter().map(|&i| self.addresses[i].license).chain(places.iter().map(|&p| self.places[p].license));
-        for l in sets.chain(aliases.iter().map(|&a| self.alias_license[a])) {
+        let sets = addresses.iter().map(|&i| self.addresses[i as usize].license).chain(places.iter().map(|&p| self.places[p as usize].license));
+        for l in sets.chain(aliases.iter().map(|&a| self.alias_license[a as usize])) {
             per_set[l as usize] += 1;
         }
         let mut out: BTreeMap<String, u64> = BTreeMap::new();
