@@ -24,6 +24,16 @@ pub fn anon() -> Option<u64> {
     status_bytes("RssAnon:")
 }
 
+/// CPU time of this process so far (user and system, every thread), in seconds.
+pub fn cpu_seconds() -> f64 {
+    let s = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    let f: Vec<&str> = s.rsplit(')').next().unwrap_or("").split_whitespace().collect();
+    let ticks = |k: usize| f.get(k).and_then(|x| x.parse::<f64>().ok()).unwrap_or(0.0);
+    // SAFETY: sysconf has no preconditions.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+    (ticks(11) + ticks(12)) / hz.max(1.0)
+}
+
 /// Gives the allocator's free memory back to the system (glibc keeps it per thread arena
 /// otherwise, and a later stage cannot reuse another arena's holes).
 pub fn trim() {

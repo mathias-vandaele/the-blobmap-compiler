@@ -15,6 +15,42 @@ impl Faults {
     }
 }
 
+/// A query's working state, kept from one query to the next so that a thread refills a
+/// component's arrays instead of allocating them anew: an allocation the size of a component
+/// costs page faults and zeroing, more than the sweep itself on a sparse search, and many
+/// threads doing it at once contend in the kernel. Answers never depend on it; its arrays
+/// only grow, so `bytes` is what it holds.
+#[derive(Default)]
+pub struct Work {
+    /// Columns (one time per ID) not in use.
+    cols: Vec<Vec<u16>>,
+    /// The sweep's labels (one per node of a component).
+    label: Vec<u16>,
+    /// `Ancestors` arrays not in use, every entry zero.
+    anc: Vec<(Vec<u64>, Vec<u16>)>,
+}
+
+impl Work {
+    /// A column of `n` times, every one `INF`.
+    pub fn col(&mut self, n: usize) -> Vec<u16> {
+        let mut v = self.cols.pop().unwrap_or_default();
+        v.clear();
+        v.resize(n, INF);
+        v
+    }
+
+    /// A column back, for a later query.
+    pub fn give(&mut self, v: Vec<u16>) {
+        self.cols.push(v);
+    }
+
+    pub fn bytes(&self) -> usize {
+        let cols: usize = self.cols.iter().map(|v| v.capacity() * 2).sum();
+        let anc: usize = self.anc.iter().map(|(r, l)| r.capacity() * 8 + l.capacity() * 2).sum();
+        cols + self.label.capacity() * 2 + anc
+    }
+}
+
 /// A source of a column: internal index and start time.
 #[derive(Clone, Copy, Debug)]
 pub struct Source {
@@ -42,10 +78,15 @@ impl Runtime {
     /// source plus its start; `INF` for BEYOND, unreachable or unserved. Every source must be
     /// served for the mode.
     pub fn column(&self, sources: &[Source], mode: usize, dir: Dir) -> Result<Vec<u16>> {
+        self.column_in(&mut Work::default(), sources, mode, dir)
+    }
+
+    /// `column` with the working state `w`; the column comes from `w` (`Work::give` it back).
+    pub fn column_in(&self, w: &mut Work, sources: &[Source], mode: usize, dir: Dir) -> Result<Vec<u16>> {
         let mv = &self.vocab.modes[mode];
         let f = &self.faults;
         let n = self.vocab.n();
-        let mut out = vec![INF; n];
+        let mut out = w.col(n);
         let mut by_component: std::collections::BTreeMap<u32, Vec<Source>> = std::collections::BTreeMap::new();
         for s in sources {
             let x = mv.component[s.id as usize];
@@ -53,29 +94,53 @@ impl Runtime {
             let start = if f.no_start { 0 } else { s.start };
             by_component.entry(x).or_default().push(Source { id: s.id, start });
         }
-        for (x, srcs) in by_component {
+        // The IDs of each source component, from one pass over the IDs: a pass per component
+        // would cost components × IDs, hours for a column of places in many components.
+        let keys: Vec<u32> = by_component.keys().copied().collect();
+        let mut members: Vec<Vec<u32>> = Vec::new();
+        if keys.len() > 1 {
+            members.resize(keys.len(), Vec::new());
+            for i in 0..n {
+                if let Ok(k) = keys.binary_search(&mv.component[i]) {
+                    members[k].push(i as u32);
+                }
+            }
+        }
+        for (k, (x, srcs)) in by_component.into_iter().enumerate() {
             let e = self.component(mv.info.fam, x)?;
-            let mut label = vec![INF; e.n];
+            let mut label = std::mem::take(&mut w.label);
+            label.clear();
+            label.resize(e.n, INF);
             for s in &srcs {
                 seed(&e, mv, s, dir, f, &mut |v, t| label[v as usize] = label[v as usize].min(t));
             }
             sweep(&e, mv.info.metric, &mut label, dir, f);
-            for i in 0..n {
-                if mv.component[i] != x {
-                    continue;
-                }
+            // The sources by piece (the component is x's), so that an ID meets only the
+            // sources on its own piece, not every source.
+            let mut by_piece: Vec<([u32; 2], u32, usize)> = srcs.iter().enumerate().map(|(j, s)| (mv.node[s.id as usize], mv.road[s.id as usize], j)).collect();
+            by_piece.sort_unstable();
+            let mut one = |i: usize| {
                 let mut t = head(&e, mv, i, |v| label[v as usize], dir, f);
-                for s in &srcs {
+                let key = (mv.node[i], mv.road[i]);
+                let from = by_piece.partition_point(|p| (p.0, p.1) < key);
+                for &(_, _, j) in by_piece[from..].iter().take_while(|p| (p.0, p.1) == key) {
+                    let s = &srcs[j];
                     let si = s.id as usize;
                     if si == i {
                         t = t.min(s.start);
-                    } else if !f.no_direct && same_piece(mv, si, i) {
+                    } else if !f.no_direct {
                         let d = if dir == Dir::From { direct(mv, si, i) } else { direct(mv, i, si) };
                         t = t.min(f.add(s.start, d));
                     }
                 }
                 out[i] = out[i].min(t);
+            };
+            if keys.len() > 1 {
+                members[k].iter().for_each(|&i| one(i as usize));
+            } else {
+                (0..n).filter(|&i| mv.component[i] == x).for_each(&mut one);
             }
+            w.label = label;
         }
         Ok(out)
     }
@@ -84,13 +149,20 @@ impl Runtime {
     /// o's `From` column at d, from the ancestors of o's seeds and of d's alone (FORMAT §8,
     /// hierarchy property). d's labels are those of a `To` column from d.
     pub fn pair(&self, o: u32, d: u32, mode: usize) -> Result<u16> {
+        self.pair_in(&mut Work::default(), o, d, mode)
+    }
+
+    pub fn pair_in(&self, w: &mut Work, o: u32, d: u32, mode: usize) -> Result<u16> {
         let mv = &self.vocab.modes[mode];
         let f = &self.faults;
         let x = mv.component[o as usize];
         anyhow::ensure!(x != NONE && x == mv.component[d as usize], "a pair must be served in one component (internal indices {o}, {d})");
         let e = self.component(mv.info.fam, x)?;
-        let up = |s: u32, dir: Dir| Ancestors::up(&e, mv, &Source { id: s, start: 0 }, dir, f);
-        let mut t = up(o, Dir::From).meet(&up(d, Dir::To), f);
+        let from = Ancestors::up(&e, mv, &Source { id: o, start: 0 }, Dir::From, f, w);
+        let to = Ancestors::up(&e, mv, &Source { id: d, start: 0 }, Dir::To, f, w);
+        let mut t = from.meet(&to, f);
+        from.done(w);
+        to.done(w);
         if !f.no_direct && same_piece(mv, o as usize, d as usize) {
             t = t.min(f.add(0, direct(mv, o as usize, d as usize)));
         }
@@ -102,6 +174,10 @@ impl Runtime {
     /// those nodes take in the sweep comes from their ancestors (FORMAT §8). o and d must be
     /// served in one component.
     pub fn column_at(&self, o: u32, d: u32, mode: usize, dir: Dir) -> Result<u16> {
+        self.column_at_in(&mut Work::default(), o, d, mode, dir)
+    }
+
+    pub fn column_at_in(&self, w: &mut Work, o: u32, d: u32, mode: usize, dir: Dir) -> Result<u16> {
         let mv = &self.vocab.modes[mode];
         let f = &self.faults;
         let x = mv.component[o as usize];
@@ -117,7 +193,7 @@ impl Runtime {
             targets.push(v);
             INF
         }, dir, f);
-        let at = labels_at(&e, mv.info.metric, &seeds, &targets, dir, f);
+        let at = labels_at_in(w, &e, mv.info.metric, &seeds, &targets, dir, f);
         let mut next = at.iter();
         let mut t = head(&e, mv, d as usize, |_| *next.next().unwrap(), dir, f);
         if !f.no_direct && same_piece(mv, o as usize, d as usize) {
@@ -132,12 +208,16 @@ impl Runtime {
 /// half over the seeds' ancestors, then the downward half over the targets' ancestors, by
 /// increasing layout id (every upper neighbour of an ancestor is an ancestor).
 pub fn labels_at(e: &Component, metric: usize, seeds: &[(u32, u16)], targets: &[u32], dir: Dir, f: &Faults) -> Vec<u16> {
-    let up = Ancestors::from_seeds(e, seeds.iter().copied(), metric, dir, f);
+    labels_at_in(&mut Work::default(), e, metric, seeds, targets, dir, f)
+}
+
+pub fn labels_at_in(w: &mut Work, e: &Component, metric: usize, seeds: &[(u32, u16)], targets: &[u32], dir: Dir, f: &Faults) -> Vec<u16> {
+    let up = Ancestors::from_seeds(e, seeds.iter().copied(), metric, dir, f, w);
     let go_down = match dir {
         Dir::From => &e.down[metric],
         Dir::To => &e.up[metric],
     };
-    let below = Ancestors::closure(e, targets.iter().copied());
+    let below = Ancestors::closure(e, targets.iter().copied(), w);
     let mut label = vec![INF; below.ids.len()];
     for (i, &v) in below.ids.iter().enumerate() {
         let mut lv = up.label(v);
@@ -147,13 +227,16 @@ pub fn labels_at(e: &Component, metric: usize, seeds: &[(u32, u16)], targets: &[
         }
         label[i] = lv;
     }
-    targets.iter().map(|v| label[below.ids.binary_search(v).unwrap()]).collect()
+    let at = targets.iter().map(|v| label[below.ids.binary_search(v).unwrap()]).collect();
+    up.done(w);
+    below.done(w);
+    at
 }
 
 /// A source's labels after the upward half of the sweep, on the nodes its seeds reach over
 /// upper links (on a valid hierarchy, their ancestors): every other node keeps `INF`. The
-/// arrays span the component but start zeroed, so only the pages of the reached nodes are
-/// ever touched.
+/// arrays span the component; they come from a `Work`, all zero, and go back to it with only
+/// the reached entries cleared (`done`), so a search costs what it reaches.
 struct Ancestors {
     /// The reached nodes, ascending.
     ids: Vec<u32>,
@@ -164,20 +247,27 @@ struct Ancestors {
 }
 
 impl Ancestors {
-    fn up(e: &Component, mv: &ModeVocab, s: &Source, dir: Dir, f: &Faults) -> Ancestors {
+    fn up(e: &Component, mv: &ModeVocab, s: &Source, dir: Dir, f: &Faults, w: &mut Work) -> Ancestors {
         let mut seeds = Vec::new();
         seed(e, mv, s, dir, f, &mut |v, t| seeds.push((v, t)));
-        Ancestors::from_seeds(e, seeds, mv.info.metric, dir, f)
+        Ancestors::from_seeds(e, seeds, mv.info.metric, dir, f, w)
     }
 
     /// The nodes `from` reach over upper links, ascending, every label `INF`.
-    fn closure(e: &Component, from: impl IntoIterator<Item = u32>) -> Ancestors {
-        let mut a = Ancestors { ids: Vec::new(), reached: vec![0; e.n.div_ceil(64)], not_label: vec![0; e.n] };
+    fn closure(e: &Component, from: impl IntoIterator<Item = u32>, w: &mut Work) -> Ancestors {
+        let (mut reached, mut not_label) = w.anc.pop().unwrap_or_default();
+        if reached.len() < e.n.div_ceil(64) {
+            reached.resize(e.n.div_ceil(64), 0);
+        }
+        if not_label.len() < e.n {
+            not_label.resize(e.n, 0);
+        }
+        let mut a = Ancestors { ids: Vec::new(), reached, not_label };
         let mut stack: Vec<u32> = from.into_iter().collect();
         while let Some(v) = stack.pop() {
-            let (w, bit) = (v as usize / 64, 1u64 << (v % 64));
-            if a.reached[w] & bit == 0 {
-                a.reached[w] |= bit;
+            let (word, bit) = (v as usize / 64, 1u64 << (v % 64));
+            if a.reached[word] & bit == 0 {
+                a.reached[word] |= bit;
                 a.ids.push(v);
                 stack.extend(e.row(v).map(|k| e.up_head[k]));
             }
@@ -186,9 +276,9 @@ impl Ancestors {
         a
     }
 
-    fn from_seeds(e: &Component, seeds: impl IntoIterator<Item = (u32, u16)>, metric: usize, dir: Dir, f: &Faults) -> Ancestors {
+    fn from_seeds(e: &Component, seeds: impl IntoIterator<Item = (u32, u16)>, metric: usize, dir: Dir, f: &Faults, w: &mut Work) -> Ancestors {
         let seeds: Vec<(u32, u16)> = seeds.into_iter().collect();
-        let mut a = Ancestors::closure(e, seeds.iter().map(|s| s.0));
+        let mut a = Ancestors::closure(e, seeds.iter().map(|s| s.0), w);
         for (v, t) in seeds {
             a.put(v, t);
         }
@@ -211,6 +301,15 @@ impl Ancestors {
 
     fn label(&self, v: u32) -> u16 {
         !self.not_label[v as usize]
+    }
+
+    /// Clears the reached entries and gives the arrays back to `w`.
+    fn done(mut self, w: &mut Work) {
+        for &v in &self.ids {
+            self.reached[v as usize / 64] = 0;
+            self.not_label[v as usize] = 0;
+        }
+        w.anc.push((self.reached, self.not_label));
     }
 
     fn put(&mut self, v: u32, t: u16) {

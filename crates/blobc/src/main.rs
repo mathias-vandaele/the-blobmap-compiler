@@ -72,6 +72,9 @@ enum Cmd {
     Fragments(Tool),
     /// The build's input stages alone, with their peak RSS (PLAN, milestone 4).
     Inputs(Tool),
+    /// Golden replay alone, with its time and core-seconds: `replay <model> <golden dir>
+    /// [--threads n]`.
+    Replay(Tool),
 }
 
 /// A tool's own arguments, passed through as given.
@@ -136,6 +139,7 @@ fn run() -> Result<bool> {
         Cmd::Components(t) => blobc::verify::components::main(t.args).map(|()| true),
         Cmd::Fragments(t) => blobc::verify::fragments::main(t.args).map(|()| true),
         Cmd::Inputs(t) => blobc::verify::inputs::main(t.args).map(|()| true),
+        Cmd::Replay(t) => blobc::verify::golden::main(t.args),
         Cmd::Inspect { model } => {
             let m = blobmap_format::Model::open(&model)?;
             let mf = blobmap_format::manifest::Manifest::from_value(&m.manifest)?;

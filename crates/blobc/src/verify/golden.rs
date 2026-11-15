@@ -180,27 +180,108 @@ pub fn write(dir: &Path, tier: &str, inputs_hash: &str, lines: &[Value]) -> Resu
     blobmap_format::json::write_file(&dir.join(HEADER), &header)
 }
 
-/// Replays a golden directory: every answer must match exactly.
+/// Replays a golden directory: every answer must match exactly. The queries run grouped by
+/// the component of their first ID, so that each component is loaded once and its queries
+/// run together, on as many threads as the memory left holds the working state of (one
+/// `Work` per thread, reused from query to query). Neither the order nor the thread count
+/// changes an answer; failures are reported in file order.
 pub fn replay(rt: &Runtime, dir: &Path, rep: &mut Report) -> Result<()> {
+    replay_on(rt, dir, rep, None)
+}
+
+/// `blobc replay <model> <golden dir> [--threads n]`: the replay alone, in a work directory
+/// next to the model as verify's; true when every answer matches.
+pub fn main(a: Vec<String>) -> Result<bool> {
+    let (model, dir, threads) = match &a[..] {
+        [m, d] => (m, d, None),
+        [m, d, t, n] if t == "--threads" => (m, d, Some(n.parse::<usize>()?)),
+        _ => anyhow::bail!("usage: blobc replay <model> <golden dir> [--threads n]"),
+    };
+    let work = crate::verify::work_dir(Path::new(model), "replay");
+    std::fs::create_dir_all(&work)?;
+    let mut rep = Report::default();
+    let r = Runtime::open_in(Path::new(model), Some(&work.join("runtime"))).and_then(|rt| replay_on(&rt, Path::new(dir), &mut rep, threads));
+    let _ = std::fs::remove_dir_all(&work);
+    r?;
+    print!("{rep}");
+    println!("{} mismatches", rep.mismatches());
+    Ok(rep.mismatches() == 0)
+}
+
+fn replay_on(rt: &Runtime, dir: &Path, rep: &mut Report, threads: Option<usize>) -> Result<()> {
     let header = blobmap_format::json::read_file(&dir.join(HEADER))?;
     ensure!(header["format"] == "blobmap-golden" && header["format_version"] == GOLDEN_VERSION, "{}: not a {GOLDEN_VERSION} golden header", dir.display());
     ensure!(header["inputs_hash"] == rt.manifest.inputs_hash.as_str(), "{}: golden for another inputs_hash (FORMAT §11)", dir.display());
     let body = std::fs::read(dir.join(QUERIES)).with_context(|| format!("reading {}", dir.display()))?;
     ensure!(header["queries_sha256"] == hex::encode(Sha256::digest(&body)).as_str(), "{}: queries_sha256 differs", dir.display());
     let lines: Vec<&[u8]> = body.split(|&b| b == b'\n').filter(|l| !l.is_empty()).collect();
-    // In parallel, each query on its own; the failures are reported in file order.
-    let results: Vec<Result<Option<String>>> = lines
-        .par_iter()
-        .map(|line| {
-            let q: Value = serde_json::from_slice(line)?;
-            let op = q["op"].as_str().context("op")?;
-            Ok(match rt.answer(op, &q["args"]) {
-                Ok(a) if a == q["answer"] => None,
-                Ok(a) => Some(format!("{op} {}: {a} != {}", q["args"], q["answer"])),
-                Err(e) => Some(format!("{op} {}: {e:#}", q["args"])),
-            })
-        })
-        .collect();
+    let queries: Vec<Result<Value>> = lines.par_iter().map(|l| Ok(serde_json::from_slice(l)?)).collect();
+    let mut order: Vec<usize> = (0..queries.len()).collect();
+    order.sort_by_key(|&k| (queries[k].as_ref().map_or((u8::MAX, u32::MAX), |q| component_of(rt, q)), k));
+    let threads = threads.unwrap_or_else(|| replay_threads(rt));
+    let t0 = std::time::Instant::now();
+    let c0 = crate::build::mem::cpu_seconds();
+    let works = std::sync::Mutex::new(Vec::new());
+    let times = std::sync::Mutex::new(Vec::new());
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build()?;
+    let mut results: Vec<Option<Result<Option<String>>>> = (0..queries.len()).map(|_| None).collect();
+    // One group (component) at a time, its queries in parallel.
+    let mut at = 0;
+    while at < order.len() {
+        let key = |k: usize| queries[k].as_ref().map_or((u8::MAX, u32::MAX), |q| component_of(rt, q));
+        let g = key(order[at]);
+        let len = order[at..].iter().take_while(|&&k| key(k) == g).count();
+        let group = &order[at..at + len];
+        let answers: Vec<Result<Option<String>>> = pool.install(|| {
+            group
+                .par_iter()
+                .map(|&k| {
+                    let q = queries[k].as_ref().map_err(|e| anyhow::anyhow!("{e:#}"))?;
+                    let op = q["op"].as_str().context("op")?;
+                    let mut w = works.lock().unwrap().pop().unwrap_or_default();
+                    let t = std::time::Instant::now();
+                    let got = rt.answer_in(&mut w, op, &q["args"]);
+                    times.lock().unwrap().push((t.elapsed().as_secs_f64(), k));
+                    works.lock().unwrap().push(w);
+                    Ok(match got {
+                        Ok(a) if a == q["answer"] => None,
+                        Ok(a) => Some(format!("{op} {}: {a} != {}", q["args"], q["answer"])),
+                        Err(e) => Some(format!("{op} {}: {e:#}", q["args"])),
+                    })
+                })
+                .collect()
+        });
+        for (&k, a) in group.iter().zip(answers) {
+            results[k] = Some(a);
+        }
+        at += len;
+    }
+    let held: usize = works.lock().unwrap().iter().map(|w| w.bytes()).sum();
+    eprintln!(
+        "golden replay: {} queries, {threads} threads, {:.1} s, {:.0} core-seconds, working state {} MiB",
+        queries.len(),
+        t0.elapsed().as_secs_f64(),
+        crate::build::mem::cpu_seconds() - c0,
+        held >> 20
+    );
+    // The slowest queries, and the time per op: what bounds the replay's wall time.
+    let mut times = times.into_inner().unwrap();
+    times.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut per_op: std::collections::BTreeMap<&str, (usize, f64)> = Default::default();
+    for &(t, k) in &times {
+        let op = queries[k].as_ref().ok().and_then(|q| q["op"].as_str()).unwrap_or("?");
+        let e = per_op.entry(op).or_default();
+        e.0 += 1;
+        e.1 += t;
+    }
+    for (op, (n, t)) in &per_op {
+        eprintln!("golden replay: {op:>20} {n:>5} queries {t:>9.1} s");
+    }
+    for &(t, k) in times.iter().take(5) {
+        let q = queries[k].as_ref().ok();
+        eprintln!("golden replay: slowest {t:.1} s: line {} {}", k + 1, q.and_then(|q| q["op"].as_str()).unwrap_or("?"));
+    }
+    let results: Vec<Result<Option<String>>> = results.into_iter().map(|r| r.expect("every query answered")).collect();
     let o = rep.check("golden replay");
     for res in results {
         o.count();
@@ -209,4 +290,46 @@ pub fn replay(rt: &Runtime, dir: &Path, rep: &mut Report) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The family and component of a query's first ID, for grouping (`u8::MAX` when it has none:
+/// an unknown ID or an unserved one, answered by a reason without a component).
+fn component_of(rt: &Runtime, q: &Value) -> (u8, u32) {
+    let a = &q["args"];
+    let mode = a["mode"].as_str().or_else(|| first_term(&a["expr"]).and_then(|t| t["mode"].as_str()));
+    let mode = match q["op"].as_str() {
+        Some("chained") | Some("chained_column") => Some("car"),
+        _ => mode,
+    };
+    let id = a["a"].as_str().or(a["id"].as_str()).or_else(|| a["sources"][0]["id"].as_str()).or_else(|| first_term(&a["expr"]).and_then(|t| t["target"]["sources"][0].as_str()));
+    let (Some(mode), Some(id)) = (mode, id) else { return (u8::MAX, u32::MAX) };
+    let (Ok(m), Ok(i)) = (rt.mode(mode), rt.resolve(id)) else { return (u8::MAX, u32::MAX) };
+    let mv = &rt.vocab.modes[m];
+    match mv.component[i as usize] {
+        blobmap_format::NONE => (u8::MAX, u32::MAX),
+        x => (mv.info.fam as u8, x),
+    }
+}
+
+fn first_term(e: &Value) -> Option<&Value> {
+    if let Some(t) = e.get("term") {
+        return Some(t);
+    }
+    e.get("and").or_else(|| e.get("or")).and_then(|x| x.as_array()).and_then(|x| x.first()).and_then(first_term).or_else(|| e.get("not").and_then(first_term))
+}
+
+/// Threads for the replay: as many as half the memory left holds one query's working state
+/// (four columns of every ID and a sweep and two ancestor searches over the largest
+/// component), at least one and at most the cores.
+fn replay_threads(rt: &Runtime) -> usize {
+    use blobmap_format::runtime::Fam;
+    let largest = [Fam::Car, Fam::Active]
+        .iter()
+        .filter(|f| rt.tables.contains_key(f))
+        .flat_map(|&f| (0..rt.components(f) as u32).map(move |x| rt.tables[&f].nodes(x) as usize))
+        .max()
+        .unwrap_or(0);
+    let per = 4 * 2 * rt.vocab.n() + largest * 2 + 2 * (largest * 2 + largest.div_ceil(64) * 8);
+    let free = crate::build::mem::free().unwrap_or(0) as usize / 2;
+    (free / per.max(1)).clamp(1, rayon::current_num_threads())
 }

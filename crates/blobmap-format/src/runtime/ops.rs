@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::runtime::model::{Dir, Id, Reason, Runtime};
-use crate::runtime::query::Source;
+use crate::runtime::query::{Source, Work};
 use crate::{INF, NONE16};
 
 pub fn parse_id(s: &str) -> Result<Id> {
@@ -148,6 +148,10 @@ impl Runtime {
     }
 
     pub fn travel_time(&self, a: &str, b: &str, mode: usize) -> Result<Value> {
+        self.travel_time_in(&mut Work::default(), a, b, mode)
+    }
+
+    fn travel_time_in(&self, w: &mut Work, a: &str, b: &str, mode: usize) -> Result<Value> {
         let ia = match self.source(a, mode) {
             Ok(i) => i,
             Err(r) => return Ok(reason_json(r, a)),
@@ -163,15 +167,19 @@ impl Runtime {
         if mv.component[ia as usize] != mv.component[ib as usize] {
             return Ok(reason_json(Reason::DifferentComponent, b));
         }
-        Ok(json!({"time": time_json(self.pair(ia, ib, mode)?)}))
+        Ok(json!({"time": time_json(self.pair_in(w, ia, ib, mode)?)}))
     }
 
     pub fn nearest(&self, c: Category, id: &str, mode: usize, dir: Dir) -> Result<Value> {
+        self.nearest_in(&mut Work::default(), c, id, mode, dir)
+    }
+
+    fn nearest_in(&self, w: &mut Work, c: Category, id: &str, mode: usize, dir: Dir) -> Result<Value> {
         let i = match self.source(id, mode) {
             Ok(i) => i,
             Err(r) => return Ok(reason_json(r, id)),
         };
-        let col = self.column(&[Source { id: i, start: 0 }], mode, dir)?;
+        let col = self.column_in(w, &[Source { id: i, start: 0 }], mode, dir)?;
         let na = self.vocab.address.len();
         let mut best: Option<(u16, Id)> = None;
         for p in 0..self.vocab.place.len() {
@@ -184,6 +192,7 @@ impl Runtime {
                 best = Some(cand);
             }
         }
+        w.give(col);
         Ok(match best {
             Some((t, p)) => json!({"time": t, "place": id_string(&p)}),
             None => json!({"time": "BEYOND", "place": null}),
@@ -192,24 +201,32 @@ impl Runtime {
 
     /// One golden query's answer (FORMAT §11).
     pub fn answer(&self, op: &str, args: &Value) -> Result<Value> {
+        self.answer_in(&mut Work::default(), op, args)
+    }
+
+    /// `answer` with the working state `w`, reused across a thread's queries.
+    pub fn answer_in(&self, w: &mut Work, op: &str, args: &Value) -> Result<Value> {
         let mode = || self.mode(args["mode"].as_str().context("mode")?);
         let dir = || Dir::parse(args["dir"].as_str().context("dir")?);
         let with_ids = args.get("ids").and_then(Value::as_bool).unwrap_or(false);
         match op {
-            "travel_time" => self.travel_time(args["a"].as_str().context("a")?, args["b"].as_str().context("b")?, mode()?),
-            "nearest" => self.nearest(self.category(&args["category"])?, args["id"].as_str().context("id")?, mode()?, dir()?),
+            "travel_time" => self.travel_time_in(w, args["a"].as_str().context("a")?, args["b"].as_str().context("b")?, mode()?),
+            "nearest" => self.nearest_in(w, self.category(&args["category"])?, args["id"].as_str().context("id")?, mode()?, dir()?),
             "isochrone" | "column" => {
                 let m = mode()?;
                 let src = match self.sources(&args["sources"], m)? {
                     Ok(s) => s,
                     Err(r) => return Ok(r),
                 };
-                let col = self.column(&src, m, dir()?)?;
-                if op == "column" {
-                    return Ok(column_json(&col));
-                }
-                let t = args["t"].as_u64().context("t")?;
-                Ok(self.id_answer((0..col.len() as u32).filter(|&i| col[i as usize] != INF && col[i as usize] as u64 <= t), with_ids))
+                let col = self.column_in(w, &src, m, dir()?)?;
+                let a = if op == "column" {
+                    column_json(&col)
+                } else {
+                    let t = args["t"].as_u64().context("t")?;
+                    self.id_answer((0..col.len() as u32).filter(|&i| col[i as usize] != INF && col[i as usize] as u64 <= t), with_ids)
+                };
+                w.give(col);
+                Ok(a)
             }
             "reachable_from_all" | "reachable_from_any" => {
                 let m = mode()?;
@@ -222,23 +239,24 @@ impl Runtime {
                 let all = op == "reachable_from_all";
                 let mut hit: Vec<bool> = vec![all && !src.is_empty(); n];
                 for s in &src {
-                    let col = self.column(std::slice::from_ref(s), m, Dir::From)?;
+                    let col = self.column_in(w, std::slice::from_ref(s), m, Dir::From)?;
                     for i in 0..n {
                         let ok = col[i] != INF && col[i] as u64 <= t;
                         hit[i] = if all { hit[i] && ok } else { hit[i] || ok };
                     }
+                    w.give(col);
                 }
                 Ok(self.id_answer((0..n as u32).filter(|&i| hit[i as usize]), with_ids))
             }
-            "multi_criteria" => self.multi_criteria(args, with_ids),
+            "multi_criteria" => self.multi_criteria(w, args, with_ids),
             "chained" | "chained_column" => {
                 let c = self.category(&args["transfer_category"])?;
                 let penalty = args["penalty"].as_u64().context("penalty")?;
                 ensure!(penalty < INF as u64, "penalty must be below {INF}");
                 if op == "chained" {
-                    self.chained(args["a"].as_str().context("a")?, args["b"].as_str().context("b")?, c, penalty as u16)
+                    self.chained(w, args["a"].as_str().context("a")?, args["b"].as_str().context("b")?, c, penalty as u16)
                 } else {
-                    self.chained_column(args["id"].as_str().context("id")?, c, penalty as u16, dir()?)
+                    self.chained_column(w, args["id"].as_str().context("id")?, c, penalty as u16, dir()?)
                 }
             }
             _ => bail!("unknown op {op:?}"),
@@ -257,7 +275,7 @@ impl Runtime {
     }
 
     /// `chained(a, b)`: min over transfer places p of car(a, p) ⊕ penalty ⊕ walk(p, b), and p.
-    pub fn chained(&self, a: &str, b: &str, c: Category, penalty: u16) -> Result<Value> {
+    fn chained(&self, w: &mut Work, a: &str, b: &str, c: Category, penalty: u16) -> Result<Value> {
         let (car, walk) = (self.mode("car")?, self.mode("walk")?);
         let ia = match self.source(a, car) {
             Ok(i) => i,
@@ -271,8 +289,8 @@ impl Runtime {
         if ia == ib {
             return Ok(json!({"time": 0, "place": null}));
         }
-        let drive = self.column(&[Source { id: ia, start: 0 }], car, Dir::From)?;
-        let on_foot = self.column(&[Source { id: ib, start: 0 }], walk, Dir::To)?;
+        let drive = self.column_in(w, &[Source { id: ia, start: 0 }], car, Dir::From)?;
+        let on_foot = self.column_in(w, &[Source { id: ib, start: 0 }], walk, Dir::To)?;
         let mut best: Option<(u16, Id)> = None;
         for p in self.transfers(c, car, walk) {
             let t = self.faults.add(self.faults.add(drive[p as usize], penalty), on_foot[p as usize]);
@@ -281,6 +299,8 @@ impl Runtime {
                 best = Some(cand);
             }
         }
+        w.give(drive);
+        w.give(on_foot);
         Ok(match best {
             Some((t, p)) => json!({"time": t, "place": id_string(&p)}),
             None => json!({"time": "BEYOND", "place": null}),
@@ -289,7 +309,7 @@ impl Runtime {
 
     /// The chained column (SPEC §9): `From` car from `id` to each transfer place, then walk
     /// on to every ID; `To` car from every ID to each transfer place, then walk on to `id`.
-    pub fn chained_column(&self, id: &str, c: Category, penalty: u16, dir: Dir) -> Result<Value> {
+    fn chained_column(&self, w: &mut Work, id: &str, c: Category, penalty: u16, dir: Dir) -> Result<Value> {
         let (car, walk) = (self.mode("car")?, self.mode("walk")?);
         let (first, second) = if dir == Dir::From { (car, walk) } else { (walk, car) };
         let i = match self.source(id, first) {
@@ -298,22 +318,25 @@ impl Runtime {
         };
         // The leg at `id`'s end, to or from each transfer place; then the other leg as a
         // multi-source column started at those times plus the penalty.
-        let leg = self.column(&[Source { id: i, start: 0 }], first, dir)?;
+        let leg = self.column_in(w, &[Source { id: i, start: 0 }], first, dir)?;
         let src: Vec<Source> = self
             .transfers(c, car, walk)
             .into_iter()
             .map(|p| Source { id: p, start: self.faults.add(leg[p as usize], penalty) })
             .filter(|s| s.start != INF)
             .collect();
-        let mut col = self.column(&src, second, dir)?;
+        w.give(leg);
+        let mut col = self.column_in(w, &src, second, dir)?;
         // `id` itself: 0 s by the same-ID rule, when it is served for the other leg too.
         if self.served(i, second).is_ok() {
             col[i as usize] = 0;
         }
-        Ok(column_json(&col))
+        let a = column_json(&col);
+        w.give(col);
+        Ok(a)
     }
 
-    fn multi_criteria(&self, args: &Value, with_ids: bool) -> Result<Value> {
+    fn multi_criteria(&self, w: &mut Work, args: &Value, with_ids: bool) -> Result<Value> {
         let expr = &args["expr"];
         let kind = args.get("kind").and_then(Value::as_str).unwrap_or("addresses");
         let mut terms: Vec<&Value> = Vec::new();
@@ -337,12 +360,12 @@ impl Runtime {
                         Err(r) => return Ok(reason_json(r, id)),
                     }
                 }
-                self.column(&src, m, dir)?
+                self.column_in(w, &src, m, dir)?
             } else {
                 // The time to the nearest place, as `nearest`: the column of the category's
                 // places in the other direction.
                 let c = self.category(target)?;
-                self.column(&self.places_of(c, m), m, dir.flip())?
+                self.column_in(w, &self.places_of(c, m), m, dir.flip())?
             };
             if !modes.contains(&m) {
                 modes.push(m);
@@ -357,8 +380,8 @@ impl Runtime {
         };
         let candidates: Vec<u32> = range.filter(|&i| modes.iter().all(|&m| self.served(i, m).is_ok())).collect();
         let matching: Vec<u32> = candidates.into_iter().filter(|&i| eval(expr, &mut 0, &times, i as usize).unwrap_or(false)).collect();
-        match args.get("k") {
-            None => Ok(self.id_answer(matching.into_iter(), with_ids)),
+        let a = match args.get("k") {
+            None => self.id_answer(matching.into_iter(), with_ids),
             Some(kv) => {
                 let k = kv.as_u64().context("k")? as usize;
                 let weights: Vec<u64> = terms.iter().map(|t| t["weight"].as_u64().context("weight")).collect::<Result<_>>()?;
@@ -373,9 +396,13 @@ impl Runtime {
                     scored.sort_unstable();
                 }
                 scored.truncate(k);
-                Ok(json!({"top": scored.iter().map(|(s, id)| json!({"id": id_string(id), "score": s.to_string()})).collect::<Vec<_>>()}))
+                json!({"top": scored.iter().map(|(s, id)| json!({"id": id_string(id), "score": s.to_string()})).collect::<Vec<_>>()})
             }
+        };
+        for c in times {
+            w.give(c);
         }
+        Ok(a)
     }
 }
 
