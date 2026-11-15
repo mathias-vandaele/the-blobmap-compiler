@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use anyhow::Result;
-use blobmap_format::{INF, rnd};
+use blobmap_model::{INF, rnd};
 use rayon::prelude::*;
 
 use crate::osm::Pieces;

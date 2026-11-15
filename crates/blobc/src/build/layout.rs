@@ -2,7 +2,7 @@
 //! pack-local index of every arc.
 
 use anyhow::{Result, ensure};
-use blobmap_format::NONE;
+use blobmap_model::NONE;
 
 use crate::build::family::Family;
 use crate::build::hier::Built;

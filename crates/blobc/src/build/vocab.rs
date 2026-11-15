@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use blobmap_format::{INF, ModelWriter, NONE, NONE64, Tensor, Unit, UnitWritten};
+use blobmap_model::{INF, ModelWriter, NONE, NONE64, Tensor, Unit, UnitWritten};
 use rayon::prelude::*;
 
 use crate::build::family::{Active, Car};

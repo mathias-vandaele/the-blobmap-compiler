@@ -1,5 +1,5 @@
 [package]
-name = "blobmap-format"
+name = "blobmap-model"
 description = "The FORMAT.md contract (deterministic shard writer, validating reader, manifest, hashes) and the CPU reference runtime that answers SPEC §9 from a model's bytes."
 version.workspace = true
 edition.workspace = true

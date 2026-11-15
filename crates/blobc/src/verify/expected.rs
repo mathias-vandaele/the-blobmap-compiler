@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
-use blobmap_format::{INF, NONE16};
+use blobmap_model::{INF, NONE16};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 

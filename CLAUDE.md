@@ -16,7 +16,7 @@
 
 ## Constraints
 
-- One Rust workspace of two crates, `blobmap-format` and `blobc` (SPEC §10). Use traits
+- One Rust workspace of two crates, `blobmap-model` and `blobc` (SPEC §10). Use traits
   and composition, with no inheritance-style hierarchies. Configs (profiles, place rules) are files, not code.
 - Output is deterministic: the same inputs, config and compiler version give
   byte-identical models with any thread count. Never iterate a `HashMap` into output.
@@ -48,7 +48,7 @@ concept that contradicts SPEC.md.
 ## Crate map
 
 Two crates under `crates/`; `vendor/` holds the patched RoutingKit.
-- `blobmap-format`: the FORMAT.md writer and validating reader, manifest, hashes; and
+- `blobmap-model`: the FORMAT.md writer and validating reader, manifest, hashes; and
   `runtime`, the CPU reference runtime. It never depends on `blobc`.
 - `blobc`: everything else, one module each, and the one `blobc` binary (`main.rs`).
   Test-only code lives under `tests/` or `cfg(test)`.

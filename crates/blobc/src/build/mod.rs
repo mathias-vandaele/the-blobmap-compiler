@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
-use blobmap_format::hash::{Hasher, ROAD_TAG, VOCAB_TAG, inputs_hash, model_id, of_hashes};
-use blobmap_format::manifest::{self as mf, Manifest};
-use blobmap_format::{Hash, ModelWriter, NONE, ShardLimits};
+use blobmap_model::hash::{Hasher, ROAD_TAG, VOCAB_TAG, inputs_hash, model_id, of_hashes};
+use blobmap_model::manifest::{self as mf, Manifest};
+use blobmap_model::{Hash, ModelWriter, NONE, ShardLimits};
 use serde_json::json;
 use sha2::Digest;
 
@@ -466,7 +466,7 @@ impl Stage<WriteInput<'_>> for WriteModel {
         let i = &w.inputs;
         let spec = spec_version();
         let hash_of = |s: &str| Hash::from_hex(s).expect("sha256 hex");
-        let ih = inputs_hash(&blobmap_format::hash::Inputs {
+        let ih = inputs_hash(&blobmap_model::hash::Inputs {
             pbf_sha256: hash_of(&i.manifest.pbf.sha256),
             overture_release: &i.manifest.overture.release,
             car_profile: hash_of(&i.config_files.profiles.car.sha256),
@@ -476,11 +476,11 @@ impl Stage<WriteInput<'_>> for WriteModel {
             spec_version: spec,
         });
         let (licenses, attribution) = licenses(i, w.catalog, w.ids);
-        std::fs::write(out.join(blobmap_format::LICENSES_FILE), &licenses)?;
+        std::fs::write(out.join(blobmap_model::LICENSES_FILE), &licenses)?;
         let c = &i.config;
         let manifest = Manifest {
-            format: blobmap_format::FORMAT.into(),
-            format_version: blobmap_format::FORMAT_VERSION.into(),
+            format: blobmap_model::FORMAT.into(),
+            format_version: blobmap_model::FORMAT_VERSION.into(),
             model_id: model_id(&road_hash, &vocab_hash).hex(),
             inputs_hash: ih.hex(),
             spec_version: spec.into(),
@@ -522,7 +522,7 @@ impl Stage<WriteInput<'_>> for WriteModel {
             attribution,
             licenses_sha256: hex::encode(sha2::Sha256::digest(licenses.as_bytes())),
         };
-        manifest.write(&out.join(blobmap_format::MANIFEST_FILE))?;
+        manifest.write(&out.join(blobmap_model::MANIFEST_FILE))?;
         Ok(WriteOutput { manifest, served, vocab_bytes: vw.bytes, shard_bytes, shards: written.shard_files.len() })
     }
 }
@@ -532,7 +532,7 @@ fn prepare_out(out: &Path) -> Result<()> {
     if out.exists() {
         let empty = std::fs::read_dir(out)?.next().is_none();
         if !empty {
-            ensure!(out.join(blobmap_format::MANIFEST_FILE).exists(), "{} exists and is not a model directory", out.display());
+            ensure!(out.join(blobmap_model::MANIFEST_FILE).exists(), "{} exists and is not a model directory", out.display());
             std::fs::remove_dir_all(out)?;
         }
     }
@@ -634,7 +634,7 @@ pub fn build(a: &Args) -> Result<BuildResult> {
     let (snaps, ids) = run.run(&Snap, (&families, &catalog, inputs.polygon.is_some(), dir.join("snap").as_path()))?;
     let wo = run.run(&WriteModel, WriteInput { args: a, inputs: &inputs, families: &families, catalog: &catalog, snaps: &snaps, ids: &ids, writer })?;
     let data = report::data(a, &families, &catalog, &snaps, &ids, &wo.served, &islands)?;
-    blobmap_format::json::write_file(&a.report_path("data"), &data)?;
+    blobmap_model::json::write_file(&a.report_path("data"), &data)?;
     let hierarchies: Vec<&serde_json::Value> = car_road.hierarchies.iter().chain(&active_road.hierarchies).collect();
     // What serving costs (SPEC §13, milestone 5): the road part per link and per family, a
     // column's distance state (u16 per node of the family's largest component), and the
@@ -674,7 +674,7 @@ pub fn build(a: &Args) -> Result<BuildResult> {
         // Layout ids per family against their U32 bound (FORMAT §4).
         "layout_ids": wo.manifest.families.iter().map(|(f, x)| (f.clone(), json!({"nodes": x.nodes, "bound": NONE as u64}))).collect::<serde_json::Map<_, _>>(),
     });
-    blobmap_format::json::write_file(&a.report_path("build"), &build)?;
+    blobmap_model::json::write_file(&a.report_path("build"), &build)?;
     // The pieces' files are unlinked under their maps, which end with this function.
     let _ = std::fs::remove_dir_all(a.work_dir());
     Ok(BuildResult { manifest: wo.manifest })

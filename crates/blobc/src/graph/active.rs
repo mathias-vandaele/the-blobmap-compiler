@@ -39,7 +39,7 @@ impl ActiveGraph {
             time: vec![Column::default(); m],
             ..ActiveGraph::default()
         };
-        let mut road_of_piece = vec![[blobmap_format::NONE64; 2]; p.len()];
+        let mut road_of_piece = vec![[blobmap_model::NONE64; 2]; p.len()];
         for i in 0..p.len() {
             for d in 0..2 {
                 if (0..m).all(|k| p.time[k][i][d].is_infinite()) {
@@ -137,7 +137,7 @@ mod tests {
         let row0: Vec<u16> = (0..g.len()).filter(|&r| g.way[r] == 1).map(|r| g.w[1][r]).collect();
         assert_eq!(row0, [72; 10]);
         // Roads that walk may use and bike may not: the footbridge and the walk trap.
-        assert!((0..g.len()).any(|r| g.w[0][r] == blobmap_format::INF && g.w[1][r] != blobmap_format::INF));
+        assert!((0..g.len()).any(|r| g.w[0][r] == blobmap_model::INF && g.w[1][r] != blobmap_model::INF));
         let e = g.components();
         assert!(!e.trapped[0] && e.trapped.iter().any(|&t| t));
     }

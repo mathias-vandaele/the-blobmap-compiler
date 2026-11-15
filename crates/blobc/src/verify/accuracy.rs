@@ -15,9 +15,9 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
-use blobmap_format::INF;
-use blobmap_format::runtime::query::Source;
-use blobmap_format::runtime::{Dir, Runtime};
+use blobmap_model::INF;
+use blobmap_model::runtime::query::Source;
+use blobmap_model::runtime::{Dir, Runtime};
 use osmpbf::{BlobDecode, BlobReader};
 use rayon::prelude::*;
 
@@ -81,7 +81,7 @@ pub fn main(a: Vec<String>) -> Result<()> {
             ways.insert(x, w);
         }
         let report = format!("{}.data-report.json", model.trim_end_matches('/'));
-        let report = blobmap_format::json::read_file(Path::new(&report)).with_context(|| format!("reading {report}"))?;
+        let report = blobmap_model::json::read_file(Path::new(&report)).with_context(|| format!("reading {report}"))?;
         let island: BTreeMap<u64, String> = report["served_components"][mode.as_str()]
             .as_array()
             .context("the data report has no served components for the mode")?

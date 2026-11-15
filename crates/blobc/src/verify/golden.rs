@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
-use blobmap_format::runtime::Runtime;
+use blobmap_model::runtime::Runtime;
 use rayon::prelude::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -130,19 +130,19 @@ pub fn queries(e: &Expected, named: &[String], n: &Samples) -> Vec<Value> {
 /// at most `max`, evenly sampled, plus a redirected key.
 fn category_keys(e: &Expected, max: usize) -> Vec<Value> {
     let t = &e.r.catalog.taxonomy;
-    let mut nodes: Vec<u16> = e.r.catalog.places.iter().filter(|p| p.status == 0 && p.primary != blobmap_format::NONE16).map(|p| p.primary).collect();
+    let mut nodes: Vec<u16> = e.r.catalog.places.iter().filter(|p| p.status == 0 && p.primary != blobmap_model::NONE16).map(|p| p.primary).collect();
     nodes.sort_unstable();
     nodes.dedup();
     let mut out: Vec<Value> = Vec::new();
     for &n in &nodes {
         out.push(json!({"category": t.name[n as usize]}));
-        if t.parent[n as usize] != blobmap_format::NONE16 {
+        if t.parent[n as usize] != blobmap_model::NONE16 {
             let p = &t.name[t.parent[n as usize] as usize];
             if !out.contains(&json!({"category": p})) {
                 out.push(json!({"category": p}));
             }
         }
-        if t.basic[n as usize] != blobmap_format::NONE16 {
+        if t.basic[n as usize] != blobmap_model::NONE16 {
             let b = json!({"basic": t.name[t.basic[n as usize] as usize]});
             if !out.contains(&b) {
                 out.push(b);
@@ -152,7 +152,7 @@ fn category_keys(e: &Expected, max: usize) -> Vec<Value> {
     let step = out.len().div_ceil(max.min(out.len()).max(1)).max(1);
     let mut out: Vec<Value> = out.into_iter().step_by(step).collect();
     // A redirected key, when the taxonomy has one with a target.
-    if let Some(k) = (0..t.redirect.len()).find(|&k| t.redirect_to[k] != blobmap_format::NONE16) {
+    if let Some(k) = (0..t.redirect.len()).find(|&k| t.redirect_to[k] != blobmap_model::NONE16) {
         out.push(json!({"category": t.redirect[k]}));
     }
     out
@@ -177,7 +177,7 @@ pub fn write(dir: &Path, tier: &str, inputs_hash: &str, lines: &[Value]) -> Resu
         "inputs_hash": inputs_hash,
         "queries_sha256": hex::encode(Sha256::digest(&compact)),
     });
-    blobmap_format::json::write_file(&dir.join(HEADER), &header)
+    blobmap_model::json::write_file(&dir.join(HEADER), &header)
 }
 
 /// Replays a golden directory: every answer must match exactly. The queries run grouped by
@@ -209,7 +209,7 @@ pub fn main(a: Vec<String>) -> Result<bool> {
 }
 
 fn replay_on(rt: &Runtime, dir: &Path, rep: &mut Report, threads: Option<usize>) -> Result<()> {
-    let header = blobmap_format::json::read_file(&dir.join(HEADER))?;
+    let header = blobmap_model::json::read_file(&dir.join(HEADER))?;
     ensure!(header["format"] == "blobmap-golden" && header["format_version"] == GOLDEN_VERSION, "{}: not a {GOLDEN_VERSION} golden header", dir.display());
     ensure!(header["inputs_hash"] == rt.manifest.inputs_hash.as_str(), "{}: golden for another inputs_hash (FORMAT §11)", dir.display());
     let body = std::fs::read(dir.join(QUERIES)).with_context(|| format!("reading {}", dir.display()))?;
@@ -306,7 +306,7 @@ fn component_of(rt: &Runtime, q: &Value) -> (u8, u32) {
     let (Ok(m), Ok(i)) = (rt.mode(mode), rt.resolve(id)) else { return (u8::MAX, u32::MAX) };
     let mv = &rt.vocab.modes[m];
     match mv.component[i as usize] {
-        blobmap_format::NONE => (u8::MAX, u32::MAX),
+        blobmap_model::NONE => (u8::MAX, u32::MAX),
         x => (mv.info.fam as u8, x),
     }
 }
@@ -324,7 +324,7 @@ fn first_term(e: &Value) -> Option<&Value> {
 /// here and slows its twin (FR+5: 1.24x the serial core-seconds on 12 threads, 2.0x on 23,
 /// and a longer wall time).
 fn replay_threads(rt: &Runtime) -> usize {
-    use blobmap_format::runtime::Fam;
+    use blobmap_model::runtime::Fam;
     let largest = [Fam::Car, Fam::Active]
         .iter()
         .filter(|f| rt.tables.contains_key(f))

@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
-use blobmap_format::NONE;
-use blobmap_format::runtime::{Fam, Runtime};
+use blobmap_model::NONE;
+use blobmap_model::runtime::{Fam, Runtime};
 use rayon::prelude::*;
 
 use crate::snap::{TRAPPED_COMPONENT, find_brute};
@@ -100,7 +100,7 @@ pub fn main(a: Vec<String>) -> Result<()> {
                     let s = r.car.seg_of_piece[k].into_iter().find(|&s| s != NONE && e.trapped[e.of[s as usize] as usize]).context("a trapped segment")?;
                     (e.of[s as usize], r.car.way[s as usize])
                 } else {
-                    let road = r.active.road_of_piece[k].into_iter().find(|&d| d != blobmap_format::NONE64).context("a road")?;
+                    let road = r.active.road_of_piece[k].into_iter().find(|&d| d != blobmap_model::NONE64).context("a road")?;
                     (e.of[r.active.tail[road as usize] as usize], r.active.way[road as usize])
                 };
                 let [lat, lon] = r.points[i];

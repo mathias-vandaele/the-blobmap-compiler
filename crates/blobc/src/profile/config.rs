@@ -65,7 +65,7 @@ pub struct BuildOptions {
 }
 
 fn default_order_memory() -> u64 {
-    blobmap_format::manifest::ORDER_MEMORY_3_0
+    blobmap_model::manifest::ORDER_MEMORY_3_0
 }
 
 /// A hand-made node order for the ACTIVE family, as OSM node ids from the first contracted

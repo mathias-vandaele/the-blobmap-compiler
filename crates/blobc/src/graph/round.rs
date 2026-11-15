@@ -1,7 +1,7 @@
 //! Integer road weights (SPEC §7, FORMAT §6.1): each (way, direction, metric) group's total
 //! rounded once, distributed by largest remainder, ties in travel order.
 
-use blobmap_format::{INF, rnd};
+use blobmap_model::{INF, rnd};
 
 /// The weights of one group, given its members' master times in travel order (all finite).
 pub fn round_group(times: &[f32]) -> Vec<u16> {

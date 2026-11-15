@@ -63,7 +63,7 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
             let kept = ids.addresses.iter().map(|&i| i as usize).chain(ids.places.iter().map(|&p| c.addresses.len() + p as usize));
             for i in kept {
                 let x = snaps[m].at[i].trapped;
-                if x != blobmap_format::NONE {
+                if x != blobmap_model::NONE {
                     *ids_in.entry(x).or_default().entry(mode).or_default() += 1;
                 }
             }
@@ -100,7 +100,7 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
         let kept = ids.addresses.iter().map(|&i| i as usize).chain(ids.places.iter().filter(|&&q| c.places[q as usize].status == 0).map(|&q| c.addresses.len() + q as usize));
         for i in kept {
             let s = &snaps[m].at[i];
-            if s.moved_from != blobmap_format::NONE {
+            if s.moved_from != blobmap_model::NONE {
                 count(&mut from, component(s.moved_from).context("a moved-from piece is servable")?, s.moved_from);
             }
             if let Ok((k, _)) = s.outcome() {
@@ -128,7 +128,7 @@ pub fn data(a: &Args, f: &Families, c: &Catalog, snaps: &[ModeSnap], ids: &Ids, 
     let previous = match &a.previous_report {
         None => Value::Null,
         Some(p) => {
-            let prev = blobmap_format::json::read_file(p).with_context(|| format!("reading the previous report {}", p.display()))?;
+            let prev = blobmap_model::json::read_file(p).with_context(|| format!("reading the previous report {}", p.display()))?;
             json!({"file": p.file_name().map(|n| n.to_string_lossy().into_owned()), "flagged": compare(&prev["places"], &places)})
         }
     };

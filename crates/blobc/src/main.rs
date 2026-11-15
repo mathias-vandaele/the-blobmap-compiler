@@ -1,5 +1,5 @@
 //! `blobc build | verify | inspect` (SPEC §10), thin over the `build` and `verify` modules
-//! and `blobmap_format`; and the tools of the tiers and of milestones 3 and 4, each with its own
+//! and `blobmap_model`; and the tools of the tiers and of milestones 3 and 4, each with its own
 //! arguments.
 
 use std::path::PathBuf;
@@ -141,8 +141,8 @@ fn run() -> Result<bool> {
         Cmd::Inputs(t) => blobc::verify::inputs::main(t.args).map(|()| true),
         Cmd::Replay(t) => blobc::verify::golden::main(t.args),
         Cmd::Inspect { model } => {
-            let m = blobmap_format::Model::open(&model)?;
-            let mf = blobmap_format::manifest::Manifest::from_value(&m.manifest)?;
+            let m = blobmap_model::Model::open(&model)?;
+            let mf = blobmap_model::manifest::Manifest::from_value(&m.manifest)?;
             println!("model_id     {}", mf.model_id);
             println!("inputs_hash  {}", mf.inputs_hash);
             println!("spec         {}  format {}", mf.spec_version, mf.format_version);
@@ -153,7 +153,7 @@ fn run() -> Result<bool> {
                 println!("{f:<12} {} nodes, {} links, {} components, {} packs", x.nodes, x.links, x.components, x.packs);
             }
             // Components built as cells: the top block's levels and the deepest cell's (SPEC §5).
-            let rt = blobmap_format::runtime::Runtime::open(&model)?;
+            let rt = blobmap_model::runtime::Runtime::open(&model)?;
             for (fam, t) in &rt.tables {
                 for x in 0..t.components() {
                     let bs = t.block_first[x] as usize..t.block_first[x + 1] as usize;

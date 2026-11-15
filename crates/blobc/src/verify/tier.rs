@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
-use blobmap_format::manifest::Manifest;
+use blobmap_model::manifest::Manifest;
 use serde::{Deserialize, Serialize};
 
 use crate::build::sha256_file;

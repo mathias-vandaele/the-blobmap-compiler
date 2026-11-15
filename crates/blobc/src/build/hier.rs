@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use anyhow::{Result, ensure};
-use blobmap_format::NONE;
+use blobmap_model::NONE;
 use rayon::prelude::*;
 
 use crate::build::family::Family;

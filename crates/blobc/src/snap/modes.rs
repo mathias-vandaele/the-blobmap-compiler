@@ -9,7 +9,7 @@
 //!   two ends lie in different components never lies on a route (FORMAT §5.4), so it is skipped
 //!   like a trapped one.
 
-use blobmap_format::{NONE, NONE64};
+use blobmap_model::{NONE, NONE64};
 
 use crate::graph::{ActiveGraph, CarGraph, Components};
 use crate::osm::Pieces;

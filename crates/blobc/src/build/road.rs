@@ -1,7 +1,7 @@
 //! The road part's units (FORMAT §5): a family's tables (§5.1, and the ACTIVE cross table)
 //! and its packs (§5.2–§5.4). Every layout id written is the family's (FORMAT §4).
 
-use blobmap_format::{NONE, Tensor, Unit};
+use blobmap_model::{NONE, Tensor, Unit};
 
 use crate::build::family::Family;
 use crate::build::hier::Built;

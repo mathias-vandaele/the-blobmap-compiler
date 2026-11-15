@@ -5,10 +5,10 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use blobmap_format::hash::{Hasher, ROAD_TAG, VOCAB_TAG, inputs_hash, model_id, of_hashes};
-use blobmap_format::runtime::model::ModeVocab;
-use blobmap_format::runtime::{Component, Fam, Runtime};
-use blobmap_format::{Hash, INF, NONE, NONE16};
+use blobmap_model::hash::{Hasher, ROAD_TAG, VOCAB_TAG, inputs_hash, model_id, of_hashes};
+use blobmap_model::runtime::model::ModeVocab;
+use blobmap_model::runtime::{Component, Fam, Runtime};
+use blobmap_model::{Hash, INF, NONE, NONE16};
 
 use crate::verify::report::{Outcome, Report};
 
@@ -266,7 +266,7 @@ pub fn hashes(rt: &Runtime, rep: &mut Report) -> Result<()> {
     o.expect(vocab.hex() == mf.parts.vocabulary.hash, || "vocabulary part hash".into());
     o.expect(model_id(&road, &vocab).hex() == mf.model_id, || "model_id".into());
     let hx = |s: &str| Hash::from_hex(s).unwrap_or_default();
-    let ih = inputs_hash(&blobmap_format::hash::Inputs {
+    let ih = inputs_hash(&blobmap_model::hash::Inputs {
         pbf_sha256: hx(&mf.inputs.pbf.sha256),
         overture_release: &mf.inputs.overture.release,
         car_profile: hx(&mf.config.profiles.car.sha256),
@@ -276,7 +276,7 @@ pub fn hashes(rt: &Runtime, rep: &mut Report) -> Result<()> {
         spec_version: &mf.spec_version,
     });
     o.expect(ih.hex() == mf.inputs_hash, || "inputs_hash".into());
-    let lic = std::fs::read(rt.model.root.join(blobmap_format::LICENSES_FILE)).unwrap_or_default();
+    let lic = std::fs::read(rt.model.root.join(blobmap_model::LICENSES_FILE)).unwrap_or_default();
     o.expect(Hash::of(&lic).hex() == mf.licenses_sha256, || "licenses_sha256".into());
     o.expect(m.verify_shard_hashes().is_ok(), || "shard SHA-256 (transport)".into());
     o.count();

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
-use blobmap_format::NONE16;
+use blobmap_model::NONE16;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Taxonomy {

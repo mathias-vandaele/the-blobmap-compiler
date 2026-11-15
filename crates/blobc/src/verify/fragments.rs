@@ -21,7 +21,7 @@ use crate::snap::islands::{Islands, first_point};
 use crate::snap::modes::{active_component, car_component};
 use crate::snap::{Grid, Sets};
 use crate::verify::reference::{Inputs, Reference};
-use blobmap_format::runtime::Fam;
+use blobmap_model::runtime::Fam;
 use crate::verify::tier::TierFile;
 
 /// Emptied components serving more IDs than this before are listed.

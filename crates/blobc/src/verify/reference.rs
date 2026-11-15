@@ -8,8 +8,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use blobmap_format::NONE;
-use blobmap_format::runtime::Fam;
+use blobmap_model::NONE;
+use blobmap_model::runtime::Fam;
 use rayon::prelude::*;
 
 use crate::build::{ActiveNetwork, CarNetwork, ReadCatalog, ReadNodes, Stage};

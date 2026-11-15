@@ -248,7 +248,7 @@ blobc inspect <model dir>
 - **Determinism:** the same inputs, config and compiler version give byte-identical output, with any thread count. CI checks it.
 - **Time:** no target; up to a week for the world is acceptable.
 - **Cadence:** a full rebuild every month. No incremental build machinery is required.
-- **Code:** two crates: blobmap-format and blobc, traits and composition, no inheritance-style hierarchies. Configs (profiles, place rules) are files, not code.
+- **Code:** two crates: blobmap-model and blobc, traits and composition, no inheritance-style hierarchies. Configs (profiles, place rules) are files, not code.
 
 ## 11. Conformance
 

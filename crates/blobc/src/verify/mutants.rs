@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
-use blobmap_format::INF;
-use blobmap_format::runtime::Faults;
+use blobmap_model::INF;
+use blobmap_model::runtime::Faults;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -92,7 +92,7 @@ fn copy_dir(from: &Path, to: &Path) -> Result<()> {
 /// transport hashes valid so that only the semantic checks can catch it. None when the
 /// tensor is absent or has nothing to break.
 pub fn apply(model: &Path, work: &Path, m: &Mutant) -> Result<Option<PathBuf>> {
-    let index: Value = blobmap_format::json::read_file(&model.join(blobmap_format::INDEX_FILE))?;
+    let index: Value = blobmap_model::json::read_file(&model.join(blobmap_model::INDEX_FILE))?;
     let Some(file) = index["weight_map"][m.tensor].as_str().map(str::to_string) else { return Ok(None) };
     let dir = work.join(m.name.replace(' ', "-"));
     copy_dir(model, &dir)?;
@@ -113,6 +113,6 @@ pub fn apply(model: &Path, work: &Path, m: &Mutant) -> Result<Option<PathBuf>> {
             s["sha256"] = Value::String(hex::encode(Sha256::digest(&bytes)));
         }
     }
-    blobmap_format::json::write_file(&dir.join(blobmap_format::INDEX_FILE), &index)?;
+    blobmap_model::json::write_file(&dir.join(blobmap_model::INDEX_FILE), &index)?;
     Ok(Some(dir))
 }

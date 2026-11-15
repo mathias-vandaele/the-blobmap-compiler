@@ -18,7 +18,7 @@ fn every_scenario_builds() {
                 previous_report: None,
             };
             let r = build(&a).unwrap_or_else(|e| panic!("{} {variant}: {e:#}", s.name));
-            let m = blobmap_format::Model::open(&out).unwrap();
+            let m = blobmap_model::Model::open(&out).unwrap();
             m.verify_shard_hashes().unwrap();
             assert!(a.report_path("data").exists() && a.report_path("build").exists());
             let names: Vec<&str> = m.names().collect();

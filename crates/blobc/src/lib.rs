@@ -1,7 +1,7 @@
 //! The BlobMap world-model compiler (SPEC.md), one module per part of the pipeline, in build
 //! order: `profile`, `osm`, `graph`, `order`, `cch`, `overture`, `snap`, `build`; then
 //! `verify`, the conformance suite (SPEC §11), and `fixtures`, the tiny tier's synthetic
-//! inputs. The bytes of a model are `blobmap_format`'s.
+//! inputs. The bytes of a model are `blobmap_model`'s.
 
 pub mod build;
 pub mod cch;

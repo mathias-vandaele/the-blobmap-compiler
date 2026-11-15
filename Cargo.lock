@@ -216,7 +216,7 @@ dependencies = [
  "anyhow",
  "arrow-array",
  "arrow-schema",
- "blobmap-format",
+ "blobmap-model",
  "clap",
  "deunicode",
  "flate2",
@@ -236,7 +236,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "blobmap-format"
+name = "blobmap-model"
 version = "0.1.0"
 dependencies = [
  "anyhow",

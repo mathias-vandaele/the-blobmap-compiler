@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
-use blobmap_format::NONE;
+use blobmap_model::NONE;
 
 use crate::graph::components::{Csr, Components, scc};
 use crate::graph::round::{Member, round_all};

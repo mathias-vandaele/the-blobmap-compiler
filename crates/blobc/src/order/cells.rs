@@ -12,7 +12,7 @@
 //! is ordered on its own (the top block by the coarse order, which is the separator
 //! hierarchy).
 
-use blobmap_format::NONE;
+use blobmap_model::NONE;
 
 use crate::order::elim::etree;
 use crate::order::{Graph, Orderer, ranks};

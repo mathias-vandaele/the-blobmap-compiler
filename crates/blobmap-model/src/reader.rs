@@ -239,7 +239,7 @@ mod tests {
     use crate::writer::{ModelWriter, ShardLimits};
 
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("blobmap-format-{}-{name}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("blobmap-model-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
     }

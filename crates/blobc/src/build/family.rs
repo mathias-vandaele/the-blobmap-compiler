@@ -3,7 +3,7 @@
 //! families store their arcs by the row of their tail, so packs are written the same way
 //! for both (`road.rs`); only the tensors named here differ.
 
-use blobmap_format::{NONE, Tensor, Unit, sat};
+use blobmap_model::{NONE, Tensor, Unit, sat};
 
 use crate::graph::active::METRICS;
 use crate::graph::{ActiveGraph, CarGraph, Components};

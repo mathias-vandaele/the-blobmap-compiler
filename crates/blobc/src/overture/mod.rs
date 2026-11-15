@@ -10,7 +10,7 @@ pub mod taxonomy;
 use std::collections::BTreeMap;
 
 use anyhow::{Result, bail, ensure};
-use blobmap_format::NONE16;
+use blobmap_model::NONE16;
 use rayon::prelude::*;
 
 use std::path::Path;

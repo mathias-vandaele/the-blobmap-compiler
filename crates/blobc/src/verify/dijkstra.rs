@@ -13,7 +13,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use blobmap_format::{INF, NONE};
+use blobmap_model::{INF, NONE};
 
 use crate::osm::column::Column;
 use crate::snap::parts;
@@ -62,7 +62,7 @@ fn sides(r: &Reference, m: &Mode, e: &Entry) -> Vec<Option<Side>> {
         (0..2)
             .map(|d| {
                 let road = g.road_of_piece[k][d];
-                (road != blobmap_format::NONE64).then(|| {
+                (road != blobmap_model::NONE64).then(|| {
                     let (t, h) = if d == 0 { (p.u[k], p.v[k]) } else { (p.v[k], p.u[k]) };
                     Side { w: g.w[m.metric][road as usize], g: if d == 0 { e.frac } else { 1.0 - e.frac }, tail: t, head: h }
                 })

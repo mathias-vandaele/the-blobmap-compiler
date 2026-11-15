@@ -3,7 +3,7 @@
 //! them are contracted with the top block, last. Layout ids number the top block (or the
 //! whole component) first, then the cells; inside a block, levels top first.
 
-use blobmap_format::{INF, sat};
+use blobmap_model::{INF, sat};
 
 use crate::order::elim::eliminate;
 use crate::order::{Block, Kind};
