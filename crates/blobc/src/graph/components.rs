@@ -3,28 +3,45 @@
 //! trapped: in each group of components joined by roads ignoring direction, the largest is
 //! served and the others are trapped, ties to the smaller component index.
 
-/// A directed graph as CSR; arc positions are u64, as a family's arcs may pass 2^32.
+use std::path::Path;
+
+use anyhow::Result;
+
+use crate::osm::column::{Column, ColumnMut};
+
+/// A directed graph as CSR; arc positions are u64, as a family's arcs may pass 2^32. In
+/// memory, or in files of a work directory (`build`).
 pub struct Csr {
-    pub first: Vec<u64>,
-    pub head: Vec<u32>,
+    pub first: Column<u64>,
+    pub head: Column<u32>,
 }
 
 impl Csr {
     pub fn new(n: usize, arcs: impl Iterator<Item = (u32, u32)> + Clone) -> Csr {
-        let mut first = vec![0u64; n + 1];
+        Csr::build(n, arcs, None).expect("an in-memory CSR")
+    }
+
+    /// The CSR of `arcs` (each node's arcs in their order), its columns in `dir`'s files.
+    pub fn build(n: usize, arcs: impl Iterator<Item = (u32, u32)> + Clone, dir: Option<&Path>) -> Result<Csr> {
+        let mut first = ColumnMut::<u64>::zeroed(dir, "csr_first", n + 1)?;
         for (t, _) in arcs.clone() {
             first[t as usize + 1] += 1;
         }
         for i in 0..n {
             first[i + 1] += first[i];
         }
-        let mut pos = first.clone();
-        let mut head = vec![0u32; first[n] as usize];
+        let mut head = ColumnMut::<u32>::zeroed(dir, "csr_head", first[n] as usize)?;
+        // Each node's start, moved along as its arcs are placed, then shifted back.
         for (t, h) in arcs {
-            head[pos[t as usize] as usize] = h;
-            pos[t as usize] += 1;
+            let p = &mut first[t as usize];
+            head[*p as usize] = h;
+            *p += 1;
         }
-        Csr { first, head }
+        for i in (1..=n).rev() {
+            first[i] = first[i - 1];
+        }
+        first[0] = 0;
+        Ok(Csr { first: first.freeze()?, head: head.freeze()? })
     }
 
     pub fn len(&self) -> usize {
@@ -36,28 +53,48 @@ impl Csr {
     }
 }
 
+/// A directed graph read arc by arc: node v's arcs are `head(v, 0 .. degree(v))`.
+pub trait Adjacency {
+    fn len(&self) -> usize;
+    fn degree(&self, v: usize) -> u64;
+    fn head(&self, v: usize, i: u64) -> u32;
+}
+
+impl Adjacency for Csr {
+    fn len(&self) -> usize {
+        self.first.len() - 1
+    }
+    fn degree(&self, v: usize) -> u64 {
+        self.first[v + 1] - self.first[v]
+    }
+    fn head(&self, v: usize, i: u64) -> u32 {
+        self.head[(self.first[v] + i) as usize]
+    }
+}
+
 /// Strongly connected component per node (iterative Tarjan, ported from the old `graph`).
 /// Component ids are in order of completion.
-pub fn scc(g: &Csr) -> Vec<u32> {
+pub fn scc(g: &impl Adjacency) -> Vec<u32> {
     const NONE: u32 = u32::MAX;
     let n = g.len();
     let (mut index, mut low, mut on_stack, mut comp) = (vec![NONE; n], vec![0u32; n], vec![false; n], vec![NONE; n]);
-    let (mut stack, mut call): (Vec<u32>, Vec<(u32, u64)>) = (Vec::new(), Vec::new());
+    // The DFS: (node, next arc, degree).
+    let (mut stack, mut call): (Vec<u32>, Vec<(u32, u64, u64)>) = (Vec::new(), Vec::new());
     let (mut next_index, mut next_comp) = (0u32, 0u32);
     for root in 0..n as u32 {
         if index[root as usize] != NONE {
             continue;
         }
-        call.push((root, g.first[root as usize]));
+        call.push((root, 0, g.degree(root as usize)));
         index[root as usize] = next_index;
         low[root as usize] = next_index;
         next_index += 1;
         stack.push(root);
         on_stack[root as usize] = true;
-        while let Some(&mut (v, ref mut pos)) = call.last_mut() {
+        while let Some(&mut (v, ref mut pos, deg)) = call.last_mut() {
             let vi = v as usize;
-            if *pos < g.first[vi + 1] {
-                let w = g.head[*pos as usize];
+            if *pos < deg {
+                let w = g.head(vi, *pos);
                 *pos += 1;
                 let wi = w as usize;
                 if index[wi] == NONE {
@@ -66,13 +103,13 @@ pub fn scc(g: &Csr) -> Vec<u32> {
                     next_index += 1;
                     stack.push(w);
                     on_stack[wi] = true;
-                    call.push((w, g.first[wi]));
+                    call.push((w, 0, g.degree(wi)));
                 } else if on_stack[wi] {
                     low[vi] = low[vi].min(index[wi]);
                 }
             } else {
                 call.pop();
-                if let Some(&(p, _)) = call.last() {
+                if let Some(&(p, _, _)) = call.last() {
                     low[p as usize] = low[p as usize].min(low[vi]);
                 }
                 if low[vi] == index[vi] {
@@ -140,15 +177,23 @@ impl Components {
     /// node pairs that a road joins, ignoring direction.
     pub fn new<K: Ord + Copy>(comp: &[u32], key: impl Fn(usize) -> K, joined: impl Iterator<Item = (u32, u32)>) -> Components {
         let k = comp.iter().map(|&c| c as usize + 1).max().unwrap_or(0);
-        let mut size = vec![0u32; k];
         let mut best: Vec<Option<K>> = vec![None; k];
         for (v, &c) in comp.iter().enumerate() {
-            size[c as usize] += 1;
             let kv = key(v);
             let b = &mut best[c as usize];
             if b.is_none_or(|x| kv < x) {
                 *b = Some(kv);
             }
+        }
+        Components::with_best(comp, &best, joined)
+    }
+
+    /// As `new`, given each component's smallest key (`best`, by the ids of `comp`).
+    pub fn with_best<K: Ord + Copy>(comp: &[u32], best: &[Option<K>], joined: impl Iterator<Item = (u32, u32)>) -> Components {
+        let k = best.len();
+        let mut size = vec![0u32; k];
+        for &c in comp {
+            size[c as usize] += 1;
         }
         let mut by: Vec<usize> = (0..k).filter(|&c| size[c] > 0).collect();
         by.sort_by(|&a, &b| size[b].cmp(&size[a]).then_with(|| best[a].cmp(&best[b])));

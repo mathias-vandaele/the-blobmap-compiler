@@ -42,29 +42,21 @@ pub struct Car<'a> {
     pub p: &'a Pieces,
     pub g: &'a CarGraph,
     pub e: Components,
-    /// Copies of each original, as nodes, CSR by node.
-    copy_first: Vec<u32>,
-    copies: Vec<u32>,
+    /// (original, copy) of every copy, sorted.
+    copies: Vec<(u32, u32)>,
 }
 
 impl<'a> Car<'a> {
     pub fn new(p: &'a Pieces, g: &'a CarGraph) -> Car<'a> {
-        Car::with(p, g, g.components())
+        let e = g.components();
+        crate::build::mem::phase("components");
+        Car::with(p, g, e)
     }
 
     /// The family with its components already found (they need the turns, which
     /// `CarGraph::shed` drops).
     pub fn with(p: &'a Pieces, g: &'a CarGraph, e: Components) -> Car<'a> {
-        let mut pairs: Vec<(u32, u32)> = (g.originals..g.len()).map(|c| (g.copy_of[c], c as u32)).collect();
-        pairs.sort_unstable();
-        let mut copy_first = vec![0u32; g.len() + 1];
-        for &(o, _) in &pairs {
-            copy_first[o as usize + 1] += 1;
-        }
-        for i in 0..g.len() {
-            copy_first[i + 1] += copy_first[i];
-        }
-        Car { p, g, e, copy_first, copies: pairs.into_iter().map(|x| x.1).collect() }
+        Car { p, g, e, copies: g.copies() }
     }
 
     pub fn into_components(self) -> Components {
@@ -128,10 +120,12 @@ impl Family for Car<'_> {
         let (mut first, mut copies) = (vec![0u32], Vec::new());
         for &v in rows {
             let v = v as usize;
-            let mut c: Vec<u32> = self.copies[self.copy_first[v] as usize..self.copy_first[v + 1] as usize]
+            let lo = self.copies.partition_point(|x| (x.0 as usize) < v);
+            let mut c: Vec<u32> = self.copies[lo..]
                 .iter()
-                .filter(|&&c| same(v, c as usize))
-                .map(|&c| layout_of[c as usize])
+                .take_while(|x| x.0 as usize == v)
+                .filter(|&&(_, c)| same(v, c as usize))
+                .map(|&(_, c)| layout_of[c as usize])
                 .collect();
             c.sort_unstable();
             copies.extend(c);
@@ -154,29 +148,23 @@ pub struct Active<'a> {
     pub p: &'a Pieces,
     pub g: &'a ActiveGraph,
     pub e: Components,
-    key: Vec<(i64, u32, u8)>,
 }
 
 impl<'a> Active<'a> {
-    pub fn new(p: &'a Pieces, g: &'a ActiveGraph) -> Active<'a> {
-        let e = g.components();
-        let mut key = vec![(i64::MAX, u32::MAX, u8::MAX); g.nodes];
-        for r in 0..g.len() {
-            let k = (g.way[r], g.seq[r], g.dir[r]);
-            for v in [g.tail[r], g.head[r]] {
-                key[v as usize] = key[v as usize].min(k);
-            }
-        }
-        Active { p, g, e, key }
+    /// The family, its components found with their scratch files in `dir`.
+    pub fn new(p: &'a Pieces, g: &'a ActiveGraph, dir: Option<&std::path::Path>) -> anyhow::Result<Active<'a>> {
+        let e = g.components(dir)?;
+        crate::build::mem::phase("components");
+        Ok(Active { p, g, e })
     }
 
-    /// The family's components and road keys, which `ActiveGraph::shed` drops the roads of.
-    pub fn into_parts(self) -> (Components, Vec<(i64, u32, u8)>) {
-        (self.e, self.key)
+    /// The family's components, which `ActiveGraph::shed` drops the roads of.
+    pub fn into_parts(self) -> Components {
+        self.e
     }
 
-    pub fn with(p: &'a Pieces, g: &'a ActiveGraph, (e, key): (Components, Vec<(i64, u32, u8)>)) -> Active<'a> {
-        Active { p, g, e, key }
+    pub fn with(p: &'a Pieces, g: &'a ActiveGraph, e: Components) -> Active<'a> {
+        Active { p, g, e }
     }
 
     /// Whether road r has its ends in different components (FORMAT §5.4).
@@ -230,7 +218,7 @@ impl Family for Active<'_> {
         road_tensors(g, &cross, unit, "road/active/cross");
     }
     fn road_key(&self, v: u32) -> (i64, u32, u8) {
-        self.key[v as usize]
+        self.g.key.of(v as usize)
     }
 }
 

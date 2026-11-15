@@ -32,6 +32,7 @@ unsafe impl Plain for f32 {}
 unsafe impl Plain for f64 {}
 unsafe impl Plain for [f32; 2] {}
 unsafe impl Plain for [f64; 2] {}
+unsafe impl Plain for [f64; 4] {}
 unsafe impl Plain for [u32; 2] {}
 unsafe impl Plain for [u64; 2] {}
 unsafe impl Plain for u16 {}
@@ -207,5 +208,84 @@ impl<T: Plain> ColumnWriter<T> {
                 Column(Inner::Map(Arc::new(m), n))
             }
         })
+    }
+}
+
+/// A column of a known length filled in any order (counting sorts, scatters). Its values
+/// are held in memory while it is written, never in a writable file map: random writes into
+/// a mapped file are written back page by page while they go on, and the page cache's dirty
+/// limits and btrfs's stable pages make each write wait on that. With a work directory,
+/// `freeze` writes the values to its file in one sequential pass and maps it read-only.
+pub struct ColumnMut<T: Plain> {
+    v: Vec<T>,
+    path: Option<PathBuf>,
+}
+
+impl<T: Plain> ColumnMut<T> {
+    /// `n` values of all-zero bytes, frozen into `dir`'s file `name`, or kept in memory
+    /// without a directory.
+    pub fn zeroed(dir: Option<&Path>, name: &str, n: usize) -> Result<ColumnMut<T>> {
+        let path = match dir {
+            None => None,
+            Some(d) => {
+                std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
+                Some(d.join(name))
+            }
+        };
+        // SAFETY: `Plain` values are numbers, arrays of them and bools, for which all-zero
+        // bytes are valid (0, 0.0, false).
+        Ok(ColumnMut { v: vec![unsafe { std::mem::zeroed() }; n], path })
+    }
+
+    /// The values, filled with `fill`.
+    pub fn filled(dir: Option<&Path>, name: &str, n: usize, fill: T) -> Result<ColumnMut<T>> {
+        let mut c = ColumnMut::zeroed(dir, name, n)?;
+        c.fill(fill);
+        Ok(c)
+    }
+
+    /// Read-only: in memory without a directory, or written to its file and mapped, the
+    /// file unlinked as `ColumnWriter::finish` does.
+    pub fn freeze(self) -> Result<Column<T>> {
+        let Some(path) = self.path else { return Ok(Column(Inner::Mem(self.v))) };
+        let mut w = ColumnWriter::File {
+            out: BufWriter::with_capacity(1 << 20, File::create(&path).with_context(|| format!("creating {}", path.display()))?),
+            path,
+            n: 0,
+            _t: PhantomData,
+        };
+        w.push_slice(&self.v)?;
+        drop(self.v);
+        w.finish()
+    }
+}
+
+impl<T: Plain> Deref for ColumnMut<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.v
+    }
+}
+
+impl<T: Plain> std::ops::DerefMut for ColumnMut<T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        &mut self.v
+    }
+}
+
+impl<T: Plain> Column<T> {
+    /// This column followed by `more`: in `dir`'s file `name`, or in memory without one.
+    pub fn append(self, dir: Option<&Path>, name: &str, more: &[T]) -> Result<Column<T>> {
+        if let Inner::Mem(mut v) = self.0 {
+            v.extend_from_slice(more);
+            return Ok(Column(Inner::Mem(v)));
+        }
+        let mut w = ColumnWriter::new(dir, name)?;
+        for c in self.chunks(1 << 20) {
+            w.push_slice(c)?;
+        }
+        drop(self);
+        w.push_slice(more)?;
+        w.finish()
     }
 }

@@ -194,9 +194,7 @@ impl Hierarchy {
 
     /// The link between layout ids a and b (a ≠ b), stored with the larger one.
     pub fn link(&self, a: u32, b: u32) -> Option<u64> {
-        let (lo, hi) = (a.max(b), a.min(b));
-        let r = self.row(lo);
-        self.up_head[r.clone()].binary_search(&hi).ok().map(|i| (r.start + i) as u64)
+        row_link(&self.up_first, &self.up_head, a.max(b), a.min(b))
     }
 
     /// The block holding layout id v.
@@ -231,23 +229,35 @@ impl Hierarchy {
     /// FORMAT §6.3: the triangles of every node, from the last layout id to the first (cells
     /// before the top, bottom levels first), relax the links above them.
     pub fn customize(&self, up: &mut [u16], down: &mut [u16]) {
-        for v in (0..self.len() as u32).rev() {
-            let r = self.row(v);
-            for i in 1..r.len() {
-                let (a, x) = (r.start + i, self.up_head[r.start + i]);
-                for j in 0..i {
-                    let (b, y) = (r.start + j, self.up_head[r.start + j]);
-                    let t = self.link(x, y).expect("chordal") as usize;
-                    up[t] = up[t].min(sat(down[a], up[b]));
-                    down[t] = down[t].min(sat(down[b], up[a]));
-                }
-            }
-        }
+        customize_rows(&self.up_first, &self.up_head, up, down);
     }
 
     /// Fresh link weights: `INF` in both directions.
     pub fn unset(&self) -> (Vec<u16>, Vec<u16>) {
         (vec![INF; self.up_head.len()], vec![INF; self.up_head.len()])
+    }
+}
+
+/// The link of row `lo` up to `hi` in rows given as CSR (`first`, `head`, each row ascending).
+pub fn row_link(first: &[u64], head: &[u32], lo: u32, hi: u32) -> Option<u64> {
+    let r = first[lo as usize] as usize..first[lo as usize + 1] as usize;
+    head[r.clone()].binary_search(&hi).ok().map(|i| (r.start + i) as u64)
+}
+
+/// FORMAT §6.3 over rows given as CSR: the triangles of every row, from the last to the first,
+/// relax the links above them.
+pub fn customize_rows(first: &[u64], head: &[u32], up: &mut [u16], down: &mut [u16]) {
+    for v in (0..first.len() - 1).rev() {
+        let r = first[v] as usize..first[v + 1] as usize;
+        for i in 1..r.len() {
+            let (a, x) = (r.start + i, head[r.start + i]);
+            for j in 0..i {
+                let (b, y) = (r.start + j, head[r.start + j]);
+                let t = row_link(first, head, x.max(y), x.min(y)).expect("chordal") as usize;
+                up[t] = up[t].min(sat(down[a], up[b]));
+                down[t] = down[t].min(sat(down[b], up[a]));
+            }
+        }
     }
 }
 

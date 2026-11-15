@@ -97,14 +97,14 @@ mod tests {
         let car_net = crate::osm::Network::read(&osm, &osm.car_obstacles, &CarProfile::new(&cfg.car.config), &cfg.car.config.snap, None).unwrap();
         let cp = car_net.pieces(&[|a: &WayAttrs| *a]).unwrap();
         let (r, _) = osm.restrictions().unwrap();
-        let cg = CarGraph::build(&cp, &cfg.car.config.turns, &r);
+        let cg = CarGraph::build(&cp, &cfg.car.config.turns, &r, None).unwrap();
         let ce = cg.components();
         let prof = ActiveProfile::new(&cfg.active.config);
         let act_net = crate::osm::Network::read(&osm, &osm.active_obstacles, &prof, &cfg.active.config.snap, None).unwrap();
         let modes: Vec<ActiveMode> = [Mode::Bike, Mode::Walk].map(|mode| ActiveMode { mode, cfg: prof.cfg }).to_vec();
         let ap = act_net.pieces(&modes).unwrap();
-        let ag = ActiveGraph::build(&ap);
-        let ae = ag.components();
+        let ag = ActiveGraph::build(&ap, None).unwrap();
+        let ae = ag.components(None).unwrap();
         let (cgrid, agrid) = (Grid::new(&cp), Grid::new(&ap));
         let car = Membership::car(&cp, &cg, &ce);
         let bike = Membership::active(&ap, &ag, &ae, 0);

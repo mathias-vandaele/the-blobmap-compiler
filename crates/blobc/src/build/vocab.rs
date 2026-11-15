@@ -59,6 +59,7 @@ pub fn membership(f: &Families, mode: &str) -> Membership {
 pub fn snap(f: &Families, n: usize, point: &(dyn Fn(usize) -> (f64, f64) + Sync), dir: Option<&Path>) -> Result<Vec<ModeSnap>> {
     let (car, act) = (f.car, f.active);
     let order = spatial_order(n, point)?;
+    crate::build::mem::phase("spatial order");
     // One family's grid at a time: the modes of a family are consecutive.
     let mut grid: Option<(bool, Grid)> = None;
     let mut sorted: Vec<(&str, Column<Snapped>)> = Vec::new();
@@ -77,6 +78,7 @@ pub fn snap(f: &Families, n: usize, point: &(dyn Fn(usize) -> (f64, f64) + Sync)
             grid = Some((is_car, Grid::new_in(p, dir)?));
             // What building it freed goes back to the system (SPEC §10, memory).
             crate::build::mem::trim();
+            crate::build::mem::phase(if is_car { "car grid" } else { "active grid" });
         }
         let grid = &grid.as_ref().unwrap().1;
         let trapped = |k: usize| -> Option<u32> {
@@ -103,6 +105,7 @@ pub fn snap(f: &Families, n: usize, point: &(dyn Fn(usize) -> (f64, f64) + Sync)
             at.push_slice(&done)?;
         }
         sorted.push((mode, at.finish()?));
+        crate::build::mem::phase(mode);
     }
     // The grid's columns, unlinked when mapped, leave the disk with it.
     drop(grid);

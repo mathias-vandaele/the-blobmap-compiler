@@ -1,12 +1,11 @@
 //! `blobc build` (SPEC §10): the stages from the inputs to a model directory, behind a
 //! `Stage` trait so each stage's wall time and peak RSS land in the build report.
 
+pub mod blocks;
 pub mod family;
 pub mod hier;
-pub mod layout;
 pub mod mem;
 pub mod report;
-pub mod road;
 pub mod vocab;
 
 use std::collections::BTreeMap;
@@ -22,8 +21,7 @@ use serde_json::json;
 use sha2::Digest;
 
 use crate::build::family::{Active, Car, Family};
-use crate::build::hier::{Built, FixedRanks};
-use crate::build::layout::Layout;
+use crate::build::hier::FixedRanks;
 use crate::build::vocab::{Families, Ids, ModeSnap};
 use crate::graph::{ActiveGraph, CarGraph};
 use crate::osm::{Network, Osm, Pieces};
@@ -86,6 +84,9 @@ pub struct StageReport {
     pub name: &'static str,
     pub wall_s: f64,
     pub peak_rss_bytes: Option<u64>,
+    /// Sampled peak of anonymous memory (`mem::stage_end`), and the stage's phases.
+    pub peak_anon_bytes: u64,
+    pub phases: Vec<mem::Phase>,
 }
 
 /// Runs stages and records their wall time and peak RSS.
@@ -96,14 +97,23 @@ pub struct Runner {
 
 impl Runner {
     pub fn run<I, S: Stage<I>>(&mut self, s: &S, input: I) -> Result<S::Output> {
+        mem::start_sampler();
         mem::reset_peak();
+        mem::stage_start();
         let t = Instant::now();
         let out = s.run(input).with_context(|| format!("stage {}", s.name()))?;
         mem::trim();
-        let r = StageReport { name: s.name(), wall_s: t.elapsed().as_secs_f64(), peak_rss_bytes: mem::peak_rss() };
+        let (peak_anon_bytes, phases) = mem::stage_end();
+        let r = StageReport { name: s.name(), wall_s: t.elapsed().as_secs_f64(), peak_rss_bytes: mem::peak_rss(), peak_anon_bytes, phases };
         // As each stage ends, so a long build shows where it is.
         let (rss, anon) = (mem::rss().unwrap_or(0) >> 20, mem::anon().unwrap_or(0) >> 20);
-        eprintln!("{:>18} {:>9.3} s  peak {:>6} MiB  after {rss:>6} MiB, anon {anon:>6} MiB", r.name, r.wall_s, r.peak_rss_bytes.unwrap_or(0) >> 20);
+        eprintln!(
+            "{:>18} {:>9.3} s  peak {:>6} MiB  after {rss:>6} MiB, anon {anon:>6} MiB, peak anon {:>6} MiB",
+            r.name,
+            r.wall_s,
+            r.peak_rss_bytes.unwrap_or(0) >> 20,
+            r.peak_anon_bytes >> 20
+        );
         self.stages.push(r);
         Ok(out)
     }
@@ -223,12 +233,17 @@ impl Stage<(&Osm, &Config)> for CarNetwork {
     }
     fn run(&self, (osm, c): (&Osm, &Config)) -> Result<(Pieces, CarGraph)> {
         let net = Network::read(osm, &osm.car_obstacles, &CarProfile::new(&c.car.config), &c.car.config.snap, Some(&osm.dir().join("car")))?;
+        mem::phase("ways");
         let p = net.pieces(&[|a: &WayAttrs| *a])?;
         drop(net);
+        mem::phase("pieces");
         let (r, _) = osm.restrictions()?;
-        let mut g = CarGraph::build(&p, &c.car.config.turns, &r);
-        // The graph's arrays on disk, like the pieces' (SPEC §10, memory).
-        g.spill(&osm.dir().join("car-graph"))?;
+        mem::phase("restrictions");
+        // The graph's arrays on disk as they are made, like the pieces' (SPEC §10, memory).
+        let dir = osm.dir().join("car-graph");
+        let mut g = CarGraph::build(&p, &c.car.config.turns, &r, Some(&dir))?;
+        g.spill(&dir)?;
+        mem::phase("spill");
         Ok((p, g))
     }
 }
@@ -243,12 +258,43 @@ impl Stage<(&Osm, &Config)> for ActiveNetwork {
     fn run(&self, (osm, c): (&Osm, &Config)) -> Result<(Pieces, ActiveGraph)> {
         let prof = ActiveProfile::new(&c.active.config);
         let net = Network::read(osm, &osm.active_obstacles, &prof, &c.active.config.snap, Some(&osm.dir().join("active")))?;
+        mem::phase("ways");
         let modes: Vec<ActiveMode> = [Mode::Bike, Mode::Walk].map(|mode| ActiveMode { mode, cfg: prof.cfg }).to_vec();
         let p = net.pieces(&modes)?;
         drop(net);
-        let mut g = ActiveGraph::build(&p);
-        g.spill(&osm.dir().join("active-graph"))?;
+        mem::phase("pieces");
+        let dir = osm.dir().join("active-graph");
+        let mut g = ActiveGraph::build(&p, Some(&dir))?;
+        mem::phase("graph");
+        g.spill(&dir)?;
+        mem::phase("spill");
         Ok((p, g))
+    }
+}
+
+/// The CAR family: the components of its turn graph (SPEC §5).
+pub struct CarComponents;
+
+impl<'a> Stage<(&'a Pieces, &'a CarGraph)> for CarComponents {
+    type Output = Car<'a>;
+    fn name(&self) -> &'static str {
+        "car-components"
+    }
+    fn run(&self, (p, g): (&'a Pieces, &'a CarGraph)) -> Result<Car<'a>> {
+        Ok(Car::new(p, g))
+    }
+}
+
+/// The ACTIVE family: the components of its union graph (SPEC §5).
+pub struct ActiveComponents(pub PathBuf);
+
+impl<'a> Stage<(&'a Pieces, &'a ActiveGraph)> for ActiveComponents {
+    type Output = Active<'a>;
+    fn name(&self) -> &'static str {
+        "active-components"
+    }
+    fn run(&self, (p, g): (&'a Pieces, &'a ActiveGraph)) -> Result<Active<'a>> {
+        Active::new(p, g, Some(&self.0))
     }
 }
 
@@ -269,18 +315,30 @@ impl Stage<(&dyn Family, &Config, Option<&FixedRanks>)> for Orders {
     }
 }
 
-/// The family's hierarchy, one component at a time, then its packs.
-pub struct Hierarchies(pub &'static str);
+/// The family's hierarchy, built and written block by block (`blocks`): its packs in pack
+/// slots from `slots.1`, its tables in `slots.0` (FORMAT §2.4 puts every family's tables before
+/// the packs).
+pub struct Hierarchies {
+    pub name: &'static str,
+    pub slots: (u64, u64),
+    /// Whether the vocabulary needs the arcs' local indices (ACTIVE, FORMAT §7.2).
+    pub arc_local: bool,
+    pub dir: PathBuf,
+}
 
-impl Stage<(&dyn Family, &Config, hier::Ordered)> for Hierarchies {
-    type Output = (Built, Layout);
+/// The components of a family built as cells are built a few cells at a time: at most this
+/// many cells' budgets of nodes at once (`memory_budget_bytes`).
+pub const CELLS_IN_FLIGHT: usize = 4;
+
+impl Stage<(&dyn Family, &Config, hier::Ordered, &mut ModelWriter)> for Hierarchies {
+    type Output = RoadOut;
     fn name(&self) -> &'static str {
-        self.0
+        self.name
     }
-    fn run(&self, (f, c, o): (&dyn Family, &Config, hier::Ordered)) -> Result<(Built, Layout)> {
-        let b = hier::build(f, o)?;
-        let l = layout::plan(f, &b, c.build.build.pack_max_nodes)?;
-        Ok((b, l))
+    fn run(&self, (f, c, o, writer): (&dyn Family, &Config, hier::Ordered, &mut ModelWriter)) -> Result<RoadOut> {
+        let b = c.build.build;
+        let max_cell = (b.memory_budget_bytes / hier::BYTES_PER_NODE).max(1) as usize;
+        blocks::write(f, o, b.pack_max_nodes, CELLS_IN_FLIGHT * max_cell, writer, self.slots, self.arc_local, &self.dir)
     }
 }
 
@@ -334,85 +392,9 @@ impl Stage<(&Osm, Option<&Path>)> for ReadIslands {
     }
 }
 
-/// The largest pack of a family (FORMAT §4 limits), for the build report.
-#[derive(Clone, Debug, Default)]
-pub struct PackSize {
-    pub pack: u32,
-    pub rows: u64,
-    pub links: u64,
-    pub arcs: u64,
-}
-
-/// A family's road units, written (FORMAT §2.4): what the vocabulary, the manifest and the
-/// reports need of its hierarchy, which is then dropped.
-pub struct RoadOut {
-    /// Each node's layout id.
-    pub layout_of: Vec<u32>,
-    /// Each arc's index among its row's arcs (FORMAT §5.4), if the vocabulary needs it.
-    pub arc_local: Vec<u32>,
-    /// Each road tensor's hash, by full name (FORMAT §9).
-    pub hashes: BTreeMap<String, Hash>,
-    pub largest: PackSize,
-    pub links: u64,
-    pub components: u64,
-    pub packs: u64,
-    /// The bytes of its shard files, tables and packs.
-    pub bytes: u64,
-    /// The largest component and every component built as cells: its links, its sweep layers
-    /// (FORMAT's level count) and its elimination tree's height (SPEC §13, milestone 4).
-    pub hierarchies: Vec<serde_json::Value>,
-}
-
-/// A family's road units, written as soon as its hierarchy is built so that the hierarchy is
-/// dropped before the next family's: its tables in slot `slots.0`, its packs in `slots.1`
-/// (FORMAT §2.4 puts every family's tables before the packs).
-pub struct WriteRoad {
-    pub name: &'static str,
-    pub slots: (u32, u32),
-    /// Whether the vocabulary needs the arcs' local indices (ACTIVE, FORMAT §7.2).
-    pub arc_local: bool,
-}
-
-impl Stage<(&dyn Family, Built, Layout, &mut ModelWriter)> for WriteRoad {
-    type Output = RoadOut;
-    fn name(&self) -> &'static str {
-        self.name
-    }
-    fn run(&self, (fam, b, l, writer): (&dyn Family, Built, Layout, &mut ModelWriter)) -> Result<RoadOut> {
-        let mut hashes = BTreeMap::new();
-        writer.set_slot(self.slots.0)?;
-        let t = writer.write_unit(road::tables(fam, &b, &l))?;
-        let mut bytes = t.bytes;
-        hashes.extend(t.hashes);
-        writer.set_slot(self.slots.1)?;
-        let mut largest = PackSize::default();
-        for k in 0..l.packs.len() {
-            let pk = &l.packs[k];
-            let size = PackSize { pack: k as u32, rows: pk.rows.len() as u64, links: pk.links, arcs: pk.arcs.len() as u64 };
-            if (size.rows, size.links) > (largest.rows, largest.links) {
-                largest = size;
-            }
-            let w = writer.write_unit(road::pack(fam, &b, &l, k))?;
-            bytes += w.bytes;
-            hashes.extend(w.hashes);
-        }
-        let hierarchies = b
-            .components
-            .iter()
-            .enumerate()
-            .filter(|(x, e)| *x == 0 || e.h.cells() > 0)
-            .map(|(x, e)| {
-                json!({
-                    "family": fam.name(), "component": x, "nodes": e.h.len(), "links": e.h.links(), "cells": e.h.cells(),
-                    "sweep_layers": e.h.levels(), "tree_levels": e.h.tree_levels(),
-                })
-            })
-            .collect();
-        let (links, components, packs) = (b.components.iter().map(|x| x.h.links()).sum(), b.components.len() as u64, l.packs.len() as u64);
-        let arc_local = if self.arc_local { l.arc_local } else { Vec::new() };
-        Ok(RoadOut { layout_of: b.layout_of, arc_local, hashes, largest, links, components, packs, bytes, hierarchies })
-    }
-}
+/// A family's road units, written: what the vocabulary, the manifest and the reports need of
+/// its hierarchy.
+pub type RoadOut = blocks::Written;
 
 pub struct WriteInput<'a> {
     pub args: &'a Args,
@@ -448,8 +430,9 @@ impl Stage<WriteInput<'_>> for WriteModel {
         let f = w.families;
         let fams: [(&dyn Family, &RoadOut); 2] = [(f.car, f.car_road), (f.active, f.active_road)];
         let road_hash = of_hashes(ROAD_TAG, f.car_road.hashes.iter().chain(&f.active_road.hashes).collect::<BTreeMap<_, _>>().into_values());
-        writer.set_slot(4)?;
+        writer.set_slot(4 << 32)?;
         let (vw, served) = vocab::write(f, w.catalog, w.snaps, w.ids, &road_hash.0, &mut writer)?;
+        mem::phase("vocabulary");
         let mut vh = Hasher::tagged(VOCAB_TAG);
         for (name, h) in &vw.hashes {
             if name != "vocab/road_hash" {
@@ -577,6 +560,42 @@ fn fixed_ranks(p: &Pieces, osm: &[i64]) -> Result<Option<FixedRanks>> {
     Ok(Some(rank))
 }
 
+/// The quantities a stage's memory scales with.
+pub struct Units {
+    pub pbf_bytes: u64,
+    pub catalog_records: u64,
+    pub car_nodes: u64,
+    pub car_largest: u64,
+    pub active_nodes: u64,
+    pub active_largest: u64,
+    pub ids: u64,
+}
+
+/// Each stage's sampled peak of anonymous memory against what it scales with (SPEC §10,
+/// memory), so that a larger input's peak can be estimated from a smaller one's: the input
+/// stages by the `.pbf` or the catalog, a family's network and components by its nodes, its
+/// order and hierarchy by its largest component, the snap and the vocabulary by the IDs.
+pub fn memory_model(stages: &[StageReport], u: &Units) -> Vec<serde_json::Value> {
+    stages
+        .iter()
+        .map(|s| {
+            let (basis, units) = match s.name {
+                "inputs" | "nodes" | "islands" => ("pbf_bytes", u.pbf_bytes),
+                "catalog" => ("catalog_records", u.catalog_records),
+                "car-network" | "car-components" => ("car_nodes", u.car_nodes),
+                "car-order" | "car-hierarchy" => ("car_largest_component_nodes", u.car_largest),
+                "active-network" | "active-components" => ("active_nodes", u.active_nodes),
+                "active-order" | "active-hierarchy" => ("active_largest_component_nodes", u.active_largest),
+                _ => ("ids", u.ids),
+            };
+            json!({
+                "stage": s.name, "peak_anon_bytes": s.peak_anon_bytes, "basis": basis, "units": units,
+                "bytes_per_unit": s.peak_anon_bytes as f64 / units.max(1) as f64,
+            })
+        })
+        .collect()
+}
+
 /// What a build returns besides the files it writes.
 pub struct BuildResult {
     pub manifest: Manifest,
@@ -599,10 +618,12 @@ pub fn build(a: &Args) -> Result<BuildResult> {
     // Each family is written as soon as its hierarchy is built, then keeps only what the
     // vocabulary and the reports read (SPEC §10, memory). Slots: FORMAT §2.4's unit order.
     let (cp, mut cg) = run.run(&CarNetwork, (&osm, c))?;
-    let car = Car::new(&cp, &cg);
+    let car = run.run(&CarComponents, (&cp, &cg))?;
     let co = run.run(&Orders("car-order", osm.dir().join("car-split")), (&car as &dyn Family, c, None))?;
-    let (cb, cl) = run.run(&Hierarchies("car-hierarchy"), (&car as &dyn Family, c, co))?;
-    let car_road = run.run(&WriteRoad { name: "car-write", slots: (0, 2), arc_local: false }, (&car as &dyn Family, cb, cl, &mut writer))?;
+    let car_road = run.run(
+        &Hierarchies { name: "car-hierarchy", slots: (0, 2 << 32), arc_local: false, dir: osm.dir().join("car-blocks") },
+        (&car as &dyn Family, c, co, &mut writer),
+    )?;
     let ce = car.into_components();
     cg.shed();
     let car = Car::with(&cp, &cg, ce);
@@ -612,11 +633,13 @@ pub fn build(a: &Args) -> Result<BuildResult> {
     // model (on the planet, over 100 GB).
     let dir = osm.dir().to_path_buf();
     drop(osm);
-    let act = Active::new(&ap, &ag);
+    let act = run.run(&ActiveComponents(dir.join("active-components")), (&ap, &ag))?;
     let fixed = fixed_ranks(&ap, &c.build.order.active)?;
     let ao = run.run(&Orders("active-order", dir.join("active-split")), (&act as &dyn Family, c, fixed.as_ref()))?;
-    let (ab, al) = run.run(&Hierarchies("active-hierarchy"), (&act as &dyn Family, c, ao))?;
-    let active_road = run.run(&WriteRoad { name: "active-write", slots: (1, 3), arc_local: true }, (&act as &dyn Family, ab, al, &mut writer))?;
+    let active_road = run.run(
+        &Hierarchies { name: "active-hierarchy", slots: (1, 3 << 32), arc_local: true, dir: dir.join("active-blocks") },
+        (&act as &dyn Family, c, ao, &mut writer),
+    )?;
     drop(fixed);
     let parts = act.into_parts();
     ag.shed();
@@ -663,7 +686,10 @@ pub fn build(a: &Args) -> Result<BuildResult> {
         .collect();
     let build = json!({
         "model_id": wo.manifest.model_id,
-        "stages": run.stages.iter().map(|s| json!({"name": s.name, "wall_s": s.wall_s, "peak_rss_bytes": s.peak_rss_bytes})).collect::<Vec<_>>(),
+        "stages": run.stages.iter().map(|s| json!({
+            "name": s.name, "wall_s": s.wall_s, "peak_rss_bytes": s.peak_rss_bytes, "peak_anon_bytes": s.peak_anon_bytes,
+            "phases": s.phases.iter().map(|p| json!({"name": p.name, "wall_s": p.wall_s, "peak_anon_bytes": p.peak_anon_bytes, "anon_bytes": p.anon_bytes})).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
         "wall_s": t0.elapsed().as_secs_f64(),
         "peak_rss_bytes": run.stages.iter().filter_map(|s| s.peak_rss_bytes).max(),
         "largest_pack": largest,
@@ -672,6 +698,15 @@ pub fn build(a: &Args) -> Result<BuildResult> {
         "shard_bytes": wo.shard_bytes,
         "shards": wo.shards,
         // Layout ids per family against their U32 bound (FORMAT §4).
+        "memory": memory_model(&run.stages, &Units {
+            pbf_bytes: inputs.manifest.pbf.bytes,
+            catalog_records: (catalog.addresses.len() + catalog.places.len()) as u64,
+            car_nodes: car.nodes() as u64,
+            car_largest: car.components().nodes.first().copied().unwrap_or(0) as u64,
+            active_nodes: act.nodes() as u64,
+            active_largest: act.components().nodes.first().copied().unwrap_or(0) as u64,
+            ids,
+        }),
         "layout_ids": wo.manifest.families.iter().map(|(f, x)| (f.clone(), json!({"nodes": x.nodes, "bound": NONE as u64}))).collect::<serde_json::Map<_, _>>(),
     });
     blobmap_model::json::write_file(&a.report_path("build"), &build)?;

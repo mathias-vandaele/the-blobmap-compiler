@@ -59,6 +59,7 @@ pub(crate) fn refined(g: &Graph, fine: &Adj, cluster: &[u32], orderer: &dyn Orde
     };
     let tree = d.dissect((0..g.n as u32).collect());
     drop(d);
+    crate::build::mem::phase("dissected");
     let (mut top, mut leaves) = (Vec::new(), Vec::new());
     walk(tree, &mut top, &mut leaves);
     let mut packs: Vec<Vec<u32>> = Vec::new();
@@ -76,6 +77,7 @@ pub(crate) fn refined(g: &Graph, fine: &Adj, cluster: &[u32], orderer: &dyn Orde
         p.sort_unstable();
         out.push(Block { kind: Kind::Cell, nodes: order_induced(g, fine, &p, orderer) });
     }
+    crate::build::mem::phase("cells ordered");
     out
 }
 

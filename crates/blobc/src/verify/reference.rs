@@ -227,7 +227,7 @@ fn network(osm: &Osm, config: &Config, fam: Fam) -> Result<Net> {
 
 fn snapping(net: Net, config: &Config, points: &[[f64; 2]], dir: &Path) -> Result<Snapping> {
     let Net { car, pieces, cg, ag } = net;
-    let components = if car { cg.components() } else { ag.components() };
+    let components = if car { cg.components() } else { ag.components(Some(&dir.join("active-components")))? };
     let modes: Vec<(&'static str, usize, Membership, f64, u32)> = if car {
         let s = &config.car.config.snap;
         vec![("car", 0, Membership::car(&pieces, &cg, &components), s.radius_m as f64, s.small_component_max_nodes)]

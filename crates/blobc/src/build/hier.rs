@@ -1,6 +1,6 @@
-//! The family's hierarchy (SPEC §5), built one component at a time: each component's induced
-//! graph, its plan (whole or cells), contraction, link initialisation (FORMAT §6.2) and
-//! customization (§6.3). Each component is one tree of the family's elimination forest.
+//! The family's order (SPEC §5): the family split by component, and each component's plan
+//! (whole or cells). `blocks` contracts, customizes and writes them; each component is one
+//! tree of the family's elimination forest.
 
 use std::path::Path;
 
@@ -9,8 +9,7 @@ use blobmap_model::NONE;
 use rayon::prelude::*;
 
 use crate::build::family::Family;
-use crate::cch::Hierarchy;
-use crate::osm::column::Column;
+use crate::osm::column::{Column, ColumnMut};
 use crate::order::{Block, Fixed, Graph, InertialFlow, Orderer, plan};
 
 /// The memory budget per node of a cell under construction (SPEC §5): a cell has at most
@@ -23,35 +22,6 @@ pub const BYTES_PER_NODE: u64 = 1024;
 /// into cells from its own order, a larger one from a coarsened graph (SPEC §5).
 pub const ND_BYTES_PER_NODE: u64 = 535;
 
-pub struct ComponentBuilt {
-    /// The component's nodes, ascending; a node's position here is its index in `h`.
-    pub nodes: Vec<u32>,
-    pub h: Hierarchy,
-    /// Per metric, the link weights.
-    pub up: Vec<Vec<u16>>,
-    pub down: Vec<Vec<u16>>,
-}
-
-impl ComponentBuilt {
-    /// The node at layout id l.
-    pub fn node(&self, l: u32) -> u32 {
-        self.nodes[self.h.node_of[l as usize] as usize]
-    }
-}
-
-pub struct Built {
-    pub components: Vec<ComponentBuilt>,
-    /// The family's layout id of each component's local id 0: components are consecutive
-    /// ranges of layout ids, in index order (FORMAT §4).
-    pub first: Vec<u32>,
-    /// Each node's layout id in the family.
-    pub layout_of: Vec<u32>,
-    /// The arcs inside one component, CSR by tail node (`arc_count` order inside a node). Arc
-    /// indices are the family's, u64: a family's turns or roads may pass 2^32.
-    pub out_first: Column<u64>,
-    pub out: Column<u64>,
-}
-
 /// A node order fixed by the config (FORMAT: `build.toml [order]`): each node's rank, or
 /// `NONE` if the list does not name it.
 pub type FixedRanks = Vec<u32>;
@@ -61,88 +31,98 @@ pub type FixedRanks = Vec<u32>;
 pub struct Split {
     /// The nodes of component x, ascending, are `members[first[x] .. first[x + 1]]`.
     members: Column<u32>,
-    first: Vec<usize>,
+    pub(crate) first: Vec<usize>,
     /// A node's position among its component's nodes.
     local_of: Column<u32>,
     /// The arcs inside component x are `by_component[arc_first[x] .. arc_first[x + 1]]`.
     by_component: Column<u64>,
     arc_first: Vec<usize>,
     /// The arcs inside one component, CSR by tail node.
-    out_first: Column<u64>,
-    out: Column<u64>,
+    pub(crate) out_first: Column<u64>,
+    pub(crate) out: Column<u64>,
 }
 
 impl Split {
+    /// Counting sorts into columns of `dir`: memory holds two words per component.
     fn new(f: &dyn Family, dir: &Path) -> Result<Split> {
         let e = f.components();
-        let n = f.nodes();
-        let mut members: Vec<(u32, u32)> = (0..n as u32).map(|v| (e.of[v as usize], v)).collect();
-        members.sort_unstable();
-        let mut first = vec![0usize; e.len() + 1];
-        for &(x, _) in &members {
+        let (n, k) = (f.nodes(), e.len());
+        let d = Some(dir);
+        // Nodes by component, ascending inside one; a node's position there.
+        let mut first = vec![0usize; k + 1];
+        for &x in &e.of {
             first[x as usize + 1] += 1;
         }
-        for i in 0..e.len() {
+        for i in 0..k {
             first[i + 1] += first[i];
         }
-        let members: Vec<u32> = members.into_iter().map(|m| m.1).collect();
-        let mut local_of = vec![0u32; n];
-        for x in 0..e.len() {
-            for (i, &v) in members[first[x]..first[x + 1]].iter().enumerate() {
-                local_of[v as usize] = i as u32;
+        let (mut members, mut local_of) = (ColumnMut::<u32>::zeroed(d, "members", n)?, ColumnMut::<u32>::zeroed(d, "local_of", n)?);
+        let mut at = first.clone();
+        for v in 0..n {
+            let x = e.of[v] as usize;
+            members[at[x]] = v as u32;
+            local_of[v] = (at[x] - first[x]) as u32;
+            at[x] += 1;
+        }
+        // Arcs inside one component, by component (ascending inside one) and by tail.
+        let inside = |a: usize| {
+            let (t, h) = f.arc(a);
+            (e.of[t as usize] == e.of[h as usize]).then_some((t, e.of[t as usize] as usize))
+        };
+        let mut arc_first = vec![0usize; k + 1];
+        let mut out_first = ColumnMut::<u64>::zeroed(d, "out_first", n + 1)?;
+        for a in 0..f.arc_count() {
+            if let Some((t, x)) = inside(a) {
+                arc_first[x + 1] += 1;
+                out_first[t as usize + 1] += 1;
             }
         }
-        // Arcs inside one component, by component and by tail.
-        let inner: Vec<u64> = (0..f.arc_count() as u64)
-            .filter(|&a| {
-                let (t, h) = f.arc(a as usize);
-                e.of[t as usize] == e.of[h as usize]
-            })
-            .collect();
-        let mut by_component: Vec<(u32, u64)> = inner.iter().map(|&a| (e.of[f.arc(a as usize).0 as usize], a)).collect();
-        by_component.sort_unstable();
-        let mut arc_first = vec![0usize; e.len() + 1];
-        for &(x, _) in &by_component {
-            arc_first[x as usize + 1] += 1;
-        }
-        for i in 0..e.len() {
+        for i in 0..k {
             arc_first[i + 1] += arc_first[i];
-        }
-        let by_component: Vec<u64> = by_component.into_iter().map(|x| x.1).collect();
-        let mut out_first = vec![0u64; n + 1];
-        for &a in &inner {
-            out_first[f.arc(a as usize).0 as usize + 1] += 1;
         }
         for i in 0..n {
             out_first[i + 1] += out_first[i];
         }
-        let mut fill = out_first.clone();
-        let mut out = vec![0u64; inner.len()];
-        for &a in &inner {
-            let t = f.arc(a as usize).0 as usize;
-            out[fill[t] as usize] = a;
-            fill[t] += 1;
+        let m = arc_first[k];
+        let (mut by_component, mut out) = (ColumnMut::<u64>::zeroed(d, "by_component", m)?, ColumnMut::<u64>::zeroed(d, "out", m)?);
+        // Each start moved along as its arcs are placed, then shifted back.
+        at.copy_from_slice(&arc_first);
+        for a in 0..f.arc_count() {
+            if let Some((t, x)) = inside(a) {
+                by_component[at[x]] = a as u64;
+                at[x] += 1;
+                let p = &mut out_first[t as usize];
+                out[*p as usize] = a as u64;
+                *p += 1;
+            }
         }
-        fn col<T: crate::osm::column::Plain>(v: Vec<T>, dir: &Path, name: &str) -> Result<Column<T>> {
-            let mut c = Column::from(v);
-            c.spill(Some(dir), name)?;
-            Ok(c)
+        drop(at);
+        for i in (1..=n).rev() {
+            out_first[i] = out_first[i - 1];
         }
-        let (members, local_of, by_component) = (col(members, dir, "members")?, col(local_of, dir, "local_of")?, col(by_component, dir, "by_component")?);
-        Ok(Split { members, first, local_of, by_component, arc_first, out_first: col(out_first, dir, "out_first")?, out: col(out, dir, "out")? })
+        out_first[0] = 0;
+        Ok(Split {
+            members: members.freeze()?,
+            first,
+            local_of: local_of.freeze()?,
+            by_component: by_component.freeze()?,
+            arc_first,
+            out_first: out_first.freeze()?,
+            out: out.freeze()?,
+        })
     }
 
     /// Component x: its nodes and its arcs.
-    fn component(&self, x: usize) -> (Vec<u32>, &[u64]) {
+    pub(crate) fn component(&self, x: usize) -> (Vec<u32>, &[u64]) {
         (self.members[self.first[x]..self.first[x + 1]].to_vec(), &self.by_component[self.arc_first[x]..self.arc_first[x + 1]])
     }
 
     /// Arcs as local node pairs without loops.
-    fn edges<'a>(&'a self, f: &'a dyn Family, arcs: &'a [u64]) -> impl Iterator<Item = (u32, u32)> + 'a {
+    pub(crate) fn edges<'a>(&'a self, f: &'a dyn Family, arcs: &'a [u64]) -> impl Iterator<Item = (u32, u32)> + 'a {
         arcs.iter().map(move |&a| self.local(f, a)).filter(|(t, h)| t != h)
     }
 
-    fn local(&self, f: &dyn Family, a: u64) -> (u32, u32) {
+    pub(crate) fn local(&self, f: &dyn Family, a: u64) -> (u32, u32) {
         let (t, h) = f.arc(a as usize);
         (self.local_of[t as usize], self.local_of[h as usize])
     }
@@ -150,8 +130,8 @@ impl Split {
 
 /// Every component's blocks (SPEC §5), in their contraction order.
 pub struct Ordered {
-    split: Split,
-    plans: Vec<Vec<Block>>,
+    pub(crate) split: Split,
+    pub(crate) plans: Vec<Vec<Block>>,
 }
 
 /// Orders every component: in one piece if it has at most `max_cell` nodes, else as cells, cut
@@ -159,6 +139,7 @@ pub struct Ordered {
 /// is kept in columns under `dir`.
 pub fn order(f: &dyn Family, max_cell: usize, nd_max: usize, fixed: Option<&FixedRanks>, dir: &Path) -> Result<Ordered> {
     let split = Split::new(f, dir)?;
+    crate::build::mem::phase("split");
     let plans: Vec<Result<Vec<Block>>> = (0..f.components().len())
         .into_par_iter()
         .map(|x| {
@@ -182,58 +163,7 @@ pub fn order(f: &dyn Family, max_cell: usize, nd_max: usize, fixed: Option<&Fixe
             })
         })
         .collect();
+    crate::build::mem::phase("plans");
     Ok(Ordered { split, plans: plans.into_iter().collect::<Result<_>>()? })
 }
 
-/// Contracts and customizes every component in its order.
-pub fn build(f: &dyn Family, o: Ordered) -> Result<Built> {
-    let Ordered { split, plans } = o;
-    let n = f.nodes();
-    let metrics = f.metrics().len();
-    let components: Vec<Result<ComponentBuilt>> = plans
-        .into_par_iter()
-        .enumerate()
-        .map(|(x, blocks)| {
-            let (nodes, arcs) = split.component(x);
-            let k = nodes.len();
-            let local = |a: u64| split.local(f, a);
-            let h = Hierarchy::build(k, || split.edges(f, arcs), &blocks);
-            drop(blocks);
-            let (mut up, mut down) = (Vec::with_capacity(metrics), Vec::with_capacity(metrics));
-            for m in 0..metrics {
-                let (mut u, mut d) = h.unset();
-                for &a in arcs {
-                    let (t, hd) = local(a);
-                    if t == hd {
-                        continue;
-                    }
-                    let (lt, lh) = (h.layout_of[t as usize], h.layout_of[hd as usize]);
-                    let l = h.link(lt, lh).expect("an arc has a link") as usize;
-                    let w = f.arc_weight(m, a as usize);
-                    if lt > lh {
-                        u[l] = u[l].min(w);
-                    } else {
-                        d[l] = d[l].min(w);
-                    }
-                }
-                h.customize(&mut u, &mut d);
-                up.push(u);
-                down.push(d);
-            }
-            Ok(ComponentBuilt { nodes, h, up, down })
-        })
-        .collect();
-    let components: Vec<ComponentBuilt> = components.into_iter().collect::<Result<_>>()?;
-    // Layout ids are U32, NONE excluded (FORMAT §1, §4).
-    ensure!((n as u64) < NONE as u64, "{}: {n} layout nodes, beyond the U32 layout ids (FORMAT §4)", f.name());
-    let (mut first, mut layout_of) = (Vec::with_capacity(components.len()), vec![NONE; n]);
-    let mut next = 0u32;
-    for x in &components {
-        first.push(next);
-        for (i, &v) in x.nodes.iter().enumerate() {
-            layout_of[v as usize] = next + x.h.layout_of[i];
-        }
-        next += x.nodes.len() as u32;
-    }
-    Ok(Built { components, first, layout_of, out_first: split.out_first, out: split.out })
-}

@@ -6,9 +6,9 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::graph::components::{Csr, Components, scc};
-use crate::graph::round::{Member, round_all};
-use crate::osm::column::Column;
+use crate::graph::components::{Components, Csr, scc};
+use crate::graph::round::round_columns;
+use crate::osm::column::{Column, ColumnMut, ColumnWriter};
 use crate::osm::Pieces;
 
 /// The ACTIVE metrics, in the manifest's order (FORMAT §3 `families`).
@@ -29,44 +29,69 @@ pub struct ActiveGraph {
     pub w: Vec<Column<u16>>,
     /// Per piece, its roads [along, against] or `NONE64`: road indices of the whole family.
     pub road_of_piece: Column<[u64; 2]>,
+    /// Each node's smallest road key, which `shed` keeps.
+    pub key: NodeKeys,
 }
 
 impl ActiveGraph {
-    pub fn build(p: &Pieces) -> ActiveGraph {
+    /// The union graph of the pieces `p`. With `dir`, its columns are written to files there as
+    /// they are made, then mapped (SPEC §10, memory).
+    pub fn build(p: &Pieces, dir: Option<&Path>) -> Result<ActiveGraph> {
         let m = p.time.len();
-        let mut g = ActiveGraph {
-            nodes: p.node_osm.len(),
-            time: vec![Column::default(); m],
-            ..ActiveGraph::default()
-        };
-        let mut road_of_piece = vec![[blobmap_model::NONE64; 2]; p.len()];
+        let mut g = ActiveGraph { nodes: p.node_osm.len(), ..ActiveGraph::default() };
+        let mut piece = ColumnWriter::<u32>::new(dir, "piece")?;
+        let mut way = ColumnWriter::<i64>::new(dir, "way")?;
+        let mut rdir = ColumnWriter::<u8>::new(dir, "dir")?;
+        let mut seq = ColumnWriter::<u32>::new(dir, "seq")?;
+        let mut tail = ColumnWriter::<u32>::new(dir, "tail")?;
+        let mut head = ColumnWriter::<u32>::new(dir, "head")?;
+        let mut time: Vec<ColumnWriter<f32>> = (0..m).map(|k| ColumnWriter::new(dir, &format!("time{k}"))).collect::<Result<_>>()?;
+        let mut road_of_piece = ColumnWriter::<[u64; 2]>::new(dir, "road_of_piece")?;
         for i in 0..p.len() {
+            let mut rp = [blobmap_model::NONE64; 2];
             for d in 0..2 {
                 if (0..m).all(|k| p.time[k][i][d].is_infinite()) {
                     continue;
                 }
-                road_of_piece[i][d] = g.piece.len() as u64;
-                g.piece.push(i as u32);
-                g.way.push(p.way[i]);
-                g.dir.push(d as u8);
-                g.seq.push(p.seq[i]);
+                rp[d] = piece.len() as u64;
+                piece.push(i as u32)?;
+                way.push(p.way[i])?;
+                rdir.push(d as u8)?;
+                seq.push(p.seq[i])?;
                 let (a, b) = if d == 0 { (p.u[i], p.v[i]) } else { (p.v[i], p.u[i]) };
-                g.tail.push(a);
-                g.head.push(b);
-                for k in 0..m {
-                    g.time[k].push(p.time[k][i][d]);
+                tail.push(a)?;
+                head.push(b)?;
+                for (k, t) in time.iter_mut().enumerate() {
+                    t.push(p.time[k][i][d])?;
+                }
+            }
+            road_of_piece.push(rp)?;
+        }
+        (g.piece, g.way, g.dir, g.seq) = (piece.finish()?, way.finish()?, rdir.finish()?, seq.finish()?);
+        (g.tail, g.head, g.road_of_piece) = (tail.finish()?, head.finish()?, road_of_piece.finish()?);
+        g.time = time.into_iter().map(ColumnWriter::finish).collect::<Result<_>>()?;
+        for k in 0..m {
+            let mut w = Column::from(round_columns(&g.way, &g.dir, &g.seq, &|r| g.time[k][r]));
+            w.spill(dir, &format!("w{k}"))?;
+            g.w.push(w);
+        }
+        // Each node's smallest road key (FORMAT §4).
+        let n = g.nodes;
+        let (mut kw, mut ks, mut kd) = (
+            ColumnMut::filled(dir, "key_way", n, i64::MAX)?,
+            ColumnMut::filled(dir, "key_seq", n, u32::MAX)?,
+            ColumnMut::filled(dir, "key_dir", n, u8::MAX)?,
+        );
+        for r in 0..g.len() {
+            let k = (g.way[r], g.seq[r], g.dir[r]);
+            for v in [g.tail[r] as usize, g.head[r] as usize] {
+                if k < (kw[v], ks[v], kd[v]) {
+                    (kw[v], ks[v], kd[v]) = k;
                 }
             }
         }
-        g.road_of_piece = road_of_piece.into();
-        g.w = (0..m)
-            .map(|k| {
-                let members: Vec<Member> =
-                    (0..g.len()).map(|r| Member { way: g.way[r], dir: g.dir[r], seq: g.seq[r], time: g.time[k][r] }).collect();
-                round_all(&members).into()
-            })
-            .collect();
-        g
+        g.key = NodeKeys { way: kw.freeze()?, seq: ks.freeze()?, dir: kd.freeze()? };
+        Ok(g)
     }
 
     pub fn len(&self) -> usize {
@@ -102,19 +127,39 @@ impl ActiveGraph {
     /// The components of the union graph (SPEC §5). Ties go to the component with the smallest
     /// (way, way_seq, way_dir, end) over the roads at its nodes, `end` 0 for the road's tail
     /// and 1 for its head.
-    pub fn components(&self) -> Components {
-        let g = Csr::new(self.nodes, self.tail.iter().copied().zip(self.head.iter().copied()));
+    pub fn components(&self, dir: Option<&Path>) -> Result<Components> {
+        let arcs = self.tail.iter().copied().zip(self.head.iter().copied());
+        let g = Csr::build(self.nodes, arcs.clone(), dir)?;
         let comp = scc(&g);
-        let mut key = vec![(i64::MAX, u32::MAX, u8::MAX, u8::MAX); self.nodes];
+        drop(g);
+        // Each component's smallest key over the roads at its nodes; (MAX, ..) for a node
+        // without roads.
+        let k = comp.iter().map(|&c| c as usize + 1).max().unwrap_or(0);
+        let mut best = vec![Some((i64::MAX, u32::MAX, u8::MAX, u8::MAX)); k];
         for r in 0..self.len() {
             for (end, v) in [(0u8, self.tail[r]), (1, self.head[r])] {
-                let k = (self.way[r], self.seq[r], self.dir[r], end);
-                if k < key[v as usize] {
-                    key[v as usize] = k;
+                let key = (self.way[r], self.seq[r], self.dir[r], end);
+                let b = &mut best[comp[v as usize] as usize];
+                if Some(key) < *b {
+                    *b = Some(key);
                 }
             }
         }
-        Components::new(&comp, |v| key[v], self.tail.iter().copied().zip(self.head.iter().copied()))
+        Ok(Components::with_best(&comp, &best, arcs))
+    }
+}
+
+/// Each node's smallest (way, way_seq, way_dir) over its roads, `(MAX, MAX, MAX)` for none.
+#[derive(Clone, Debug, Default)]
+pub struct NodeKeys {
+    pub way: Column<i64>,
+    pub seq: Column<u32>,
+    pub dir: Column<u8>,
+}
+
+impl NodeKeys {
+    pub fn of(&self, v: usize) -> (i64, u32, u8) {
+        (self.way[v], self.seq[v], self.dir[v])
     }
 }
 
@@ -132,13 +177,13 @@ mod tests {
         let osm = crate::osm::Osm::open(&w.pbf, &dir.join("nodes"), &cfg).unwrap();
         let net = crate::osm::Network::read(&osm, &osm.active_obstacles, &prof, &cfg.active.config.snap, None).unwrap();
         let modes: Vec<ActiveMode> = [Mode::Bike, Mode::Walk].map(|mode| ActiveMode { mode, cfg: prof.cfg }).to_vec();
-        let g = ActiveGraph::build(&net.pieces(&modes).unwrap());
+        let g = ActiveGraph::build(&net.pieces(&modes).unwrap(), None).unwrap();
         // Walk 100 m at 5 km/h: 72 s on every piece of row 0 (way 1).
         let row0: Vec<u16> = (0..g.len()).filter(|&r| g.way[r] == 1).map(|r| g.w[1][r]).collect();
         assert_eq!(row0, [72; 10]);
         // Roads that walk may use and bike may not: the footbridge and the walk trap.
         assert!((0..g.len()).any(|r| g.w[0][r] == blobmap_model::INF && g.w[1][r] != blobmap_model::INF));
-        let e = g.components();
+        let e = g.components(None).unwrap();
         assert!(!e.trapped[0] && e.trapped.iter().any(|&t| t));
     }
 }

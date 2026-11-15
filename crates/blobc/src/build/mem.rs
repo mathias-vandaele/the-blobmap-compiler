@@ -1,5 +1,11 @@
 //! Peak resident set size of this process (Linux: `VmHWM` of `/proc/self/status`; the
-//! high-water mark is reset by writing 5 to `/proc/self/clear_refs`).
+//! high-water mark is reset by writing 5 to `/proc/self/clear_refs`), and sampled peaks of
+//! anonymous memory per stage and per phase of a stage.
+
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering::Relaxed;
+use std::sync::{Mutex, Once};
+use std::time::{Duration, Instant};
 
 fn status_bytes(key: &str) -> Option<u64> {
     let s = std::fs::read_to_string("/proc/self/status").ok()?;
@@ -91,4 +97,79 @@ fn cgroup_limit() -> Option<u64> {
             return least;
         }
     }
+}
+
+/// Peak anonymous memory, sampled: the resident set's high-water mark counts mapped files'
+/// pages too, which the kernel drops under pressure, while anonymous memory is what a
+/// memory cap without swap holds against (SPEC §10). A thread reads `RssAnon` every
+/// `SAMPLE_MS` and keeps two peaks: the stage's and the phase's.
+const SAMPLE_MS: u64 = 10;
+static STAGE_PEAK: AtomicU64 = AtomicU64::new(0);
+static PHASE_PEAK: AtomicU64 = AtomicU64::new(0);
+static SAMPLER: Once = Once::new();
+
+/// One measured step inside a stage: its wall time, the peak anonymous memory while it ran
+/// and the anonymous memory when it ended.
+#[derive(Clone, Debug)]
+pub struct Phase {
+    pub name: String,
+    pub wall_s: f64,
+    pub peak_anon_bytes: u64,
+    pub anon_bytes: u64,
+}
+
+struct Phases {
+    at: Instant,
+    done: Vec<Phase>,
+}
+
+static PHASES: Mutex<Option<Phases>> = Mutex::new(None);
+
+fn sample() -> u64 {
+    let a = anon().unwrap_or(0);
+    STAGE_PEAK.fetch_max(a, Relaxed);
+    PHASE_PEAK.fetch_max(a, Relaxed);
+    a
+}
+
+/// Starts the sampler thread (once per process).
+pub fn start_sampler() {
+    SAMPLER.call_once(|| {
+        let _ = std::thread::Builder::new().name("anon-sampler".into()).spawn(|| {
+            loop {
+                sample();
+                std::thread::sleep(Duration::from_millis(SAMPLE_MS));
+            }
+        });
+    });
+}
+
+/// Starts a stage: its peak and its phases begin now.
+pub fn stage_start() {
+    let a = sample();
+    STAGE_PEAK.store(a, Relaxed);
+    PHASE_PEAK.store(a, Relaxed);
+    *PHASES.lock().unwrap() = Some(Phases { at: Instant::now(), done: Vec::new() });
+}
+
+/// Ends the phase running since the stage's start or the last `phase`, as `name`.
+pub fn phase(name: &str) {
+    let a = sample();
+    let peak = PHASE_PEAK.swap(a, Relaxed).max(a);
+    let mut g = PHASES.lock().unwrap();
+    if let Some(p) = g.as_mut() {
+        let now = Instant::now();
+        let ph = Phase { name: name.to_string(), wall_s: (now - p.at).as_secs_f64(), peak_anon_bytes: peak, anon_bytes: a };
+        eprintln!("{:>18}   {:<28} {:>9.3} s  peak anon {:>6} MiB  after {:>6} MiB", "", ph.name, ph.wall_s, peak >> 20, a >> 20);
+        p.done.push(ph);
+        p.at = now;
+    }
+}
+
+/// Ends a stage: its sampled peak anonymous memory and its phases.
+pub fn stage_end() -> (u64, Vec<Phase>) {
+    let a = sample();
+    let peak = STAGE_PEAK.load(Relaxed).max(a);
+    let phases = PHASES.lock().unwrap().take().map(|p| p.done).unwrap_or_default();
+    (peak, phases)
 }

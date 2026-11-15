@@ -37,7 +37,7 @@ impl Default for ShardLimits {
 
 struct ShardOut {
     /// The slot of its unit (`set_slot`).
-    slot: u32,
+    slot: u64,
     temp: PathBuf,
     bytes: u64,
     sha256: String,
@@ -62,7 +62,7 @@ pub struct ModelWriter {
     /// Logical tensor -> its chunks, when chunked.
     chunks: BTreeMap<String, Vec<String>>,
     total_size: u64,
-    slot: u32,
+    slot: u64,
     open: Option<Open>,
 }
 
@@ -119,7 +119,7 @@ impl ModelWriter {
     /// Units written from here on take this slot: `finish` orders the shards by slot, and in
     /// write order within one, so that units may be written out of their order (FORMAT §2.4)
     /// while a shard never holds two units.
-    pub fn set_slot(&mut self, slot: u32) -> Result<()> {
+    pub fn set_slot(&mut self, slot: u64) -> Result<()> {
         ensure!(self.open.is_none(), "a unit is open");
         self.slot = slot;
         Ok(())

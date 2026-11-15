@@ -212,6 +212,7 @@ fn fine(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
 /// clustered, then dissected with the clusters' orders as a guide (`dissect`).
 fn coarse(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
     let fine = Adj::new(g.n, || g.tail.iter().zip(g.head).map(|(&a, &b)| (a, b, 1)));
+    crate::build::mem::phase("fine adjacency");
     // Coarsen to clusters of at most a quarter cell, until about 16 fine nodes per cluster.
     let target = (g.n / 16).max(1024);
     let cap = (max_cell as u64 / 4).max(1);
@@ -253,6 +254,7 @@ fn coarse(g: &Graph, orderer: &dyn Orderer, max_cell: usize) -> Vec<Block> {
         (w, lat, lon) = (nw, nlat, nlon);
     }
     drop((adj, w, lat, lon));
+    crate::build::mem::phase("coarsened");
     crate::order::dissect::refined(g, &fine, &map, orderer, max_cell)
 }
 
