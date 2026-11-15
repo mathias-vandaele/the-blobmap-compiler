@@ -4,9 +4,15 @@
 //! `labels_at`), for the checks that need one value per case (SPEC §11, via-way restrictions).
 
 use anyhow::Result;
+use rayon::prelude::*;
 
 use crate::runtime::model::{Dir, Component, Fam, Faults, ModeVocab, Reason, Runtime};
 use crate::{INF, NONE};
+
+/// IDs a task takes in a column's parallel loops.
+const PAR_IDS: usize = 1 << 14;
+/// Components at least this large are swept level by level in parallel.
+const PAR_NODES: usize = 1 << 16;
 
 impl Faults {
     #[inline]
@@ -94,15 +100,37 @@ impl Runtime {
             let start = if f.no_start { 0 } else { s.start };
             by_component.entry(x).or_default().push(Source { id: s.id, start });
         }
-        // The IDs of each source component, from one pass over the IDs: a pass per component
-        // would cost components × IDs, hours for a column of places in many components.
+        // The IDs of each source component, from one counting pass over the IDs with a slot
+        // per component of the family: a pass per component would cost components × IDs,
+        // hours for a column of places in many components.
         let keys: Vec<u32> = by_component.keys().copied().collect();
-        let mut members: Vec<Vec<u32>> = Vec::new();
+        let (mut first, mut members) = (Vec::new(), Vec::new());
         if keys.len() > 1 {
-            members.resize(keys.len(), Vec::new());
+            let mut slot = vec![NONE; self.components(mv.info.fam)];
+            for (k, &x) in keys.iter().enumerate() {
+                slot[x as usize] = k as u32;
+            }
+            let slot_of = |i: usize| match mv.component[i] {
+                NONE => NONE,
+                x => slot[x as usize],
+            };
+            first = vec![0usize; keys.len() + 1];
             for i in 0..n {
-                if let Ok(k) = keys.binary_search(&mv.component[i]) {
-                    members[k].push(i as u32);
+                let k = slot_of(i);
+                if k != NONE {
+                    first[k as usize + 1] += 1;
+                }
+            }
+            for k in 0..keys.len() {
+                first[k + 1] += first[k];
+            }
+            members = vec![0u32; first[keys.len()]];
+            let mut at = first.clone();
+            for i in 0..n {
+                let k = slot_of(i);
+                if k != NONE {
+                    members[at[k as usize]] = i as u32;
+                    at[k as usize] += 1;
                 }
             }
         }
@@ -119,8 +147,9 @@ impl Runtime {
             // sources on its own piece, not every source.
             let mut by_piece: Vec<([u32; 2], u32, usize)> = srcs.iter().enumerate().map(|(j, s)| (mv.node[s.id as usize], mv.road[s.id as usize], j)).collect();
             by_piece.sort_unstable();
-            let mut one = |i: usize| {
-                let mut t = head(&e, mv, i, |v| label[v as usize], dir, f);
+            let lab = &label[..];
+            let time = |i: usize| -> u16 {
+                let mut t = head(&e, mv, i, |v| lab[v as usize], dir, f);
                 let key = (mv.node[i], mv.road[i]);
                 let from = by_piece.partition_point(|p| (p.0, p.1) < key);
                 for &(_, _, j) in by_piece[from..].iter().take_while(|p| (p.0, p.1) == key) {
@@ -133,12 +162,30 @@ impl Runtime {
                         t = t.min(f.add(s.start, d));
                     }
                 }
-                out[i] = out[i].min(t);
+                t
             };
+            // The heads, in parallel over the IDs: each writes its own entry.
             if keys.len() > 1 {
-                members[k].iter().for_each(|&i| one(i as usize));
+                let ids = &members[first[k]..first[k + 1]];
+                if ids.len() >= PAR_IDS {
+                    let ts: Vec<u16> = ids.par_iter().with_min_len(PAR_IDS).map(|&i| time(i as usize)).collect();
+                    for (&i, t) in ids.iter().zip(ts) {
+                        out[i as usize] = out[i as usize].min(t);
+                    }
+                } else {
+                    for &i in ids {
+                        out[i as usize] = out[i as usize].min(time(i as usize));
+                    }
+                }
             } else {
-                (0..n).filter(|&i| mv.component[i] == x).for_each(&mut one);
+                out.par_chunks_mut(PAR_IDS).enumerate().for_each(|(c, part)| {
+                    for (j, o) in part.iter_mut().enumerate() {
+                        let i = c * PAR_IDS + j;
+                        if mv.component[i] == x {
+                            *o = (*o).min(time(i));
+                        }
+                    }
+                });
             }
             w.label = label;
         }
@@ -336,6 +383,15 @@ impl Ancestors {
 /// Upward by decreasing layout id, then downward by increasing id (FORMAT §8). `To`
 /// sweeps the reversed hierarchy: `down` weights going up, `up` going down.
 pub fn sweep(e: &Component, metric: usize, label: &mut [u16], dir: Dir, f: &Faults) {
+    if e.n >= PAR_NODES && rayon::current_num_threads() > 1 {
+        sweep_levels(e, metric, label, dir, f);
+    } else {
+        sweep_ids(e, metric, label, dir, f);
+    }
+}
+
+/// `sweep` in layout-id order, on one thread.
+fn sweep_ids(e: &Component, metric: usize, label: &mut [u16], dir: Dir, f: &Faults) {
     let (go_up, go_down) = match dir {
         Dir::From => (&e.up[metric], &e.down[metric]),
         Dir::To => (&e.down[metric], &e.up[metric]),
@@ -357,6 +413,62 @@ pub fn sweep(e: &Component, metric: usize, label: &mut [u16], dir: Dir, f: &Faul
         }
         label[v as usize] = lv;
     }
+}
+
+/// `sweep` level by level (FORMAT §5.2). Upward: the cells, each from its bottom level, then
+/// the other blocks in decreasing ids; downward: the other blocks in increasing ids, each from
+/// its top level, then the cells. Both ends of a link are never in one level, so the nodes of
+/// a level go in parallel, and so do the cells, which share no links. A node is final before
+/// it is read or pushes, and writes are `min`, so the labels are the sequential sweep's. They
+/// are atomics, so a model that breaks the level rule gives wrong labels, never a data race.
+fn sweep_levels(e: &Component, metric: usize, label: &mut [u16], dir: Dir, f: &Faults) {
+    use std::sync::atomic::{AtomicU16, Ordering::Relaxed};
+    let (go_up, go_down) = match dir {
+        Dir::From => (&e.up[metric], &e.down[metric]),
+        Dir::To => (&e.down[metric], &e.up[metric]),
+    };
+    // SAFETY: `AtomicU16` has the size, alignment and bit validity of `u16`, and `label` is
+    // borrowed mutably, so only these atomics touch it until the function returns.
+    let lab: &[AtomicU16] = unsafe { &*(label as *mut [u16] as *const [AtomicU16]) };
+    let push = |v: u32| {
+        let lv = lab[v as usize].load(Relaxed);
+        if lv == INF {
+            return;
+        }
+        for k in e.row(v) {
+            let (u, t) = (e.up_head[k] as usize, f.add(lv, go_up[k]));
+            if t < lab[u].load(Relaxed) {
+                lab[u].fetch_min(t, Relaxed);
+            }
+        }
+    };
+    let pull = |v: u32| {
+        let mut lv = lab[v as usize].load(Relaxed);
+        for k in e.row(v) {
+            lv = lv.min(f.add(lab[e.up_head[k] as usize].load(Relaxed), go_down[k]));
+        }
+        lab[v as usize].store(lv, Relaxed);
+    };
+    let level = |a: u32, b: u32, g: &(dyn Fn(u32) + Sync)| {
+        if ((b - a) as usize) < PAR_IDS {
+            (a..b).for_each(g);
+        } else {
+            (a..b).into_par_iter().with_min_len(PAR_IDS / 4).for_each(g);
+        }
+    };
+    let up = |b: usize| {
+        let l = &e.levels[b];
+        (0..l.len() - 1).rev().for_each(|i| level(l[i], l[i + 1], &push));
+    };
+    let down = |b: usize| {
+        let l = &e.levels[b];
+        (0..l.len() - 1).for_each(|i| level(l[i], l[i + 1], &pull));
+    };
+    let (cells, rest): (Vec<usize>, Vec<usize>) = (0..e.blocks.len()).partition(|&b| e.blocks[b].kind == 2);
+    cells.par_iter().for_each(|&b| up(b));
+    rest.iter().rev().for_each(|&b| up(b));
+    rest.iter().for_each(|&b| down(b));
+    cells.par_iter().for_each(|&b| down(b));
 }
 
 /// Puts each seed of a source: a node and its label.
@@ -450,4 +562,113 @@ pub fn direct(mv: &ModeVocab, a: usize, b: usize) -> u16 {
         }
     }
     t
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::arr::Arr;
+    use crate::runtime::model::BlockAt;
+
+    /// A hierarchy of a top block and two cells with levels of a few to tens of thousands of
+    /// nodes, random upper links obeying FORMAT §5.2's level rules, random weights (some near
+    /// saturation) and labels (mostly `INF`).
+    fn hierarchy(seed: u64) -> Component {
+        let mut x = seed;
+        let mut rnd = move |m: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % m
+        };
+        let blocks: [(u8, &[u32]); 3] = [(1, &[200, 300, 500, 20000]), (2, &[100, 1000, 30000]), (2, &[50, 500, 25000])];
+        let (mut bl, mut levels, mut level_of, mut block_of) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut id = 0u32;
+        for (b, (kind, sizes)) in blocks.iter().enumerate() {
+            bl.push(BlockAt { kind: *kind, id_first: id, pack_link_first: 0 });
+            let mut bounds = vec![id];
+            for (l, &k) in sizes.iter().enumerate() {
+                for _ in 0..k {
+                    level_of.push(l);
+                    block_of.push(b);
+                }
+                id += k;
+                bounds.push(id);
+            }
+            levels.push(bounds);
+        }
+        let n = id as usize;
+        let (mut up_first, mut up_head): (Vec<u64>, Vec<u32>) = (vec![0], Vec::new());
+        for v in 0..n {
+            let (b, l) = (block_of[v], level_of[v]);
+            let mut row: Vec<u32> = (0..rnd(5))
+                .filter_map(|_| {
+                    // An upper neighbour: a smaller level of v's block, or (from a cell) the top.
+                    let to_top = b != 0 && rnd(3) == 0;
+                    let (tb, below) = if to_top { (0, levels[0].len() - 1) } else { (b, l) };
+                    (below > 0).then(|| {
+                        let tl = rnd(below as u64) as usize;
+                        let (a, z) = (levels[tb][tl], levels[tb][tl + 1]);
+                        a + rnd((z - a) as u64) as u32
+                    })
+                })
+                .collect();
+            row.sort_unstable();
+            row.dedup();
+            up_head.extend(&row);
+            up_first.push(up_head.len() as u64);
+        }
+        let weights = |rnd: &mut dyn FnMut(u64) -> u64| -> Vec<u16> { (0..up_head.len()).map(|_| if rnd(50) == 0 { 65000 } else { rnd(3000) as u16 }).collect() };
+        let (up, down) = (weights(&mut rnd), weights(&mut rnd));
+        fn a<T: bytemuck::Pod>(v: Vec<T>) -> Arr<T> {
+            Arr::new(v, None).unwrap()
+        }
+        Component {
+            fam: Fam::Active,
+            n,
+            blocks: bl,
+            levels,
+            up_first: a(up_first),
+            up_head: a(up_head),
+            up: vec![a(up)],
+            down: vec![a(down)],
+            arc_first: Arr::default(),
+            arc_head: Arr::default(),
+            arc_link: Arr::default(),
+            arc_local: Arr::default(),
+            turn_cost: Arr::default(),
+            way: Arr::default(),
+            way_dir: Arr::default(),
+            way_seq: Arr::default(),
+            kind: Arr::default(),
+            time_s: Vec::new(),
+            w: Vec::new(),
+            copy_of: Arr::default(),
+            copy_first: Arr::default(),
+            copies: Arr::default(),
+        }
+    }
+
+    #[test]
+    fn levels_in_parallel_same_labels() {
+        for seed in [1u64, 7, 99] {
+            let e = hierarchy(seed);
+            let mut x = seed * 31 + 5;
+            let seeds: Vec<u16> = (0..e.n)
+                .map(|_| {
+                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    if (x >> 33) % 100 < 3 { ((x >> 40) % 30000) as u16 } else { INF }
+                })
+                .collect();
+            for f in [Faults::default(), Faults { wrapping: true, ..Faults::default() }] {
+                for dir in [Dir::From, Dir::To] {
+                    let (mut a, mut b) = (seeds.clone(), seeds.clone());
+                    sweep_ids(&e, 0, &mut a, dir, &f);
+                    sweep_levels(&e, 0, &mut b, dir, &f);
+                    assert!(a == b, "seed {seed}, {dir:?}, wrapping {}: labels differ", f.wrapping);
+                    assert!(a.iter().filter(|&&t| t != INF).count() > seeds.iter().filter(|&&t| t != INF).count());
+                }
+            }
+        }
+    }
 }

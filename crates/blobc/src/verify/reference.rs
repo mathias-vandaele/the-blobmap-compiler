@@ -207,15 +207,26 @@ fn twin_groups(pbf: &std::path::Path) -> Result<Vec<Vec<i64>>> {
 /// Points snapped at once, before their outcomes go to the column.
 const SNAP_BATCH: usize = 1 << 22;
 
-fn snapping(osm: &Osm, config: &Config, fam: Fam, points: &[[f64; 2]], dir: &Path) -> Result<Snapping> {
-    let car = fam == Fam::Car;
-    let (pieces, cg, ag) = if car {
+/// A family's network, read from the node index.
+struct Net {
+    car: bool,
+    pieces: Pieces,
+    cg: CarGraph,
+    ag: ActiveGraph,
+}
+
+fn network(osm: &Osm, config: &Config, fam: Fam) -> Result<Net> {
+    Ok(if fam == Fam::Car {
         let (p, g) = phase("  car network", || CarNetwork.run((osm, config)))?;
-        (p, g, ActiveGraph::default())
+        Net { car: true, pieces: p, cg: g, ag: ActiveGraph::default() }
     } else {
         let (p, g) = phase("  active network", || ActiveNetwork.run((osm, config)))?;
-        (p, CarGraph::default(), g)
-    };
+        Net { car: false, pieces: p, cg: CarGraph::default(), ag: g }
+    })
+}
+
+fn snapping(net: Net, config: &Config, points: &[[f64; 2]], dir: &Path) -> Result<Snapping> {
+    let Net { car, pieces, cg, ag } = net;
     let components = if car { cg.components() } else { ag.components() };
     let modes: Vec<(&'static str, usize, Membership, f64, u32)> = if car {
         let s = &config.car.config.snap;
@@ -273,12 +284,15 @@ impl Reference {
         let mut near = vec![polygon.is_some(); points.len()];
         if polygon.is_none() {
             for fam in [Fam::Car, Fam::Active].into_iter().filter(|f| !fams.contains(f)) {
-                let s = snapping(&osm, &config, fam, &points, &dir)?;
+                let s = snapping(network(&osm, &config, fam)?, &config, &points, &dir)?;
                 s.found.iter().for_each(|f| near.iter_mut().zip(f).for_each(|(n, x)| *n |= x.any));
             }
         }
-        let held: Vec<Snapping> =
-            [Fam::Car, Fam::Active].into_iter().filter(|f| fams.contains(f)).map(|f| snapping(&osm, &config, f, &points, &dir)).collect::<Result<_>>()?;
+        // The held networks, then the node index goes (16 bytes a node, on the planet over
+        // 100 GB of the work directory) before their snapping and the checks.
+        let nets: Vec<Net> = [Fam::Car, Fam::Active].into_iter().filter(|f| fams.contains(f)).map(|f| network(&osm, &config, f)).collect::<Result<_>>()?;
+        drop(osm);
+        let held: Vec<Snapping> = nets.into_iter().map(|n| snapping(n, &config, &points, &dir)).collect::<Result<_>>()?;
         for s in &held {
             s.found.iter().for_each(|f| near.iter_mut().zip(f).for_each(|(n, x)| *n |= x.any));
         }

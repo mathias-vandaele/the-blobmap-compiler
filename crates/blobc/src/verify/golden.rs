@@ -200,7 +200,10 @@ pub fn main(a: Vec<String>) -> Result<bool> {
     let work = crate::verify::work_dir(Path::new(model), "replay");
     std::fs::create_dir_all(&work)?;
     let mut rep = Report::default();
-    let r = Runtime::open_in(Path::new(model), Some(&work.join("runtime"))).and_then(|rt| replay_on(&rt, Path::new(dir), &mut rep, threads));
+    let r = Runtime::open_in(Path::new(model), Some(&work.join("runtime"))).and_then(|rt| {
+        rt.set_queries_only(true);
+        replay_on(&rt, Path::new(dir), &mut rep, threads)
+    });
     let _ = std::fs::remove_dir_all(&work);
     r?;
     print!("{rep}");
@@ -218,7 +221,11 @@ fn replay_on(rt: &Runtime, dir: &Path, rep: &mut Report, threads: Option<usize>)
     let queries: Vec<Result<Value>> = lines.par_iter().map(|l| Ok(serde_json::from_slice(l)?)).collect();
     let mut order: Vec<usize> = (0..queries.len()).collect();
     order.sort_by_key(|&k| (queries[k].as_ref().map_or((u8::MAX, u32::MAX), |q| component_of(rt, q)), k));
-    let threads = threads.unwrap_or_else(|| replay_threads(rt));
+    // A pool of a thread per physical core (or `threads`), and as many queries at once as
+    // half the free memory holds working states for: each query's own loops use the pool.
+    let cores = crate::build::mem::physical_cores().unwrap_or(usize::MAX).min(rayon::current_num_threads());
+    let threads = threads.unwrap_or(cores).max(1);
+    let lanes = replay_lanes(rt).min(threads);
     let t0 = std::time::Instant::now();
     let c0 = crate::build::mem::cpu_seconds();
     let works = std::sync::Mutex::new(Vec::new());
@@ -232,24 +239,19 @@ fn replay_on(rt: &Runtime, dir: &Path, rep: &mut Report, threads: Option<usize>)
         let g = key(order[at]);
         let len = order[at..].iter().take_while(|&&k| key(k) == g).count();
         let group = &order[at..at + len];
-        let answers: Vec<Result<Option<String>>> = pool.install(|| {
-            group
-                .par_iter()
-                .map(|&k| {
-                    let q = queries[k].as_ref().map_err(|e| anyhow::anyhow!("{e:#}"))?;
-                    let op = q["op"].as_str().context("op")?;
-                    let mut w = works.lock().unwrap().pop().unwrap_or_default();
-                    let t = std::time::Instant::now();
-                    let got = rt.answer_in(&mut w, op, &q["args"]);
-                    times.lock().unwrap().push((t.elapsed().as_secs_f64(), k));
-                    works.lock().unwrap().push(w);
-                    Ok(match got {
-                        Ok(a) if a == q["answer"] => None,
-                        Ok(a) => Some(format!("{op} {}: {a} != {}", q["args"], q["answer"])),
-                        Err(e) => Some(format!("{op} {}: {e:#}", q["args"])),
-                    })
-                })
-                .collect()
+        let answers: Vec<Result<Option<String>>> = crate::verify::in_lanes(Some(&pool), lanes, group, |&k| {
+            let q = queries[k].as_ref().map_err(|e| anyhow::anyhow!("{e:#}"))?;
+            let op = q["op"].as_str().context("op")?;
+            let mut w = works.lock().unwrap().pop().unwrap_or_default();
+            let t = std::time::Instant::now();
+            let got = rt.answer_in(&mut w, op, &q["args"]);
+            times.lock().unwrap().push((t.elapsed().as_secs_f64(), k));
+            works.lock().unwrap().push(w);
+            Ok(match got {
+                Ok(a) if a == q["answer"] => None,
+                Ok(a) => Some(format!("{op} {}: {a} != {}", q["args"], q["answer"])),
+                Err(e) => Some(format!("{op} {}: {e:#}", q["args"])),
+            })
         });
         for (&k, a) in group.iter().zip(answers) {
             results[k] = Some(a);
@@ -258,7 +260,7 @@ fn replay_on(rt: &Runtime, dir: &Path, rep: &mut Report, threads: Option<usize>)
     }
     let held: usize = works.lock().unwrap().iter().map(|w| w.bytes()).sum();
     eprintln!(
-        "golden replay: {} queries, {threads} threads, {:.1} s, {:.0} core-seconds, working state {} MiB",
+        "golden replay: {} queries, {lanes} at once on {threads} threads, {:.1} s, {:.0} core-seconds, working state {} MiB",
         queries.len(),
         t0.elapsed().as_secs_f64(),
         crate::build::mem::cpu_seconds() - c0,
@@ -318,12 +320,12 @@ fn first_term(e: &Value) -> Option<&Value> {
     e.get("and").or_else(|| e.get("or")).and_then(|x| x.as_array()).and_then(|x| x.first()).and_then(first_term).or_else(|| e.get("not").and_then(first_term))
 }
 
-/// Threads for the replay: as many as half the memory left holds one query's working state
-/// (four columns of every ID and a sweep and two ancestor searches over the largest
-/// component), at least one and at most the physical cores: an SMT sibling adds little
-/// here and slows its twin (FR+5: 1.24x the serial core-seconds on 12 threads, 2.0x on 23,
-/// and a longer wall time).
-fn replay_threads(rt: &Runtime) -> usize {
+/// Queries at once in the replay: as many as half the memory left holds one query's working state
+/// (four columns of every ID, a column's IDs by component, and a sweep and two ancestor
+/// searches over the largest component), at least one. The pool has a thread per physical core: an SMT sibling adds
+/// little here and slows its twin (FR+5: 1.24x the serial core-seconds on 12 threads, 2.0x
+/// on 23, and a longer wall time).
+fn replay_lanes(rt: &Runtime) -> usize {
     use blobmap_model::runtime::Fam;
     let largest = [Fam::Car, Fam::Active]
         .iter()
@@ -331,8 +333,7 @@ fn replay_threads(rt: &Runtime) -> usize {
         .flat_map(|&f| (0..rt.components(f) as u32).map(move |x| rt.tables[&f].nodes(x) as usize))
         .max()
         .unwrap_or(0);
-    let per = 4 * 2 * rt.vocab.n() + largest * 2 + 2 * (largest * 2 + largest.div_ceil(64) * 8);
+    let per = (4 * 2 + 4) * rt.vocab.n() + largest * 2 + 2 * (largest * 2 + largest.div_ceil(64) * 8);
     let free = crate::build::mem::free().unwrap_or(0) as usize / 2;
-    let cores = crate::build::mem::physical_cores().unwrap_or(usize::MAX).min(rayon::current_num_threads());
-    (free / per.max(1)).clamp(1, cores)
+    (free / per.max(1)).max(1)
 }

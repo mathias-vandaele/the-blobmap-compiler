@@ -385,18 +385,15 @@ pub fn distances(rt: &Runtime, ex: &Expected, n: &Samples, rep: &mut Report) -> 
             cases.push((src.clone(), Dir::From, "from"));
             cases.push((src, Dir::To, "to"));
         }
-        let results: Vec<Result<Option<String>>> = crate::verify::columns_at_once(rt, k, || cases
-            .par_iter()
-            .map(|(src, dir, name)| {
-                let got = rt.column(&src.iter().map(|&(s, st)| Source { id: s as u32, start: st }).collect::<Vec<_>>(), k, *dir)?;
-                let want = ex.column(m, src, name);
-                Ok((got != *want).then(|| {
-                    let i = (0..got.len()).find(|&i| got[i] != want[i]).unwrap();
-                    let from: Vec<String> = src.iter().map(|x| format!("{}+{}", uuid(&r.ids[x.0]), x.1)).collect();
-                    format!("{name} {from:?} to {}: {} != {}", uuid(&r.ids[i]), got[i], want[i])
-                }))
-            })
-            .collect());
+        let results: Vec<Result<Option<String>>> = crate::verify::columns_at_once(rt, k, &cases, |(src, dir, name)| {
+            let got = rt.column(&src.iter().map(|&(s, st)| Source { id: s as u32, start: st }).collect::<Vec<_>>(), k, *dir)?;
+            let want = ex.column(m, src, name);
+            Ok((got != *want).then(|| {
+                let i = (0..got.len()).find(|&i| got[i] != want[i]).unwrap();
+                let from: Vec<String> = src.iter().map(|x| format!("{}+{}", uuid(&r.ids[x.0]), x.1)).collect();
+                format!("{name} {from:?} to {}: {} != {}", uuid(&r.ids[i]), got[i], want[i])
+            }))
+        });
         for res in results {
             o.count();
             if let Some(f) = res? {
@@ -405,20 +402,17 @@ pub fn distances(rt: &Runtime, ex: &Expected, n: &Samples, rep: &mut Report) -> 
         }
         let o = rep.check(&format!("{}: travel_time and reasons", mode.name));
         let sample: Vec<usize> = (0..r.n()).step_by(r.n().div_ceil(n.pairs).max(1)).collect();
-        let results: Vec<Result<Vec<Option<String>>>> = crate::verify::columns_at_once(rt, k, || sample
-            .par_iter()
-            .map(|&a| {
-                sample
-                    .iter()
-                    .map(|&b| {
-                        let (sa, sb) = (uuid(&r.ids[a]), uuid(&r.ids[b]));
-                        let got = rt.travel_time(&sa, &sb, k)?;
-                        let want = ex.travel_time(&sa, &sb, mode.name);
-                        Ok((got != want).then(|| format!("{sa} -> {sb}: {got} != {want}")))
-                    })
-                    .collect()
-            })
-            .collect());
+        let results: Vec<Result<Vec<Option<String>>>> = crate::verify::columns_at_once(rt, k, &sample, |&a| {
+            sample
+                .iter()
+                .map(|&b| {
+                    let (sa, sb) = (uuid(&r.ids[a]), uuid(&r.ids[b]));
+                    let got = rt.travel_time(&sa, &sb, k)?;
+                    let want = ex.travel_time(&sa, &sb, mode.name);
+                    Ok((got != want).then(|| format!("{sa} -> {sb}: {got} != {want}")))
+                })
+                .collect()
+        });
         for res in results {
             for f in res? {
                 o.count();

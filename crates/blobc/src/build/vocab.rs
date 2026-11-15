@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use blobmap_model::{INF, ModelWriter, NONE, NONE64, Tensor, Unit, UnitWritten};
 use rayon::prelude::*;
 
@@ -104,12 +104,8 @@ pub fn snap(f: &Families, n: usize, point: &(dyn Fn(usize) -> (f64, f64) + Sync)
         }
         sorted.push((mode, at.finish()?));
     }
+    // The grid's columns, unlinked when mapped, leave the disk with it.
     drop(grid);
-    if let Some(d) = dir {
-        for name in ["grid.piece_of_point", "grid.cells", "grid.first", "grid.seg"] {
-            let _ = std::fs::remove_file(d.join(name));
-        }
-    }
     in_index_order(&mut sorted, &order, dir, &mut out)?;
     Ok(out)
 }
@@ -141,7 +137,7 @@ fn spatial_order(n: usize, point: &(dyn Fn(usize) -> (f64, f64) + Sync)) -> Resu
 }
 
 /// Each mode's outcomes in spatial order, put back in index order as its column, its spatial
-/// column then removed.
+/// column then dropped (with its disk).
 fn in_index_order(sorted: &mut Vec<(&str, Column<Snapped>)>, order: &[u32], dir: Option<&Path>, out: &mut Vec<ModeSnap>) -> Result<()> {
     if sorted.is_empty() {
         return Ok(());
@@ -157,10 +153,6 @@ fn in_index_order(sorted: &mut Vec<(&str, Column<Snapped>)>, order: &[u32], dir:
             at.push_slice(&done)?;
         }
         drop(col);
-        if let Some(d) = dir {
-            let path = d.join(format!("{mode}.spatial"));
-            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
-        }
         out.push(ModeSnap { at: at.finish()? });
     }
     Ok(())

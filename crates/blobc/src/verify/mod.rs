@@ -184,14 +184,44 @@ pub fn work_dir(model: &Path, what: &str) -> PathBuf {
 /// than there are threads (SPEC §10).
 pub(crate) const COLUMN_MEMORY: u64 = 6 << 30;
 
-/// Runs `f`, whose parallel loop computes columns of mode `k`, on as many threads as such
-/// columns fit in `COLUMN_MEMORY`.
-pub fn columns_at_once<R: Send>(rt: &Runtime, k: usize, f: impl FnOnce() -> R + Send) -> R {
+/// Runs `f` on each item, each computing columns of mode `k`, as many at once as such
+/// columns fit in `COLUMN_MEMORY`; the columns' own loops have every thread. Results in item
+/// order.
+pub fn columns_at_once<T: Sync, R: Send>(rt: &Runtime, k: usize, items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let t = &rt.tables[&rt.vocab.modes[k].info.fam];
     let largest = (0..t.components() as u32).map(|x| t.nodes(x)).max().unwrap_or(0) as u64;
     let per = 2 * (rt.vocab.n() as u64 + largest) + 1;
-    let threads = (COLUMN_MEMORY / per).clamp(1, rayon::current_num_threads() as u64) as usize;
-    rayon::ThreadPoolBuilder::new().num_threads(threads).build().expect("a thread pool").install(f)
+    in_lanes(None, (COLUMN_MEMORY / per) as usize, items, f)
+}
+
+/// Runs `f` on each item, at most `lanes` at once (at least one), results in item order.
+/// Each lane is a thread of its own taking the next item, and `f`'s parallel loops run on
+/// `pool` (the global pool when `None`): so a few items at a time bound the memory while
+/// every core works on them. A lane is not a task of the pool, so a pool thread waiting
+/// inside one item never takes up another lane's items.
+pub fn in_lanes<T: Sync, R: Send>(pool: Option<&rayon::ThreadPool>, lanes: usize, items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let out: std::sync::Mutex<Vec<Option<R>>> = std::sync::Mutex::new((0..items.len()).map(|_| None).collect());
+    let run = |j: usize| match pool {
+        Some(p) => p.install(|| f(&items[j])),
+        None => f(&items[j]),
+    };
+    std::thread::scope(|s| {
+        for _ in 0..lanes.clamp(1, items.len().max(1)) {
+            s.spawn(|| {
+                loop {
+                    let j = next.fetch_add(1, Ordering::Relaxed);
+                    if j >= items.len() {
+                        break;
+                    }
+                    let r = run(j);
+                    out.lock().unwrap()[j] = Some(r);
+                }
+            });
+        }
+    });
+    out.into_inner().unwrap().into_iter().map(|r| r.expect("every item run")).collect()
 }
 
 /// Runs a check suite, turning an error into a mismatch of its own.
@@ -256,8 +286,10 @@ pub fn verify(model: &Path, o: &Options) -> Result<Verified> {
         }
     }
     mem::trim();
-    // The replay needs the model and the golden files only.
+    // The replay needs the model and the golden files only, and of the components only what
+    // queries read.
     if let Some(dir) = &golden_dir {
+        rt.set_queries_only(true);
         phase("golden replay", || guarded(&mut report, "golden replay", |rep| golden::replay(&rt, dir, rep)));
     }
     Ok(Verified { scenario: set.name.clone(), report, mutants, golden_written })

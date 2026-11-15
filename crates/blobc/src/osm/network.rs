@@ -514,7 +514,6 @@ impl<'o, A: Copy + Send + Sync + Speeds> Network<'o, A> {
             )?;
         }
         let dir = self.dir.as_deref();
-        let col = |name: &str| dir.map(|d| d.join(name));
         let (mut way, mut seq, mut len_m) = (ColumnWriter::new(dir, "way.bin")?, ColumnWriter::new(dir, "seq.bin")?, ColumnWriter::new(dir, "len_m.bin")?);
         let (mut eligible, mut left) = (ColumnWriter::new(dir, "eligible.bin")?, ColumnWriter::new(dir, "left.bin")?);
         let (mut pt_first, mut pt_lat, mut pt_lon) = (ColumnWriter::new(dir, "pt_first.bin")?, ColumnWriter::new(dir, "pt_lat.bin")?, ColumnWriter::new(dir, "pt_lon.bin")?);
@@ -594,10 +593,8 @@ impl<'o, A: Copy + Send + Sync + Speeds> Network<'o, A> {
             u.push(local(a))?;
             v.push(local(b))?;
         }
+        // Their files were unlinked when mapped: the disk goes with them.
         drop((ends_u, ends_v));
-        for p in [col("ends_u.bin"), col("ends_v.bin")].into_iter().flatten() {
-            std::fs::remove_file(p)?;
-        }
         Ok(Pieces {
             osm_nodes: ids.len(),
             node_osm: node_osm.finish()?,

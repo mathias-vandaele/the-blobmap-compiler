@@ -1,6 +1,8 @@
 //! Columns of plain values (SPEC §10, memory): held in memory, or written to a file of a
 //! work directory as they are made and then mapped read-only, so that a family's pieces
 //! and ways need not stay resident whatever the size of the input. Both read as slices.
+//! A file is unlinked as soon as it is mapped, so its disk goes with the column's last
+//! clone, not with the work directory.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -198,8 +200,10 @@ impl<T: Plain> ColumnWriter<T> {
                 drop(out);
                 let f = File::open(&path).with_context(|| format!("opening {}", path.display()))?;
                 // SAFETY: the file was just written by this writer, lives in a work
-                // directory of this process, and is never changed afterwards.
+                // directory of this process, and is unlinked below, so nothing changes it.
                 let m = unsafe { Mmap::map(&f)? };
+                drop(f);
+                std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
                 Column(Inner::Map(Arc::new(m), n))
             }
         })

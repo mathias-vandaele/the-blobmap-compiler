@@ -116,31 +116,30 @@ pub fn main(a: Vec<String>) -> Result<()> {
     }
     let groups: Vec<(&str, Vec<usize>)> = by_origin.into_iter().collect();
     // Per pair: Ok(seconds) or the answer's reason.
-    let answers: Vec<Vec<(usize, Result<f64, String>)>> = crate::verify::columns_at_once(&rt, m, || groups
-        .par_iter()
-        .map(|(o, ks)| -> Result<_> {
-            let src = match rt.resolve(o).and_then(|i| rt.served(i, m).map(|_| i)) {
-                Ok(i) => i,
-                Err(r) => return Ok(ks.iter().map(|&k| (k, Err(format!("origin {}", r.name())))).collect()),
-            };
-            let times = rt.column(&[Source { id: src, start: 0 }], m, Dir::From)?;
-            let mv = &rt.vocab.modes[m];
-            Ok(ks
-                .iter()
-                .map(|&k| {
-                    let d = match rt.resolve(&rows[k].1).and_then(|i| rt.served(i, m).map(|_| i)) {
-                        Ok(i) => i,
-                        Err(r) => return (k, Err(format!("destination {}", r.name()))),
-                    };
-                    if mv.component[d as usize] != mv.component[src as usize] {
-                        return (k, Err("DifferentComponent".into()));
-                    }
-                    let t = times[d as usize];
-                    (k, if t == INF { Err("BEYOND".into()) } else { Ok(t as f64) })
-                })
-                .collect())
-        })
-        .collect::<Result<_>>())?;
+    let answers: Vec<Vec<(usize, Result<f64, String>)>> = crate::verify::columns_at_once(&rt, m, &groups, |(o, ks)| -> Result<_> {
+        let src = match rt.resolve(o).and_then(|i| rt.served(i, m).map(|_| i)) {
+            Ok(i) => i,
+            Err(r) => return Ok(ks.iter().map(|&k| (k, Err(format!("origin {}", r.name())))).collect()),
+        };
+        let times = rt.column(&[Source { id: src, start: 0 }], m, Dir::From)?;
+        let mv = &rt.vocab.modes[m];
+        Ok(ks
+            .iter()
+            .map(|&k| {
+                let d = match rt.resolve(&rows[k].1).and_then(|i| rt.served(i, m).map(|_| i)) {
+                    Ok(i) => i,
+                    Err(r) => return (k, Err(format!("destination {}", r.name()))),
+                };
+                if mv.component[d as usize] != mv.component[src as usize] {
+                    return (k, Err("DifferentComponent".into()));
+                }
+                let t = times[d as usize];
+                (k, if t == INF { Err("BEYOND".into()) } else { Ok(t as f64) })
+            })
+            .collect())
+    })
+    .into_iter()
+    .collect::<Result<_>>()?;
     let mut ok: Vec<(f64, f64)> = Vec::new();
     let mut missed: BTreeMap<String, u64> = BTreeMap::new();
     for (k, r) in answers.into_iter().flatten() {

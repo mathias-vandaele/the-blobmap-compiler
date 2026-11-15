@@ -247,6 +247,9 @@ pub struct Component {
     pub fam: Fam,
     pub n: usize,
     pub blocks: Vec<BlockAt>,
+    /// Per block, its level bounds as component-local ids (FORMAT §5.2): level l is
+    /// `levels[b][l] .. levels[b][l + 1]`, level 0 the top.
+    pub levels: Vec<Vec<u32>>,
     pub up_first: Arr<u64>,
     pub up_head: Arr<u32>,
     /// Per metric.
@@ -317,6 +320,8 @@ pub struct Runtime {
     loaded: Condvar,
     /// Where the vocabulary and the components go to mapped files (`Arr`), if anywhere.
     scratch: Option<PathBuf>,
+    /// Components load only what queries read (`set_queries_only`).
+    queries_only: std::sync::atomic::AtomicBool,
 }
 
 fn strings(m: &Model, name: &str) -> Result<Vec<String>> {
@@ -448,6 +453,7 @@ impl Runtime {
             loading: Mutex::new(BTreeSet::new()),
             loaded: Condvar::new(),
             scratch: scratch.map(Path::to_path_buf),
+            queries_only: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -489,11 +495,21 @@ impl Runtime {
         self.cache.lock().unwrap().clear();
     }
 
+    /// From now on, components load only the arrays that queries read (`answer`, columns,
+    /// pairs), not those of the roads, the links of arcs and the copies' originals, which only
+    /// the checks read: on ACTIVE over half of a component's scratch. Drops the components
+    /// loaded so far, so that none is held twice.
+    pub fn set_queries_only(&self, on: bool) {
+        self.release();
+        self.queries_only.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn load(&self, fam: Fam, x: u32) -> Result<Component> {
         let t = &self.tables[&fam];
         let f = fam.name();
         let m = &self.model;
         ensure!((x as usize) < t.components(), "{f} component {x} does not exist");
+        let full = !self.queries_only.load(std::sync::atomic::Ordering::Relaxed);
         let metrics = &t.metrics;
         let word = if fam == Fam::Car { "turn" } else { "road" };
         let n = t.nodes(x) as usize;
@@ -514,6 +530,7 @@ impl Runtime {
         let mut w_w = per_metric()?;
         let (mut copy_of_w, mut copy_first_w, mut copies_w) = (ArrWriter::new(sc)?, ArrWriter::new(sc)?, ArrWriter::new(sc)?);
         let mut blocks = Vec::new();
+        let mut levels = Vec::new();
         let (mut up_last, mut arc_last) = (0u64, 0u64);
         up_first_w.push(0u64)?;
         arc_first_w.push(0u64)?;
@@ -532,6 +549,15 @@ impl Runtime {
             let rows = row_first as usize..(row_first + nodes) as usize;
             ensure!(rows.end < up_first.len() && rows.end < arc_first.len(), "{p}: rows out of range");
             blocks.push(BlockAt { kind: t.b_kind[b], id_first, pack_link_first: up_first[rows.start] as u64 });
+            let (lb, nl) = (t.b_level_base[b] as usize, t.b_levels[b] as usize);
+            let lf = u32s("level_first")?;
+            ensure!(lb + nl < lf.len(), "{p}: block {b}'s level bounds out of range");
+            let bounds: Vec<u32> = lf[lb..=lb + nl].iter().map(|&v| v.wrapping_sub(base)).collect();
+            ensure!(
+                bounds[0] == id_first && bounds[nl] == id_first + nodes && bounds.windows(2).all(|w| w[0] < w[1]),
+                "{f} component {x} block {b}: level bounds do not cover its ids in order"
+            );
+            levels.push(bounds);
             let links = up_first[rows.start] as usize..up_first[rows.end] as usize;
             let arcs = arc_first[rows.start] as usize..arc_first[rows.end] as usize;
             for r in rows.clone() {
@@ -550,23 +576,27 @@ impl Runtime {
             for &h in &arc_head[arcs.clone()] {
                 arc_head_w.push(local(h, "head")?)?;
             }
-            raw_links.extend_from_slice(&arc_link[arcs.clone()])?;
-            for a in arcs.clone() {
-                arc_local_w.push(a as u32)?;
-            }
-            let range = if fam == Fam::Car { rows.clone() } else { arcs.clone() };
-            way_w.extend_from_slice(&m.get::<i64>(&format!("{p}way"))?[range.clone()])?;
-            way_dir_w.extend_from_slice(&m.get::<u8>(&format!("{p}way_dir"))?[range.clone()])?;
-            way_seq_w.extend_from_slice(&u32s("way_seq")?[range.clone()])?;
-            kind_w.extend_from_slice(&m.get::<u8>(&format!("{p}kind"))?[range.clone()])?;
-            for (k, name) in metrics.iter().enumerate() {
-                time_s_w[k].extend_from_slice(&m.get::<f32>(&format!("{p}{name}.time_s"))?[range.clone()])?;
-                w_w[k].extend_from_slice(&m.get::<u16>(&format!("{p}{name}.w"))?[range.clone()])?;
+            if full {
+                raw_links.extend_from_slice(&arc_link[arcs.clone()])?;
+                for a in arcs.clone() {
+                    arc_local_w.push(a as u32)?;
+                }
+                let range = if fam == Fam::Car { rows.clone() } else { arcs.clone() };
+                way_w.extend_from_slice(&m.get::<i64>(&format!("{p}way"))?[range.clone()])?;
+                way_dir_w.extend_from_slice(&m.get::<u8>(&format!("{p}way_dir"))?[range.clone()])?;
+                way_seq_w.extend_from_slice(&u32s("way_seq")?[range.clone()])?;
+                kind_w.extend_from_slice(&m.get::<u8>(&format!("{p}kind"))?[range.clone()])?;
+                for (k, name) in metrics.iter().enumerate() {
+                    time_s_w[k].extend_from_slice(&m.get::<f32>(&format!("{p}{name}.time_s"))?[range.clone()])?;
+                    w_w[k].extend_from_slice(&m.get::<u16>(&format!("{p}{name}.w"))?[range.clone()])?;
+                }
             }
             if fam == Fam::Car {
                 turn_cost_w.extend_from_slice(&m.get::<u16>(&format!("{p}car.turn_cost"))?[arcs.clone()])?;
-                for &o in &u32s("copy_of")?[rows.clone()] {
-                    copy_of_w.push(if o == NONE { NONE } else { local(o, "copy_of")? })?;
+                if full {
+                    for &o in &u32s("copy_of")?[rows.clone()] {
+                        copy_of_w.push(if o == NONE { NONE } else { local(o, "copy_of")? })?;
+                    }
                 }
                 let cf = u32s("copy_first")?;
                 let cs = u32s("copies")?;
@@ -584,6 +614,7 @@ impl Runtime {
             fam,
             n,
             blocks,
+            levels,
             up_first: up_first_w.finish()?,
             up_head: up_head_w.finish()?,
             up: all(up_w)?,
@@ -603,6 +634,9 @@ impl Runtime {
             copy_first: copy_first_w.finish()?,
             copies: copies_w.finish()?,
         };
+        if !full {
+            return Ok(e);
+        }
         let raw_links = raw_links.finish()?;
         // Arc links: pack-local in the pack of the lower node → component-local.
         let mut arc_link = ArrWriter::new(sc)?;
