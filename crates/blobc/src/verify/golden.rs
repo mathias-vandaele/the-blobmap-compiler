@@ -320,7 +320,9 @@ fn first_term(e: &Value) -> Option<&Value> {
 
 /// Threads for the replay: as many as half the memory left holds one query's working state
 /// (four columns of every ID and a sweep and two ancestor searches over the largest
-/// component), at least one and at most the cores.
+/// component), at least one and at most the physical cores: an SMT sibling adds little
+/// here and slows its twin (FR+5: 1.24x the serial core-seconds on 12 threads, 2.0x on 23,
+/// and a longer wall time).
 fn replay_threads(rt: &Runtime) -> usize {
     use blobmap_format::runtime::Fam;
     let largest = [Fam::Car, Fam::Active]
@@ -331,5 +333,6 @@ fn replay_threads(rt: &Runtime) -> usize {
         .unwrap_or(0);
     let per = 4 * 2 * rt.vocab.n() + largest * 2 + 2 * (largest * 2 + largest.div_ceil(64) * 8);
     let free = crate::build::mem::free().unwrap_or(0) as usize / 2;
-    (free / per.max(1)).clamp(1, rayon::current_num_threads())
+    let cores = crate::build::mem::physical_cores().unwrap_or(usize::MAX).min(rayon::current_num_threads());
+    (free / per.max(1)).clamp(1, cores)
 }
