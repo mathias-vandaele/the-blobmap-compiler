@@ -212,3 +212,163 @@ outside the read-only reference folders.
    reads into mapped work columns that no longer fit the page cache, so the build waits on
    one page fault at a time. Assemble the packs of a batch in parallel and write them in
    order.
+
+## Runtime: `blobmap-runtime`, the GPU serving library
+
+**Goal:** a library crate, `crates/blobmap-runtime`, that loads a model onto a GPU and
+answers every operation of SPEC §9 exactly as `blobmap_model::reference` does, as fast as
+the hardware allows. The BlobMap API imports it; there is no server and no binary beyond
+test and benchmark tools. SPEC.md and FORMAT.md stay the authorities: the runtime reads the
+bytes as they are and changes neither document.
+
+### Repo rules
+
+- **Dependencies:** `blobmap-runtime` depends on `blobmap-model` only, never on `blobc`.
+  `tools/runtime-deps.sh`, run by `ci.sh`, fails when `cargo tree -p blobmap-runtime`
+  names `blobc`.
+- **No CUDA needed by default:** the crate is a workspace member left out of
+  `default-members`. Its CUDA code sits behind a `cuda` feature, off by default. Without it
+  the crate builds a CPU backend only and its build script never calls nvcc, so
+  `cargo build`, `cargo test --workspace`, clippy and `ci.sh` keep working without CUDA.
+  The GPU build is `cargo build -p blobmap-runtime --features cuda`.
+- **Branch:** all work happens on the branch `runtime`, in the worktree
+  `../the-blobmap-compiler-runtime`, and merges to `main` only after a gate passes.
+  `crates/blobc` is not touched, apart from the one mechanical rename below.
+- **GPU use:**
+  - free VRAM is checked before every run, and each run stays inside its budget;
+  - no other process is ever stopped;
+  - heavy jobs run one at a time, under a memory-capped systemd scope;
+  - the live BlobMap API is never queried.
+
+### Step 0: the reference runtime renamed
+
+- `blobmap_model::runtime` becomes `blobmap_model::reference`, so that "runtime" always
+  means this crate.
+- The compiler's `use` paths change with it: 17 lines in `crates/blobc/src/verify/*` and
+  `main.rs`, imports only.
+- **Proof:** `ci.sh` green, and HdF rebuilt and verified with the same model_id as before.
+
+### Design
+
+**Loading** (per family, VRAM budget given at load):
+- open the model through `blobmap-model`, which memory-maps the shards;
+- **GPU, hot:** `level_first`, `up_first`, `up_head`, the metric `up`/`down` tensors,
+  `nodes/component` and the block tables;
+- **host RAM, warm:** turns, roads, segment weights, copies and the vocabulary;
+- **cold tensors are never read:** way keys and master times.
+- The CPU upward search reads the hot tensors through the same mapping, so they also sit in
+  the page cache.
+- Load fails with a clear error when the hot set, the entry bounds and the label pool for
+  B_max columns exceed the budget. Inside it, the label pool sets how many columns can be
+  in flight.
+
+**Seeds and upward search on the CPU.**
+- Sources resolve to their slots and offsets, plus the car exit turns for `from`, or the
+  arrivals through copies for `to` (FORMAT §8).
+- The upward search climbs the thin chain of ancestors on the host. Its labels go to the
+  GPU as one sparse seed list per column.
+
+**Downward sweep on the GPU**, ported from the research's `cuda/sweep.cu`:
+- **Top block:** resident in shared memory, as `top_resident`; it fits on France (20 KB).
+- **Wide levels:** one launch per wide level, captured as a CUDA graph, with lane groups
+  for high-degree nodes.
+- **Cells:** below the top block, cells share no links (FORMAT §5.2). Each cell's levels
+  run as independent work, one thread block per cell for its narrow and medium levels,
+  instead of one launch per cell level. This attacks the 972 launches that cost France
+  7.4 ms against the research's 5.7.
+- **Batching:** B columns per sweep, B = 1 to 64, with labels interleaved per node. A
+  dispatcher merges concurrent requests on the same (family, metric, component, dir) into
+  one sweep.
+
+**Pruning** (isochrone, nearest, reachable and bounded multi-criteria terms):
+- per elimination-tree subtree, with the entry bound of the study (§5.5): an upper
+  neighbour's label ⊕ the cheapest link into the subtree;
+- the entry bound is 2 B per link per metric, computed at load on the CPU by one bottom-up
+  merge (51 s for the Europe car component) and stored on the GPU;
+- two variants, measured on France and Europe with the faster one kept:
+  - (a) a per-node live flag passed down level by level;
+  - (b) a depth-first renumbering at load, so that every subtree is a range skipped in one
+    jump.
+- A full `column` is never pruned.
+
+**Heads, exactly as FORMAT §8:**
+- offsets;
+- car exit turns, and arrivals through copies;
+- the direct term on a shared piece;
+- same ID, the cap, `BEYOND`, `DifferentComponent` from `nodes/component`;
+- the smallest-ID tie-break (SPEC §7).
+- **Pruned queries:** only the visited labels come back and the heads run on the host.
+- **Full columns:** two options, both measured on Europe at B = 1 and B = 64, keeping the
+  faster:
+  - copy the labels back (Europe car 288 MB per column) and run the heads in parallel on
+    the host;
+  - upload the family's per-ID entry tables, a warm tensor, and run the heads on the GPU.
+  - Moving a warm tensor to the GPU is a change from the brief, so I'll make it only if the
+    measurements show it pays.
+
+**API:**
+- **Types:**
+  - `Runtime::open(model_dir, Options { vram_budget, devices, b_max, … })`;
+  - typed methods for every SPEC §9 operation: `travel_time`, `isochrone`, `nearest`,
+    `column`, `reachable_from_all`/`_any`, `multi_criteria`, `chained`, `chained_column`;
+  - results and reasons use `blobmap_model::reference`'s own types (`Reason`, `Dir`, IDs),
+    re-exported.
+- **Concurrency:** `Runtime` is `Send + Sync`, queries run concurrently, each request
+  thread does its own upward search, and one GPU worker per device drains the batch queue.
+- **Golden replay:** a `golden` module answers `queries.jsonl` lines through the typed API,
+  for replay and benchmarks.
+- **CPU backend:** the same front end with a CPU downward sweep. It is used without
+  `cuda`, and as the second opinion in the randomized tests.
+
+**Kernels:** `.cu` files under `crates/blobmap-runtime/cu/`, compiled by nvcc for sm_89 in
+`build.rs` (`cuda` feature only), as in the smoke test.
+
+### Order of work
+
+1. Step 0: rename and proof.
+2. Crate skeleton:
+   - feature gate, dependency check, CPU backend;
+   - typed operations matching the reference on the tiny tier.
+3. GPU loading:
+   - hot upload, VRAM budget, label pool;
+   - downward sweep at B = 1 (research kernels, top resident), labels checked against the
+     CPU sweep;
+   - then full columns.
+4. Heads, seeds and operations on the GPU path; golden replay on tiny, small and HdF.
+5. Pruning, both variants: exactness against full columns, then France and Europe
+   measured.
+6. Per-cell levels and batching (B = 1, 8, 32, 64); the dispatcher.
+7. **R1**, then R2 measurements, then the README, examples and the world extrapolation for
+   R3.
+
+### Gates
+
+- **R1, correct** (stop and report):
+  - zero mismatches replaying the golden files of every tier whose hot part fits in 16 GB:
+    - tiny (all scenarios);
+    - small: Lille, Great Britain, Japan, Fiji, Norway, India, California;
+    - HdF, France and FR+5 (`frbeluchde`);
+    - Europe one family at a time where it fits: active, about 8 GB hot plus 2 GB of
+      entry bounds. Europe car's hot set (about 14–15 GB plus 2.4 GB of entry bounds) does
+      not fit a 16 GB card, so it is reported as not run.
+  - The existing models in `data/models` match the golden `inputs_hash` of their tier, so
+    no rebuild is needed.
+  - **Randomized comparison** with `blobmap_model::reference` on HdF and France, fixed
+    seed: columns, isochrones, nearest, multi-criteria and chained, in both directions,
+    with start times, same-piece pairs and border sources.
+- **R2, fast** (stop and report):
+  - **Latency** (median, p95) per query type, on France and Europe (each family where it
+    fits):
+    - travel_time;
+    - isochrone at 5/15/30/60 min, with the border sources Strasbourg, Saint-Louis and
+      Menton included;
+    - nearest;
+    - full column;
+    - multi-criteria.
+  - Throughput at B = 1, 8, 32 and 64.
+  - VRAM used.
+  - France car compared with the research's 5.7 ms and the smoke test's 7.4 ms.
+- **R3, ready for the API:**
+  - the public API documented in `crates/blobmap-runtime/README.md`, with examples;
+  - an extrapolation to the world model on one H200 (hot 83.4 GB on the GPU, warm in RAM),
+    from the R2 fits and the planet's measured sizes.
