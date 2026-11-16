@@ -2,7 +2,7 @@
 
 How the milestones of SPEC §13 get built. SPEC.md says what; FORMAT.md says the bytes; this
 file only orders the work. Status: approved 2026-11-08; milestones 2, 3, 4 and 5 closed (3 on
-2026-11-10, 4 on 2026-11-11, 5 on 2026-11-13).
+2026-11-10, 4 on 2026-11-11, 5 on 2026-11-13); milestone 6: built, verify pending.
 
 ## Milestone 2: toy and synthetic
 
@@ -201,3 +201,14 @@ outside the read-only reference folders.
     - verified at the tiers that apply;
     - sizes reported (components per continent from the component tensor, bytes per part)
       for choosing the serving hardware.
+  - **Status: built, verify pending.** Built 2026-11-16 at commit 535bcd7 (model_id
+    `3264f668…`), 199.6 GB, peak anon 42.5 GB (car-order), within 62 GB. The planet
+    verify runs later, on the serving machine.
+
+## Optimisation, after milestone 6
+
+1. **The serial pack writer.** The hierarchy stages ran 6.9× (car) and 8.4× (active) their
+   time estimates on the planet: each cell's pack is assembled on one thread from random
+   reads into mapped work columns that no longer fit the page cache, so the build waits on
+   one page fault at a time. Assemble the packs of a batch in parallel and write them in
+   order.
