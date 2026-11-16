@@ -542,6 +542,10 @@ pub struct Gpu {
     max_x: u32,
     max_chunk: u64,
     pub use_graphs: bool,
+    /// Time each sweep (a device sync after the launches): `times` holds the seconds of the
+    /// last sweep's seeding and launches, and of its read-back.
+    pub timing: bool,
+    pub times: std::cell::Cell<[f64; 2]>,
 }
 
 impl Gpu {
@@ -565,7 +569,7 @@ impl Gpu {
         let top_threads = hw.max_units_per_cube.min(1024);
         let max_x = hw.max_cube_count.0.min(65535);
         let max_chunk = props.memory.max_page_size.min(1 << 30);
-        Ok(Gpu { kind, merge, max_shared, top_threads, max_x, max_chunk, use_graphs: kind == Kind::Cuda, client })
+        Ok(Gpu { kind, merge, max_shared, top_threads, max_x, max_chunk, use_graphs: kind == Kind::Cuda, timing: false, times: std::cell::Cell::new([0.0; 2]), client })
     }
 
     pub fn describe(&self) -> String {
@@ -834,6 +838,7 @@ impl Gpu {
     /// One sweep of up to 2 · p_max columns of a component (metric, dir): labels by new id,
     /// per column.
     pub fn sweep(&self, d: &mut DevGraph, metric: usize, dir: Dir, cols: &[&Column]) -> Result<Vec<Vec<u16>>> {
+        let t0 = std::time::Instant::now();
         let k = cols.len() as u32;
         ensure!(k >= 1 && k <= 2 * d.p_max, "{k} columns, outside 1..{}", 2 * d.p_max);
         let p = k.div_ceil(2);
@@ -908,6 +913,12 @@ impl Gpu {
         } else {
             self.enqueue_down(d, p, wi, prune);
         }
+        let t_down = if self.timing {
+            cubecl::future::block_on(cl.sync()).map_err(|e| anyhow!("sync: {e:?}"))?;
+            t0.elapsed().as_secs_f64()
+        } else {
+            0.0
+        };
         // The used words, copied to a buffer of their exact size, read whole.
         let words = d.n * p as usize;
         let h = cl.empty(words * 4);
@@ -915,6 +926,9 @@ impl Gpu {
         let bytes = cl.read_one(h).map_err(|e| anyhow!("read: {e:?}"))?;
         ensure!(bytes.len() >= words * 4, "read {} bytes of {}", bytes.len(), words * 4);
         let all: &[u32] = bytemuck::cast_slice(&bytes[..words * 4]);
+        if self.timing {
+            self.times.set([t_down, t0.elapsed().as_secs_f64() - t_down]);
+        }
         let mut out = Vec::with_capacity(cols.len());
         for c in 0..cols.len() {
             let (q, sh) = (c / 2, 16 * (c % 2));

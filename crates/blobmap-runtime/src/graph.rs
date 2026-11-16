@@ -180,7 +180,7 @@ impl Graph {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn relayer(
+pub(crate) fn relayer(
     fam: Fam,
     n: usize,
     up_first: Vec<u64>,

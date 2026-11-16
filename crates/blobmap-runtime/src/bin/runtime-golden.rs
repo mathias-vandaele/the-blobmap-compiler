@@ -1,7 +1,9 @@
 //! `runtime-golden <model> <golden dir> [options]`: replays a golden file (FORMAT §11)
 //! through blobmap-runtime and counts the answers that differ. Options: `--backend
 //! auto|cpu|cuda|wgpu`, `--threads n` (queries at once), `--min-nodes n` (components below
-//! sweep on the CPU), `--b-max n`, `--budget-gib x`, `--no-prune`, `--no-graphs`, `--ops a,b`.
+//! sweep on the CPU), `--b-max n`, `--budget-gib x`, `--no-prune`, `--no-graphs`, `--ops a,b`,
+//! `--gpu-family car|active` (the other family sweeps on the CPU), `--family
+//! car|active|mixed` (only the queries of that family's modes, or of both).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -20,6 +22,7 @@ fn main() -> Result<()> {
     let mut o = Options { gpu_min_nodes: 0, ..Options::default() };
     let mut threads = 8usize;
     let mut ops: Option<Vec<String>> = None;
+    let mut family: Option<String> = None;
     let mut i = 2;
     while i < a.len() {
         let v = || a.get(i + 1).context("option value");
@@ -38,6 +41,8 @@ fn main() -> Result<()> {
                 i -= 1;
             }
             "--ops" => ops = Some(v()?.split(',').map(String::from).collect()),
+            "--gpu-family" => o.gpu_families = [v()? == "car", v()? == "active"],
+            "--family" => family = Some(v()?.clone()),
             x => bail!("unknown option {x}"),
         }
         i += 2;
@@ -54,6 +59,20 @@ fn main() -> Result<()> {
     let mut queries: Vec<Value> = body.split(|&b| b == b'\n').filter(|l| !l.is_empty()).map(serde_json::from_slice).collect::<Result<_, _>>()?;
     if let Some(ops) = &ops {
         queries.retain(|q| ops.iter().any(|o| q["op"] == o.as_str()));
+    }
+    if let Some(f) = &family {
+        // The families a query's modes belong to: car, active, or both (mixed).
+        let of = |q: &Value| -> &str {
+            let s = q.to_string();
+            let car = s.contains("\"mode\":\"car\"") || q["op"].as_str().is_some_and(|o| o.starts_with("chained"));
+            let act = s.contains("\"mode\":\"bike\"") || s.contains("\"mode\":\"walk\"") || q["op"].as_str().is_some_and(|o| o.starts_with("chained"));
+            match (car, act) {
+                (true, false) => "car",
+                (false, true) => "active",
+                _ => "mixed",
+            }
+        };
+        queries.retain(|q| of(q) == f);
     }
     let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build()?;
     let per_op: Mutex<BTreeMap<String, (usize, usize, f64)>> = Mutex::default();

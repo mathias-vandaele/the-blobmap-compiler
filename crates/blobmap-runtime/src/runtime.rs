@@ -52,11 +52,13 @@ pub struct Options {
     pub prune: bool,
     /// CUDA graphs for the sweep's launches.
     pub graphs: bool,
+    /// Per family (car, active), whether its sweeps go to the GPU (else the CPU).
+    pub gpu_families: [bool; 2],
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { backend: Backend::Auto, gpu_min_nodes: 1 << 16, b_max: 16, vram_budget: 14 << 30, prune: true, graphs: true }
+        Options { backend: Backend::Auto, gpu_min_nodes: 1 << 16, b_max: 16, vram_budget: 14 << 30, prune: true, graphs: true, gpu_families: [true, true] }
     }
 }
 
@@ -241,7 +243,7 @@ impl Runtime {
         for (key, idx) in &groups {
             let comp = &parts[idx[0]].comp;
             match &self.gpu {
-                Some(gpu) if comp.g.n >= self.opts.gpu_min_nodes => {
+                Some(gpu) if comp.g.n >= self.opts.gpu_min_nodes && self.opts.gpu_families[key.fam as usize] => {
                     let cols: Vec<Column> = idx.iter().map(|&i| parts[i].col.clone()).collect();
                     pending.push((idx.clone(), gpu.submit(*key, comp.clone(), cols)));
                 }

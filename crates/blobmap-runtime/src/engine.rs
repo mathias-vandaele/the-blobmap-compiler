@@ -162,7 +162,9 @@ fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Sta
         };
         let key = batch[0].key;
         clock += 1;
-        let r = (|| -> Result<Vec<Vec<u16>>> {
+        // A panic in CubeCL or a kernel becomes this batch's error: the worker lives on, so
+        // that no later request waits on a queue nobody drains.
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Vec<Vec<u16>>> {
             let ck = (key.fam, key.component);
             if !loaded.contains_key(&ck) {
                 let g = &batch[0].comp.g;
@@ -200,7 +202,8 @@ fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Sta
             s.sweeps += 1;
             s.columns += cols.len() as u64;
             Ok(out)
-        })();
+        }))
+        .unwrap_or_else(|e| Err(anyhow!("GPU panic: {}", e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default())));
         match r {
             Ok(mut out) => {
                 for j in batch {

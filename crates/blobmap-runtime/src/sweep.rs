@@ -111,3 +111,77 @@ pub fn cpu_down(g: &Graph, metric: usize, dir: Dir, c: &Column, bounds: Option<&
     }
     lab
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::{relayer, upward};
+    use crate::vocab::Fam;
+    use std::collections::BTreeSet;
+
+    /// A filled graph: random links of bounded span, closed under elimination from the
+    /// largest id (FORMAT §5.2's hierarchy), random weights, a few near saturation.
+    fn filled(n: usize, seed: u64) -> Graph {
+        let mut x = seed;
+        let mut rnd = move |m: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % m
+        };
+        let mut up: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); n];
+        for v in 1..n {
+            for _ in 0..1 + rnd(3) {
+                let span = 1 + rnd(12) as usize;
+                if span <= v {
+                    up[v].insert((v - span) as u32);
+                }
+            }
+        }
+        for v in (0..n).rev() {
+            let row: Vec<u32> = up[v].iter().copied().collect();
+            for (i, &a) in row.iter().enumerate() {
+                for &b in &row[i + 1..] {
+                    up[b as usize].insert(a);
+                }
+            }
+        }
+        let (mut first, mut head) = (vec![0u64], Vec::new());
+        for r in &up {
+            head.extend(r.iter().copied());
+            first.push(head.len() as u64);
+        }
+        let mut w = |m: u64| -> Vec<u16> { (0..head.len()).map(|_| if rnd(40) == 0 { 65000 } else { rnd(m) as u16 }).collect() };
+        let (u, d) = (w(400), w(400));
+        relayer(Fam::Active, n, first, head, vec![u], vec![d], vec![0], Vec::new(), Vec::new(), vec![0], Vec::new())
+    }
+
+    #[test]
+    fn pruned_sweeps_agree_up_to_the_bound() {
+        for seed in [3u64, 11, 29] {
+            let g = filled(4000, seed);
+            let bounds = all_bounds(&g).unwrap();
+            for dir in [Dir::From, Dir::To] {
+                let b = &bounds[dir_index(dir)];
+                for (k, src) in [7u32, 1999, 3500].into_iter().enumerate() {
+                    let v = g.new[src as usize];
+                    let entries = upward(&g, 0, dir, &[(v, 37 * k as u16)]);
+                    let full = cpu_down(&g, 0, dir, &Column { entries: entries.clone(), bound: INF }, None);
+                    for t in [0u16, 150, 600, 2000, 60000] {
+                        let p = cpu_down(&g, 0, dir, &Column { entries: entries.clone(), bound: t }, Some(b));
+                        let dead = p.iter().filter(|&&x| x == DEAD).count();
+                        for i in 0..g.n {
+                            assert_eq!(full[i] <= t, p[i] <= t, "seed {seed} {dir:?} t {t}: node {i} {} vs {}", full[i], p[i]);
+                            if full[i] <= t {
+                                assert_eq!(full[i], p[i]);
+                            }
+                        }
+                        if t == 150 {
+                            assert!(dead > 0, "seed {seed} {dir:?}: nothing pruned at t {t}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
