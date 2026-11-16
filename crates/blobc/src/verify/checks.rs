@@ -5,9 +5,9 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 
 use anyhow::Result;
-use blobmap_model::runtime::query::{Source, labels_at};
-use blobmap_model::runtime::recustomize::{RoadRef, customize};
-use blobmap_model::runtime::{Dir, Component, Fam, Runtime};
+use blobmap_model::reference::query::{Source, labels_at};
+use blobmap_model::reference::recustomize::{RoadRef, customize};
+use blobmap_model::reference::{Dir, Component, Fam, Runtime};
 use blobmap_model::{INF, NONE, NONE64};
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
@@ -655,7 +655,7 @@ pub fn scenario(rt: &Runtime, ex: &Expected, checks: &[Check], cells_variant: bo
                 });
                 o.expect(tt(rt, alias, kept, "walk") == json!({"time": 0}), || "alias and kept place are not the same ID".into());
             }
-            Check::Unknown { id } => o.expect(rt.resolve(id) == Err(blobmap_model::runtime::Reason::UnknownId), || format!("{id} is known")),
+            Check::Unknown { id } => o.expect(rt.resolve(id) == Err(blobmap_model::reference::Reason::UnknownId), || format!("{id} is known")),
             Check::DifferentComponent { mode, a, b } => {
                 let got = tt(rt, a, b, mode);
                 o.expect(got["reason"] == "DifferentComponent", || format!("{a}->{b} {mode}: {got}"));
@@ -684,7 +684,7 @@ pub fn scenario(rt: &Runtime, ex: &Expected, checks: &[Check], cells_variant: bo
                 let m = rt.mode(mode)?;
                 let (ia, ib) = (rt.resolve(a), rt.resolve(b));
                 let same = match (ia, ib) {
-                    (Ok(x), Ok(y)) => blobmap_model::runtime::query::same_piece(&rt.vocab.modes[m], x as usize, y as usize),
+                    (Ok(x), Ok(y)) => blobmap_model::reference::query::same_piece(&rt.vocab.modes[m], x as usize, y as usize),
                     _ => false,
                 };
                 o.expect(same, || format!("{a} and {b} are not on one piece for {mode}"));

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use blobmap_model::NONE;
-use blobmap_model::runtime::Fam;
+use blobmap_model::reference::Fam;
 use rayon::prelude::*;
 
 use crate::build::{ActiveNetwork, CarNetwork, ReadCatalog, ReadNodes, Stage};

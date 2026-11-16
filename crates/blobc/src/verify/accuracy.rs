@@ -16,8 +16,8 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
 use blobmap_model::INF;
-use blobmap_model::runtime::query::Source;
-use blobmap_model::runtime::{Dir, Runtime};
+use blobmap_model::reference::query::Source;
+use blobmap_model::reference::{Dir, Runtime};
 use osmpbf::{BlobDecode, BlobReader};
 use rayon::prelude::*;
 

@@ -5,8 +5,8 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::runtime::model::{Dir, Id, Reason, Runtime};
-use crate::runtime::query::{Source, Work};
+use crate::reference::model::{Dir, Id, Reason, Runtime};
+use crate::reference::query::{Source, Work};
 use crate::{INF, NONE16};
 
 pub fn parse_id(s: &str) -> Result<Id> {

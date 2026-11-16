@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 
-use crate::runtime::model::{Component, Fam, Runtime};
+use crate::reference::model::{Component, Fam, Runtime};
 use crate::{INF, NONE, NONE64, rnd};
 
 /// A road of a family: (component, index) — a CAR node or an ACTIVE arc — or an ACTIVE cross

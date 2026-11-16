@@ -9,7 +9,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::manifest::Manifest;
-use crate::runtime::arr::{Arr, ArrWriter};
+use crate::reference::arr::{Arr, ArrWriter};
 use crate::{Model, NONE, NONE64};
 
 pub type Id = [u8; 16];
@@ -322,8 +322,6 @@ pub struct Runtime {
     scratch: Option<PathBuf>,
     /// Components load only what queries read (`set_queries_only`).
     queries_only: std::sync::atomic::AtomicBool,
-    /// Another implementation of the columns' sweep (`DownSweep`), if one is installed.
-    pub down: std::sync::OnceLock<Arc<dyn crate::runtime::query::DownSweep>>,
 }
 
 fn strings(m: &Model, name: &str) -> Result<Vec<String>> {
@@ -456,7 +454,6 @@ impl Runtime {
             loaded: Condvar::new(),
             scratch: scratch.map(Path::to_path_buf),
             queries_only: std::sync::atomic::AtomicBool::new(false),
-            down: std::sync::OnceLock::new(),
         })
     }
 

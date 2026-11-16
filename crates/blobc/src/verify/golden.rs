@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
-use blobmap_model::runtime::Runtime;
+use blobmap_model::reference::Runtime;
 use rayon::prelude::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -326,7 +326,7 @@ fn first_term(e: &Value) -> Option<&Value> {
 /// little here and slows its twin (FR+5: 1.24x the serial core-seconds on 12 threads, 2.0x
 /// on 23, and a longer wall time).
 fn replay_lanes(rt: &Runtime) -> usize {
-    use blobmap_model::runtime::Fam;
+    use blobmap_model::reference::Fam;
     let largest = [Fam::Car, Fam::Active]
         .iter()
         .filter(|f| rt.tables.contains_key(f))

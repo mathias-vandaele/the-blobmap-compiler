@@ -6,7 +6,7 @@
 use anyhow::Result;
 use rayon::prelude::*;
 
-use crate::runtime::model::{Dir, Component, Fam, Faults, ModeVocab, Reason, Runtime};
+use crate::reference::model::{Dir, Component, Fam, Faults, ModeVocab, Reason, Runtime};
 use crate::{INF, NONE};
 
 /// IDs a task takes in a column's parallel loops.
@@ -55,14 +55,6 @@ impl Work {
         let anc: usize = self.anc.iter().map(|(r, l)| r.capacity() * 8 + l.capacity() * 2).sum();
         cols + self.label.capacity() * 2 + anc
     }
-}
-
-/// Another implementation of a column's sweep (FORMAT §8): given the labels of component
-/// x with the seeds placed, it leaves the swept labels, exactly those of `sweep`. A column
-/// uses it when one is installed in `Runtime::down` and the runtime has no faults; it may
-/// decline (`Ok(false)`), and the column then sweeps itself.
-pub trait DownSweep: Send + Sync {
-    fn sweep(&self, e: &Component, fam: Fam, x: u32, metric: usize, label: &mut [u16], dir: Dir) -> Result<bool>;
 }
 
 /// A source of a column: internal index and start time.
@@ -150,14 +142,7 @@ impl Runtime {
             for s in &srcs {
                 seed(&e, mv, s, dir, f, &mut |v, t| label[v as usize] = label[v as usize].min(t));
             }
-            let faultless = !(f.no_copies || f.no_direct || f.wrapping || f.largest_id || f.no_start);
-            let done = match self.down.get() {
-                Some(d) if faultless => d.sweep(&e, mv.info.fam, x, mv.info.metric, &mut label, dir)?,
-                _ => false,
-            };
-            if !done {
-                sweep(&e, mv.info.metric, &mut label, dir, f);
-            }
+            sweep(&e, mv.info.metric, &mut label, dir, f);
             // The sources by piece (the component is x's), so that an ID meets only the
             // sources on its own piece, not every source.
             let mut by_piece: Vec<([u32; 2], u32, usize)> = srcs.iter().enumerate().map(|(j, s)| (mv.node[s.id as usize], mv.road[s.id as usize], j)).collect();
@@ -582,8 +567,8 @@ pub fn direct(mv: &ModeVocab, a: usize, b: usize) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::arr::Arr;
-    use crate::runtime::model::BlockAt;
+    use crate::reference::arr::Arr;
+    use crate::reference::model::BlockAt;
 
     /// A hierarchy of a top block and two cells with levels of a few to tens of thousands of
     /// nodes, random upper links obeying FORMAT §5.2's level rules, random weights (some near

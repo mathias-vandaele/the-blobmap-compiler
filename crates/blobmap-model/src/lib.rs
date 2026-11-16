@@ -1,6 +1,6 @@
 //! The byte-level contract of FORMAT.md: dtypes and tensors (§1), the deterministic shard
 //! writer and the index (§2), the manifest (§3), hashes (§9) and the validating reader
-//! (§10); and the CPU reference runtime (`runtime`), which answers SPEC §9 from those bytes
+//! (§10); and the CPU reference runtime (`reference`), which answers SPEC §9 from those bytes
 //! alone. Nothing here depends on the compiler.
 
 pub mod dtype;
@@ -8,7 +8,7 @@ pub mod hash;
 pub mod json;
 pub mod manifest;
 pub mod reader;
-pub mod runtime;
+pub mod reference;
 pub mod tensor;
 pub mod writer;
 

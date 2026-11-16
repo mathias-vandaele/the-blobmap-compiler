@@ -12,7 +12,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
 use blobmap_model::NONE;
-use blobmap_model::runtime::{Fam, Runtime};
+use blobmap_model::reference::{Fam, Runtime};
 use rayon::prelude::*;
 
 use crate::snap::{TRAPPED_COMPONENT, find_brute};

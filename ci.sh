@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The milestone 2 gate (PLAN.md), run locally on every commit (SPEC §11):
-#   1. unit tests, and no clippy warnings;
+#   1. unit tests, no clippy warnings, and blobmap-runtime independent of blobc;
 #   2. every scenario built and verified on the tiny tier, golden files replayed, every
 #      mutant caught;
 #   3. byte-identical builds with 1, 2, 8 and 24 threads;
@@ -16,6 +16,7 @@ echo "== 1. unit tests and clippy"
 cargo test --workspace --quiet 2>&1 | grep -E "^test result|FAILED|panicked" || true
 cargo test --workspace --quiet >/dev/null 2>&1
 cargo clippy --workspace --all-targets --quiet -- -D warnings
+tools/runtime-deps.sh
 
 echo "== 2. tiny tier"
 cargo build --quiet --release -p blobc

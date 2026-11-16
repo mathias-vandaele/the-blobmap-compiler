@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 use blobmap_model::hash::{Hasher, ROAD_TAG, VOCAB_TAG, inputs_hash, model_id, of_hashes};
-use blobmap_model::runtime::model::ModeVocab;
-use blobmap_model::runtime::{Component, Fam, Runtime};
+use blobmap_model::reference::model::ModeVocab;
+use blobmap_model::reference::{Component, Fam, Runtime};
 use blobmap_model::{Hash, INF, NONE, NONE16};
 
 use crate::verify::report::{Outcome, Report};

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use blobmap_model::INF;
-use blobmap_model::runtime::Faults;
+use blobmap_model::reference::Faults;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 

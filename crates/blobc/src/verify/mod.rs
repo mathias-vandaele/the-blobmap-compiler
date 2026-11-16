@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use anyhow::Result;
-use blobmap_model::runtime::{Fam, Runtime};
+use blobmap_model::reference::{Fam, Runtime};
 
 use crate::build::mem;
 use crate::fixtures::Check;

@@ -153,7 +153,7 @@ fn run() -> Result<bool> {
                 println!("{f:<12} {} nodes, {} links, {} components, {} packs", x.nodes, x.links, x.components, x.packs);
             }
             // Components built as cells: the top block's levels and the deepest cell's (SPEC §5).
-            let rt = blobmap_model::runtime::Runtime::open(&model)?;
+            let rt = blobmap_model::reference::Runtime::open(&model)?;
             for (fam, t) in &rt.tables {
                 for x in 0..t.components() {
                     let bs = t.block_first[x] as usize..t.block_first[x + 1] as usize;
