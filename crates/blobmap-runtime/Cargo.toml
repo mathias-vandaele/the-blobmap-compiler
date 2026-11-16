@@ -1,0 +1,28 @@
+[package]
+name = "blobmap-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# The research CUDA C kernels (cu/research/sweep.cu), compiled by nvcc.
+cuda = []
+# The CubeCL port, on the CUDA runtime.
+cubecl = ["dep:cubecl", "dep:cubecl-runtime"]
+
+[dependencies]
+anyhow.workspace = true
+blobmap-model.workspace = true
+serde_json.workspace = true
+rayon.workspace = true
+cubecl = { version = "=0.11.4", default-features = false, features = ["std", "cuda"], optional = true }
+cubecl-runtime = { version = "=0.11.4", optional = true }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "cubecl-trial"
+required-features = ["cuda", "cubecl"]

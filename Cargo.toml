@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# The GPU runtime builds only when asked for (`-p blobmap-runtime`): the compiler never needs CUDA.
+default-members = ["crates/blobc", "crates/blobmap-model"]
 exclude = ["work"]
 
 [workspace.package]
