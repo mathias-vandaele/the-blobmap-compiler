@@ -50,11 +50,21 @@ impl Want {
     }
 }
 
-/// A column's answer: dense over `lo ..` (`INF` for BEYOND), or the (index, time) pairs at
-/// most the wanted limit, ascending by index.
+/// Dense times read back from a device: per chunk, its first index and `p` words an index.
+#[derive(Debug)]
+pub struct PackedOut {
+    pub per: u32,
+    pub p: usize,
+    pub chunks: Vec<(u32, Vec<u32>)>,
+}
+
+/// A column's answer: dense over `lo ..` (`INF` for BEYOND), as its own vector or as column
+/// `c` of a device's read-back over `lo .. hi` (with one index's time replaced, `patch`); or
+/// the (index, time) pairs at most the wanted limit, ascending by index.
 #[derive(Clone, Debug)]
 pub enum Times {
     Dense { lo: u32, t: Vec<u16> },
+    Packed { lo: u32, hi: u32, out: Arc<PackedOut>, c: usize, patch: Option<(u32, u16)> },
     Sparse(Vec<(u32, u16)>),
 }
 
@@ -62,15 +72,60 @@ impl Times {
     pub fn get(&self, i: u32) -> u16 {
         match self {
             Times::Dense { lo, t } => i.checked_sub(*lo).and_then(|k| t.get(k as usize)).copied().unwrap_or(INF),
+            Times::Packed { lo, hi, out, c, patch } => {
+                if let Some((j, t)) = patch
+                    && *j == i
+                {
+                    return *t;
+                }
+                if i < *lo || i >= *hi {
+                    return INF;
+                }
+                let k = (i / out.per - out.chunks[0].0 / out.per) as usize;
+                let (s, w) = &out.chunks[k];
+                (w[(i - s) as usize * out.p + c / 2] >> (16 * (c % 2))) as u16
+            }
             Times::Sparse(v) => v.binary_search_by_key(&i, |e| e.0).map_or(INF, |k| v[k].1),
         }
     }
 
-    /// The dense times; a sparse answer has none.
-    pub fn into_dense(self) -> Vec<u16> {
+    /// Replaces index i's time (in a dense answer, or a sparse one).
+    pub fn set(&mut self, i: u32, t: u16) {
         match self {
-            Times::Dense { t, .. } => t,
-            Times::Sparse(_) => panic!("a sparse column has no dense times"),
+            Times::Dense { lo, t: v } => v[(i - *lo) as usize] = t,
+            Times::Packed { patch, .. } => *patch = Some((i, t)),
+            Times::Sparse(v) => match v.binary_search_by_key(&i, |e| e.0) {
+                Ok(k) => v[k].1 = t,
+                Err(k) => v.insert(k, (i, t)),
+            },
+        }
+    }
+
+    /// Every time of indices `0 .. n` in order (`INF` outside a dense range).
+    pub fn for_each(&self, n: u32, mut f: impl FnMut(u16)) {
+        match self {
+            Times::Packed { lo, hi, out, c, patch } => {
+                let (q, sh) = (c / 2, 16 * (c % 2));
+                for _ in 0..(*lo).min(n) {
+                    f(INF);
+                }
+                for (s, w) in &out.chunks {
+                    for (k, x) in w.chunks_exact(out.p).enumerate() {
+                        let j = s + k as u32;
+                        if j >= n {
+                            return;
+                        }
+                        f(match patch {
+                            Some((pi, pt)) if *pi == j => *pt,
+                            _ => (x[q] >> sh) as u16,
+                        });
+                    }
+                }
+                for _ in (*hi).max(*lo).min(n)..n {
+                    f(INF);
+                }
+            }
+            _ => (0..n).for_each(|i| f(self.get(i))),
         }
     }
 
@@ -78,8 +133,32 @@ impl Times {
     pub fn finite(&self) -> Vec<u32> {
         match self {
             Times::Dense { lo, t } => t.iter().enumerate().filter(|e| *e.1 != INF).map(|(k, _)| lo + k as u32).collect(),
+            Times::Packed { hi, .. } => {
+                let mut v = Vec::new();
+                let mut i = 0u32;
+                self.for_each(*hi, |t| {
+                    if t != INF {
+                        v.push(i);
+                    }
+                    i += 1;
+                });
+                v
+            }
             Times::Sparse(v) => v.iter().filter(|e| e.1 != INF).map(|e| e.0).collect(),
         }
+    }
+
+    /// The (index, time) pairs at most `max` in `lo .. hi`.
+    pub fn sparse(&self, lo: u32, hi: u32, max: u16) -> Vec<(u32, u16)> {
+        let mut v = Vec::new();
+        let mut i = 0u32;
+        self.for_each(hi, |t| {
+            if i >= lo && i < hi && t <= max {
+                v.push((i, t));
+            }
+            i += 1;
+        });
+        v
     }
 }
 

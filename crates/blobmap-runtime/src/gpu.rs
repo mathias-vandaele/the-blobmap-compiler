@@ -446,6 +446,224 @@ fn wide_split(
     }
 }
 
+
+// ---- heads (FORMAT §8; `heads` has the host passes and their meaning) ----------------
+
+/// Car `From`: each copy's words, gathered (pair j's copy `cs_c[j]`).
+#[cube(launch)]
+fn copy_gather(cs_c: &[u32], count: u32, d32: &[u32], tmp: &mut [u32], p: u32) {
+    let j = gid();
+    if j < count {
+        let c = cs_c[j as usize];
+        for q in 0..p {
+            tmp[(j * p + q) as usize] = d32[(c * p + q) as usize];
+        }
+    }
+}
+
+/// Car `From`: a node with copies takes the least of its label and theirs (h = its arrivals).
+#[cube(launch)]
+fn copy_fold(cs_s: &[u32], cs_first: &[u32], count: u32, tmp: &[u32], d32: &mut [u32], p: u32) {
+    let r = gid();
+    if r < count {
+        let s = cs_s[r as usize];
+        let j0 = cs_first[r as usize];
+        let j1 = cs_first[(r + 1u32) as usize];
+        for q in 0..p {
+            let mut acc = d32[(s * p + q) as usize];
+            for j in j0..j1 {
+                acc = vmin2(acc, tmp[(j * p + q) as usize]);
+            }
+            d32[(s * p + q) as usize] = acc;
+        }
+    }
+}
+
+/// Car `To`: h(u) = the least exit turn ⊕ its head's label, for new ids u0 .. u0 + count
+/// (`tf` relative to the chunk, heads `th` in new ids, costs `tc` as u16 pairs).
+#[cube(launch)]
+fn turn_pass(u0: u32, count: u32, tf: &[u32], th: &[u32], tc: &[u32], d32: &[u32], h: &mut [u32], p: u32) {
+    let j = gid();
+    if j < count {
+        let u = u0 + j;
+        let k0 = tf[j as usize];
+        let k1 = tf[(j + 1u32) as usize];
+        for q in 0..p {
+            let mut acc = 0xFFFF_FFFFu32;
+            for k in k0..k1 {
+                acc = vmin2(acc, vadd2(wpair(tc, k), d32[(th[k as usize] * p + q) as usize]));
+            }
+            h[(u * p + q) as usize] = acc;
+        }
+    }
+}
+
+#[cube]
+fn sadd(a: u32, b: u32) -> u32 {
+    let s = a + b;
+    if s < 0xFFFFu32 { s } else { 0xFFFFu32 }
+}
+
+/// The direct term (FORMAT §8) from offsets oa to ob (offsets 0 and 2 of each ID).
+#[cube]
+fn direct_term(oa0: u32, oa2: u32, ob0: u32, ob2: u32, p0: bool, p1: bool) -> u32 {
+    let mut d = 0xFFFFu32;
+    if p0 && oa0 != 0xFFFFu32 && ob0 >= oa0 {
+        d = ob0 - oa0;
+    }
+    if p1 && oa2 != 0xFFFFu32 && ob2 >= oa2 {
+        let x = ob2 - oa2;
+        if x < d {
+            d = x;
+        }
+    }
+    d
+}
+
+/// Heads at IDs i0 .. i0 + count, the first at row `voff` of `vt`: 5 words an ID (layout ids a, b; offsets 0|1, 2|3;
+/// road). `h`: per new id, P words of h (CAR `To`: the turn pass; else the labels). `src`:
+/// the sources, 8 words each, sorted by piece: [a, b, road, column, start, offsets 0|2,
+/// index, 0]. Dense: out[j * p + q]. Sparse: (index, column << 16 | time) pairs for times at
+/// most the column's `mx` half, appended at counter[0], kept while below `cap`.
+#[cube(launch)]
+fn heads_ids(
+    vt: &[u32],
+    voff: u32,
+    i0: u32,
+    count: u32,
+    first: u32,
+    n: u32,
+    pos: &[u32],
+    h: &[u32],
+    p: u32,
+    cols: u32,
+    koff: u32,
+    car: u32,
+    bound: &[u32],
+    prune: u32,
+    src: &[u32],
+    nsrc: u32,
+    mx: &[u32],
+    sparse: u32,
+    out: &mut [u32],
+    counter: &mut [Atomic<u32>],
+    cap: u32,
+) {
+    let j = gid();
+    if j < count {
+        let i = i0 + j;
+        let e = (voff + j) * 5u32;
+        let a = vt[e as usize];
+        let b = vt[(e + 1u32) as usize];
+        let o01 = vt[(e + 2u32) as usize];
+        let o23 = vt[(e + 3u32) as usize];
+        let road = vt[(e + 4u32) as usize];
+        let x = if a != NONE { a } else { b };
+        let member = x != NONE && x >= first && x - first < n;
+        if !member {
+            if sparse == 0u32 {
+                for q in 0..p {
+                    out[(j * p + q) as usize] = 0xFFFF_FFFFu32;
+                }
+            }
+        } else {
+            let sh = koff * 16u32;
+            let oa = (o01 >> sh) & 0xFFFFu32;
+            let ob = (o23 >> sh) & 0xFFFFu32;
+            let offa = oa | (oa << 16u32);
+            let offb = ob | (ob << 16u32);
+            let mut ha = 0u32;
+            let mut hb = 0u32;
+            if a != NONE {
+                ha = pos[(a - first) as usize];
+            }
+            if b != NONE {
+                hb = pos[(b - first) as usize];
+            }
+            // The first source on this ID's piece, by binary search.
+            let mut lo = 0u32;
+            let mut hi = nsrc;
+            while lo < hi {
+                let mid = (lo + hi) / 2u32;
+                let m = mid * 8u32;
+                let sa = src[m as usize];
+                let sb = src[(m + 1u32) as usize];
+                let sr = src[(m + 2u32) as usize];
+                let less = sa < a || (sa == a && (sb < b || (sb == b && sr < road)));
+                if less {
+                    lo = mid + 1u32;
+                } else {
+                    hi = mid;
+                }
+            }
+            let s0 = lo;
+            let p0 = car == 0u32 || a != NONE;
+            let p1 = car == 0u32 || b != NONE;
+            let io0 = o01 & 0xFFFFu32;
+            let io2 = o23 & 0xFFFFu32;
+            for q in 0..p {
+                let mut acc = 0xFFFF_FFFFu32;
+                if a != NONE {
+                    acc = vmin2(acc, vadd2(h[(ha * p + q) as usize], offa));
+                }
+                if b != NONE {
+                    acc = vmin2(acc, vadd2(h[(hb * p + q) as usize], offb));
+                }
+                for r in s0..nsrc {
+                    let m = r * 8u32;
+                    if src[m as usize] != a || src[(m + 1u32) as usize] != b || src[(m + 2u32) as usize] != road {
+                        break;
+                    }
+                    let c = src[(m + 3u32) as usize];
+                    if c / 2u32 == q {
+                        let start = src[(m + 4u32) as usize];
+                        let mut t = start;
+                        if src[(m + 6u32) as usize] != i {
+                            let so = src[(m + 5u32) as usize];
+                            let so0 = so & 0xFFFFu32;
+                            let so2 = so >> 16u32;
+                            let d = if koff == 0u32 { direct_term(so0, so2, io0, io2, p0, p1) } else { direct_term(io0, io2, so0, so2, p0, p1) };
+                            t = sadd(start, d);
+                        }
+                        let tt = if (c & 1u32) == 0u32 { t | 0xFFFF_0000u32 } else { (t << 16u32) | 0xFFFFu32 };
+                        acc = vmin2(acc, tt);
+                    }
+                }
+                if prune == 1u32 {
+                    let tq = bound[q as usize];
+                    let l = acc & 0xFFFFu32;
+                    let u = acc >> 16u32;
+                    let l2 = if l > (tq & 0xFFFFu32) { 0xFFFFu32 } else { l };
+                    let u2 = if u > (tq >> 16u32) { 0xFFFFu32 } else { u };
+                    acc = l2 | (u2 << 16u32);
+                }
+                if sparse == 0u32 {
+                    out[(j * p + q) as usize] = acc;
+                } else {
+                    let m = mx[q as usize];
+                    let c0 = 2u32 * q;
+                    let t0 = acc & 0xFFFFu32;
+                    if c0 < cols && t0 <= (m & 0xFFFFu32) {
+                        let k = counter[0].fetch_add(1u32);
+                        if k < cap {
+                            out[(2u32 * k) as usize] = i;
+                            out[(2u32 * k + 1u32) as usize] = (c0 << 16u32) | t0;
+                        }
+                    }
+                    let t1 = acc >> 16u32;
+                    if c0 + 1u32 < cols && t1 <= (m >> 16u32) {
+                        let k = counter[0].fetch_add(1u32);
+                        if k < cap {
+                            out[(2u32 * k) as usize] = i;
+                            out[(2u32 * k + 1u32) as usize] = ((c0 + 1u32) << 16u32) | t1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ---- host side -----------------------------------------------------------------------
 
 fn bytes_u32(x: &[u32]) -> &[u8] {
@@ -841,7 +1059,8 @@ impl Gpu {
 
     /// One sweep of up to 2 · p_max columns of a component (metric, dir): labels by new id,
     /// per column.
-    pub fn sweep(&self, d: &mut DevGraph, metric: usize, dir: Dir, cols: &[&Column]) -> Result<Vec<Labels>> {
+    /// A batched sweep, left on the device (`labels` or `heads` read it). Whether it pruned.
+    pub fn sweep(&self, d: &mut DevGraph, metric: usize, dir: Dir, cols: &[&Column]) -> Result<bool> {
         let t0 = std::time::Instant::now();
         let k = cols.len() as u32;
         ensure!(k >= 1 && k <= 2 * d.p_max, "{k} columns, outside 1..{}", 2 * d.p_max);
@@ -901,12 +1120,18 @@ impl Gpu {
         }
         let wi = 2 * metric + crate::sweep::dir_index(dir);
         self.enqueue_down(d, p, wi, prune);
-        let t_down = if self.timing {
+        if self.timing {
             cubecl::future::block_on(cl.sync()).map_err(|e| anyhow!("sync: {e:?}"))?;
-            t0.elapsed().as_secs_f64()
-        } else {
-            0.0
-        };
+            self.times.set([t0.elapsed().as_secs_f64(), 0.0]);
+        }
+        Ok(prune)
+    }
+
+    /// The last sweep's labels of k columns, read back.
+    pub fn labels(&self, d: &DevGraph, k: usize) -> Result<Vec<Labels>> {
+        let t0 = std::time::Instant::now();
+        let cl = &self.client;
+        let p = k.div_ceil(2) as u32;
         // The used words, read straight from the state as a one-dimensional tensor.
         let words = d.n * p as usize;
         let desc = d.state.clone().copy_descriptor(cubecl::zspace::Shape::new([words]), cubecl::zspace::Strides::new(&[1]), 4);
@@ -915,12 +1140,308 @@ impl Gpu {
         // As words, without a copy when the buffer allows it.
         let mut all: Vec<u32> = bytes.try_into_vec::<u32>().unwrap_or_else(|b| bytemuck::pod_collect_to_vec(&b[..words * 4]));
         all.truncate(words);
-        let t_read = t0.elapsed().as_secs_f64();
         if self.timing {
-            self.times.set([t_down, t_read - t_down]);
+            let [a, _] = self.times.get();
+            self.times.set([a, t0.elapsed().as_secs_f64()]);
         }
         let _ = DEAD;
         let all = std::sync::Arc::new(all);
-        Ok((0..cols.len()).map(|c| Labels::Packed { words: all.clone(), p: p as usize, c }).collect())
+        Ok((0..k).map(|c| Labels::Packed { words: all.clone(), p: p as usize, c }).collect())
+    }
+}
+
+/// A mode's ID table on the device (FORMAT §7: layout ids, offsets, road), in chunks of
+/// `per` IDs, 5 words each.
+pub struct DevIds {
+    chunks: Vec<(Handle, usize)>,
+    per: usize,
+    n: usize,
+    pub bytes: u64,
+}
+
+/// A component's heads data on the device: the new id of each layout id; CAR: exit turns in
+/// new-id order (chunks of nodes), copies (nodes with copies, CSR, their copies), and room
+/// for h of the turn pass and the gathered copies.
+pub struct DevHeads {
+    first: u32,
+    n: usize,
+    pos: Handle,
+    /// (first new id, nodes, CSR, heads, costs, turns).
+    turns: Vec<(u32, u32, Handle, Handle, Handle, usize)>,
+    copies: Option<(Handle, Handle, Handle, u32, u32)>,
+    h: Option<Handle>,
+    tmp: Option<Handle>,
+    pub bytes: u64,
+}
+
+/// One column's heads on the device: its sources' rows (`heads_ids`'s `src`, column 0) and
+/// what it wants.
+#[derive(Clone, Debug)]
+pub struct HeadCol {
+    pub src: Vec<[u32; 8]>,
+    pub want: crate::heads::Want,
+}
+
+/// The sources of a column as device rows.
+pub fn source_rows(mv: &crate::vocab::Mode, srcs: &[(u32, u16)]) -> Vec<[u32; 8]> {
+    srcs.iter()
+        .map(|&(i, start)| {
+            let r = mv.device_row(i as usize);
+            let o = mv.off(i as usize);
+            [r[0], r[1], r[4], 0, start as u32, o[0] as u32 | (o[2] as u32) << 16, i, 0]
+        })
+        .collect()
+}
+
+/// Sparse answers kept per batch at most; past it the batch's heads run on the host.
+const SPARSE_CAP: u32 = 1 << 22;
+
+impl Gpu {
+    fn ids_per(&self) -> usize {
+        (self.max_chunk / 32) as usize
+    }
+
+    pub fn ids_bytes(n: usize) -> u64 {
+        n as u64 * 20
+    }
+
+    pub fn load_ids(&self, mv: &crate::vocab::Mode) -> Result<DevIds> {
+        let (n, per) = (mv.len(), self.ids_per());
+        let mut used = 0u64;
+        let mut chunks = Vec::new();
+        let mut rows: Vec<u32> = Vec::new();
+        for a in (0..n.max(1)).step_by(per) {
+            let b = (a + per).min(n);
+            rows.clear();
+            rows.reserve((b - a) * 5);
+            for i in a..b {
+                rows.extend_from_slice(&mv.device_row(i));
+            }
+            if rows.is_empty() {
+                rows.push(NONE);
+            }
+            chunks.push((self.upload(bytes_u32(&rows), &mut used), rows.len()));
+        }
+        Ok(DevIds { chunks, per, n, bytes: used })
+    }
+
+    pub fn heads_bytes(g: &Graph, p_max: u32) -> u64 {
+        let n = g.n as u64;
+        let mut b = n * 4;
+        if g.fam == crate::vocab::Fam::Car {
+            b += (n + 1) * 4 + g.arc_head.len() as u64 * 6 + 64 * 1024 + g.copies.len() as u64 * (12 + 4 * p_max as u64) + n * p_max as u64 * 4;
+        }
+        b
+    }
+
+    pub fn load_heads(&self, g: &Graph, first: u32, p_max: u32) -> Result<DevHeads> {
+        let mut used = 0u64;
+        let n = g.n;
+        let pos = self.upload(bytes_u32(if g.new.is_empty() { &[0] } else { &g.new }), &mut used);
+        let (mut turns, mut copies, mut h, mut tmp) = (Vec::new(), None, None, None);
+        if g.fam == crate::vocab::Fam::Car {
+            let mut old = vec![0u32; n];
+            for (v, &u) in g.new.iter().enumerate() {
+                old[u as usize] = v as u32;
+            }
+            // Exit turns by new id, in chunks of whole nodes within a binding.
+            let max_k = (self.max_chunk / 4) as usize;
+            let (mut u0, mut tf, mut th, mut tc) = (0u32, vec![0u32], Vec::new(), Vec::new());
+            let mut flush = |u: u32, u0: &mut u32, tf: &mut Vec<u32>, th: &mut Vec<u32>, tc: &mut Vec<u16>, used: &mut u64| {
+                let k = th.len();
+                if th.is_empty() {
+                    th.push(0);
+                }
+                turns.push((*u0, u - *u0, self.upload(bytes_u32(tf), used), self.upload(bytes_u32(th), used), self.upload(&bytes_u16(tc), used), k));
+                *u0 = u;
+                tf.clear();
+                tf.push(0);
+                th.clear();
+                tc.clear();
+            };
+            for u in 0..n as u32 {
+                let r = g.arcs(old[u as usize]);
+                ensure!(r.len() < max_k, "a node of {} exit turns", r.len());
+                if th.len() + r.len() > max_k {
+                    flush(u, &mut u0, &mut tf, &mut th, &mut tc, &mut used);
+                }
+                for a in r {
+                    th.push(g.new[g.arc_head[a] as usize]);
+                    tc.push(g.turn_cost[a]);
+                }
+                tf.push(th.len() as u32);
+            }
+            flush(n as u32, &mut u0, &mut tf, &mut th, &mut tc, &mut used);
+            // Copies: per node with copies (new ids, ascending), its copies.
+            let mut pairs: Vec<(u32, u32)> = Vec::new();
+            for v in 0..n as u32 {
+                for y in g.arrivals(v).skip(1) {
+                    pairs.push((g.new[v as usize], g.new[y as usize]));
+                }
+            }
+            pairs.sort_unstable();
+            if !pairs.is_empty() {
+                let (mut cs_s, mut cs_first, mut cs_c) = (Vec::new(), Vec::new(), Vec::new());
+                for (k, &(s, c)) in pairs.iter().enumerate() {
+                    if k == 0 || pairs[k - 1].0 != s {
+                        cs_s.push(s);
+                        cs_first.push(k as u32);
+                    }
+                    cs_c.push(c);
+                }
+                cs_first.push(pairs.len() as u32);
+                let (ns, np) = (cs_s.len() as u32, pairs.len() as u32);
+                copies = Some((self.upload(bytes_u32(&cs_s), &mut used), self.upload(bytes_u32(&cs_first), &mut used), self.upload(bytes_u32(&cs_c), &mut used), ns, np));
+                let tb = pairs.len() * p_max as usize * 4;
+                used += tb as u64;
+                tmp = Some(self.client.empty(tb));
+            }
+            let hb = n.max(1) * p_max as usize * 4;
+            used += hb as u64;
+            h = Some(self.client.empty(hb));
+        }
+        Ok(DevHeads { first, n, pos, turns, copies, h, tmp, bytes: used })
+    }
+
+    /// Heads of the last sweep's columns on the device (`car`, `dir` and `prune` as its).
+    /// `None` when a sparse batch kept more answers than it has room for.
+    pub fn heads(&self, d: &DevGraph, dh: &DevHeads, ids: &DevIds, car: bool, dir: Dir, prune: bool, cols: &[&HeadCol]) -> Result<Option<Vec<crate::heads::Times>>> {
+        use crate::heads::{PackedOut, Times};
+        let cl = self.client.clone();
+        let dim = CubeDim::new_1d(256);
+        let k = cols.len() as u32;
+        let p = k.div_ceil(2);
+        let koff = (dir == Dir::To) as u32;
+        // h: the labels, with car copies folded in going from; the turn pass going to.
+        let mut h = &d.state;
+        if car && dir == Dir::From {
+            if let (Some((cs_s, cs_first, cs_c, ns, np)), Some(tmp)) = (&dh.copies, &dh.tmp) {
+                copy_gather::launch(&cl, grid(*np, 256, self.max_x), dim, arg(cs_c, *np as usize), *np, arg(&d.state, d.n * p as usize), arg(tmp, *np as usize * p as usize), p);
+                copy_fold::launch(&cl, grid(*ns, 256, self.max_x), dim, arg(cs_s, *ns as usize), arg(cs_first, *ns as usize + 1), *ns, arg(tmp, *np as usize * p as usize), arg(&d.state, d.n * p as usize), p);
+            }
+        } else if car {
+            let hh = dh.h.as_ref().unwrap();
+            for (u0, cnt, tf, th, tc, nk) in &dh.turns {
+                if *cnt > 0 {
+                    turn_pass::launch(&cl, grid(*cnt, 256, self.max_x), dim, *u0, *cnt, arg(tf, *cnt as usize + 1), arg(th, *nk), arg(tc, nk.div_ceil(2)), arg(&d.state, d.n * p as usize), arg(hh, d.n * p as usize), p);
+                }
+            }
+            h = hh;
+        }
+        // Sources of every column, sorted by piece.
+        let mut src: Vec<[u32; 8]> = Vec::new();
+        for (c, col) in cols.iter().enumerate() {
+            src.extend(col.src.iter().map(|r| {
+                let mut r = *r;
+                r[3] = c as u32;
+                r
+            }));
+        }
+        src.sort_unstable();
+        let nsrc = src.len() as u32;
+        let src_h = cl.create_from_slice(bytes_u32(if src.is_empty() { &[0u32; 8] } else { bytemuck::cast_slice(&src) }));
+        let lo = cols.iter().map(|c| c.want.lo).min().unwrap();
+        let hi = cols.iter().map(|c| c.want.hi).max().unwrap().min(ids.n as u32);
+        let sparse = cols.iter().all(|c| !c.want.dense());
+        let mut mx = vec![0u32; p as usize];
+        for (c, col) in cols.iter().enumerate() {
+            mx[c / 2] |= (col.want.max as u32) << (16 * (c % 2));
+        }
+        let mx_h = cl.create_from_slice(bytes_u32(&mx));
+        let counter = cl.create_from_slice(bytes_u32(&[0u32]));
+        let cap = SPARSE_CAP;
+        let sp_out = if sparse { Some(cl.empty(cap as usize * 8)) } else { None };
+        let mut dense_out: Vec<(u32, u32, Handle)> = Vec::new();
+        let per = ids.per as u32;
+        let mut c0 = lo / per;
+        while c0 * per < hi {
+            let (a, b) = ((c0 * per).max(lo), ((c0 + 1) * per).min(hi));
+            let count = b - a;
+            let out = match &sp_out {
+                Some(o) => o.clone(),
+                None => cl.empty((count as usize * p as usize * 4).max(4)),
+            };
+            let out_len = if sparse { cap as usize * 2 } else { count as usize * p as usize };
+            heads_ids::launch(
+                &cl,
+                grid(count, 256, self.max_x),
+                dim,
+                arg(&ids.chunks[c0 as usize].0, ids.chunks[c0 as usize].1),
+                a - c0 * per,
+                a,
+                count,
+                dh.first,
+                dh.n as u32,
+                arg(&dh.pos, dh.n),
+                arg(h, d.n * p as usize),
+                p,
+                k,
+                koff,
+                car as u32,
+                arg(&d.bound, d.p_max as usize),
+                prune as u32,
+                arg(&src_h, src.len() * 8),
+                nsrc,
+                arg(&mx_h, p as usize),
+                sparse as u32,
+                arg(&out, out_len),
+                arg(&counter, 1),
+                cap,
+            );
+            if !sparse {
+                dense_out.push((a, count, out));
+            }
+            c0 += 1;
+        }
+        let read = |h: &Handle, words: usize| -> Result<Vec<u32>> {
+            let desc = h.clone().copy_descriptor(cubecl::zspace::Shape::new([words]), cubecl::zspace::Strides::new(&[1]), 4);
+            let bytes = cl.read_tensor(vec![desc]).map_err(|e| anyhow!("read: {e:?}"))?.remove(0);
+            ensure!(bytes.len() >= words * 4, "read {} bytes of {}", bytes.len(), words * 4);
+            let mut v: Vec<u32> = bytes.try_into_vec::<u32>().unwrap_or_else(|b| bytemuck::pod_collect_to_vec(&b[..words * 4]));
+            v.truncate(words);
+            Ok(v)
+        };
+        if sparse {
+            let got = read(&counter, 1)?[0];
+            if got > cap {
+                return Ok(None);
+            }
+            let pairs = if got > 0 { read(sp_out.as_ref().unwrap(), got as usize * 2)? } else { Vec::new() };
+            let mut per_col: Vec<Vec<(u32, u16)>> = vec![Vec::new(); cols.len()];
+            for e in pairs.as_chunks::<2>().0 {
+                let c = (e[1] >> 16) as usize;
+                if (cols[c].want.lo..cols[c].want.hi).contains(&e[0]) {
+                    per_col[c].push((e[0], e[1] as u16));
+                }
+            }
+            return Ok(Some(
+                per_col
+                    .into_iter()
+                    .map(|mut v| {
+                        v.sort_unstable();
+                        Times::Sparse(v)
+                    })
+                    .collect(),
+            ));
+        }
+        let mut chunks = Vec::new();
+        for (a, count, hd) in &dense_out {
+            chunks.push((*a, read(hd, *count as usize * p as usize)?));
+        }
+        let out = std::sync::Arc::new(PackedOut { per, p: p as usize, chunks });
+        Ok(Some(
+            cols.iter()
+                .enumerate()
+                .map(|(c, col)| {
+                    let t = Times::Packed { lo, hi, out: out.clone(), c, patch: None };
+                    if col.want.dense() {
+                        // Each column covers its own range only.
+                        if col.want.lo == lo && col.want.hi.min(ids.n as u32) == hi { t } else { Times::Dense { lo: col.want.lo, t: (col.want.lo..col.want.hi).map(|i| t.get(i)).collect() } }
+                    } else {
+                        Times::Sparse(t.sparse(col.want.lo, col.want.hi, col.want.max))
+                    }
+                })
+                .collect(),
+        ))
     }
 }

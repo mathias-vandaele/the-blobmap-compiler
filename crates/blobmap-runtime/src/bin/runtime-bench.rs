@@ -78,6 +78,7 @@ fn main() -> Result<()> {
         for chunk in cols.chunks(b) {
             let refs: Vec<&Column> = chunk.iter().collect();
             gpu.sweep(&mut d, metric, dir, &refs)?;
+            gpu.labels(&d, refs.len())?;
             let [x, y] = gpu.times.get();
             if r > 0 || rounds == 1 {
                 down.push(x * 1e3);

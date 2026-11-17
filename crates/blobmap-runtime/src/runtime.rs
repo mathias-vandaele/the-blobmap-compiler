@@ -12,7 +12,8 @@ use blobmap_model::manifest::Manifest;
 use blobmap_model::{INF, Model, NONE};
 use rayon::prelude::*;
 
-use crate::engine::{Comp, GpuConfig, GpuEngine, cpu_sweep};
+use crate::engine::{ColOut, Comp, GpuConfig, GpuEngine, JobHeads, ModeRef, cpu_sweep};
+use crate::gpu::{HeadCol, source_rows};
 use crate::gpu::Kind;
 use crate::graph::{Graph, meet, upward};
 use crate::heads::{self, Labels, Times, Want};
@@ -115,6 +116,8 @@ fn since(t: Instant) -> u64 {
 }
 
 pub struct Runtime {
+    /// First, so that its worker, which borrows the vocabulary's modes, ends before them.
+    gpu: Option<GpuEngine>,
     pub manifest: Manifest,
     pub fams: Vec<Family>,
     pub vocab: Vocab,
@@ -122,7 +125,6 @@ pub struct Runtime {
     members: Vec<(Vec<u32>, Vec<u32>)>,
     comps: Mutex<BTreeMap<(u8, u32), Arc<Comp>>>,
     loading: Mutex<()>,
-    gpu: Option<GpuEngine>,
     pub opts: Options,
     pub prof: Profile,
     /// Last, so that it is dropped after the vocabulary's tables that borrow its maps.
@@ -282,7 +284,7 @@ impl Runtime {
             let mv = &self.vocab.modes[reqs[p.req].mode];
             groups.entry(Key { fam: mv.fam as u8, component: p.x, metric: mv.metric as u8, dir: dir_index(reqs[p.req].dir) as u8 }).or_default().push(i);
         }
-        let mut labels: Vec<Option<Labels>> = (0..parts.len()).map(|_| None).collect();
+        let mut labels: Vec<Option<ColOut>> = (0..parts.len()).map(|_| None).collect();
         let mut pending = Vec::new();
         let mut on_cpu = Vec::new();
         for (key, idx) in &groups {
@@ -290,7 +292,19 @@ impl Runtime {
             match &self.gpu {
                 Some(gpu) if comp.g.n >= self.opts.gpu_min_nodes && self.opts.gpu_families[key.fam as usize] => {
                     let cols: Vec<Column> = idx.iter().map(|&i| parts[i].col.clone()).collect();
-                    pending.push((idx.clone(), gpu.submit(*key, comp.clone(), cols)));
+                    let mv = &self.vocab.modes[reqs[parts[idx[0]].req].mode];
+                    let hc = idx
+                        .iter()
+                        .map(|&i| {
+                            let srcs: Vec<(u32, u16)> = parts[i].srcs.iter().map(|s| (s.id, s.start)).collect();
+                            HeadCol { src: source_rows(mv, &srcs), want: reqs[parts[i].req].want }
+                        })
+                        .collect();
+                    // Safety: `gpu` is dropped before `vocab` (field order), and the worker
+                    // holds a mode only while this call waits for its reply.
+                    let mode = ModeRef(unsafe { &*(mv as *const Mode) });
+                    let heads = JobHeads { mode, first: mv.first(key.component), cols: hc };
+                    pending.push((idx.clone(), gpu.submit(*key, comp.clone(), cols, Some(heads))));
                 }
                 _ => on_cpu.extend(idx.iter().map(|&i| (*key, i))),
             }
@@ -305,7 +319,7 @@ impl Runtime {
             })
             .collect();
         for (i, l) in cpu {
-            labels[i] = Some(Labels::Plain(l?));
+            labels[i] = Some(ColOut::Labels(Labels::Plain(l?)));
         }
         pr.cpu_sweep.fetch_add(since(t), Relaxed);
         let t = Instant::now();
@@ -321,12 +335,38 @@ impl Runtime {
         let t = Instant::now();
         let f0 = faults();
         pr.heads_threads.fetch_max(rayon::current_num_threads() as u64, Relaxed);
-        let mut dense: Vec<Option<Vec<u16>>> = reqs.iter().map(|q| q.want.dense().then(|| vec![INF; (q.want.hi - q.want.lo) as usize])).collect();
+        // A request answered by one part on the device takes its times as they are.
+        let mut nparts = vec![0usize; reqs.len()];
+        for p in &parts {
+            nparts[p.req] += 1;
+        }
+        let mut whole: Vec<Option<Times>> = reqs.iter().map(|_| None).collect();
+        let mut dense: Vec<Option<Vec<u16>>> = reqs.iter().enumerate().map(|(r, q)| (q.want.dense() && nparts[r] > 0).then(|| vec![INF; (q.want.hi - q.want.lo) as usize])).collect();
+        for (p, l) in parts.iter().zip(&labels) {
+            if nparts[p.req] == 1 && matches!(l, Some(ColOut::Times(_))) {
+                dense[p.req] = None;
+            }
+        }
         let mut sparse: Vec<Vec<(u32, u16)>> = reqs.iter().map(|_| Vec::new()).collect();
         pr.heads_init.fetch_add(since(t), Relaxed);
         let ti = Instant::now();
         for (p, lab) in parts.iter().zip(labels) {
             let q = &reqs[p.req];
+            let lab = match lab.unwrap() {
+                ColOut::Labels(l) => l,
+                ColOut::Times(t) => {
+                    if nparts[p.req] == 1 {
+                        whole[p.req] = Some(t);
+                    } else if let Some(d) = dense[p.req].as_mut() {
+                        for (k, x) in d.iter_mut().enumerate() {
+                            *x = (*x).min(t.get(q.want.lo + k as u32));
+                        }
+                    } else {
+                        sparse[p.req].extend(t.sparse(q.want.lo, q.want.hi, q.want.max));
+                    }
+                    continue;
+                }
+            };
             let (first, ids) = &self.members[q.mode];
             let part = heads::Part {
                 g: &p.comp.g,
@@ -337,7 +377,7 @@ impl Runtime {
                 dir: q.dir,
                 bound: q.bound,
             };
-            let got = heads::heads(&part, &lab.unwrap(), q.want, dense[p.req].as_deref_mut());
+            let got = heads::heads(&part, &lab, q.want, dense[p.req].as_deref_mut());
             sparse[p.req].extend(got);
         }
         pr.heads_ids.fetch_add(since(ti), Relaxed);
@@ -345,9 +385,12 @@ impl Runtime {
             .into_iter()
             .zip(sparse)
             .zip(reqs)
-            .map(|((d, mut s), q)| match d {
-                Some(t) => Times::Dense { lo: q.want.lo, t },
-                None => {
+            .zip(whole)
+            .map(|(((d, mut s), q), w)| match (w, d) {
+                (Some(t), _) => t,
+                (None, Some(t)) => Times::Dense { lo: q.want.lo, t },
+                (None, None) if q.want.dense() => Times::Dense { lo: q.want.lo, t: vec![INF; (q.want.hi - q.want.lo) as usize] },
+                (None, None) => {
                     s.sort_unstable();
                     Times::Sparse(s)
                 }

@@ -143,6 +143,12 @@ impl Mode {
         self.raw_node[i]
     }
 
+    /// ID i's row on the device: layout ids, offsets 0|1 and 2|3, road (`NONE` for CAR).
+    pub fn device_row(&self, i: usize) -> [u32; 5] {
+        let (n, o) = (self.raw_node[i], self.raw_off[i]);
+        [n[0], n[1], o[0] as u32 | (o[1] as u32) << 16, o[2] as u32 | (o[3] as u32) << 16, self.road(i)]
+    }
+
     /// The first layout id of component x.
     pub fn first(&self, x: u32) -> u32 {
         self.first[x as usize]

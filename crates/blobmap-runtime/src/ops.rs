@@ -5,7 +5,7 @@ use blobmap_model::INF;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::heads::Want;
+use crate::heads::{Times, Want};
 use crate::runtime::{ColReq, Runtime, Src, bound_of};
 use crate::vocab::{Category, Dir, Id, Reason, id_string, parse_id};
 
@@ -134,10 +134,10 @@ impl Runtime {
             Err(r) => return Ok(Err(r)),
         };
         let na = self.vocab.address.len();
-        let col = self.column(&[Src { id: i, start: 0 }], m, dir, INF, Want::range(na, self.vocab.n()))?.into_dense();
+        let col = self.column(&[Src { id: i, start: 0 }], m, dir, INF, Want::range(na, self.vocab.n()))?;
         let mut best: Option<(u16, Id)> = None;
         for p in 0..self.vocab.place.len() {
-            let t = col[p];
+            let t = col.get((na + p) as u32);
             if t == INF || !self.vocab.matches(p, c) {
                 continue;
             }
@@ -150,13 +150,13 @@ impl Runtime {
     }
 
     /// A full column: every ID's time, by internal index.
-    pub fn column_of(&self, sources: &[Source], mode: &str, dir: Dir) -> Answer<Vec<u16>> {
+    pub fn column_of(&self, sources: &[Source], mode: &str, dir: Dir) -> Answer<Times> {
         let m = self.mode(mode)?;
         let src = match self.sources(sources, m) {
             Ok(s) => s,
             Err(r) => return Ok(Err(r)),
         };
-        Ok(Ok(self.column(&src, m, dir, INF, Want::all(self.vocab.n()))?.into_dense()))
+        Ok(Ok(self.column(&src, m, dir, INF, Want::all(self.vocab.n()))?))
     }
 
     /// The IDs within t seconds, sorted.
@@ -307,7 +307,7 @@ impl Runtime {
 
     /// The chained column (SPEC §9): `From` car from `id` to each transfer place, then walk
     /// on to every ID; `To` car from every ID to each transfer place, then walk on to `id`.
-    pub fn chained_column(&self, id: &str, c: Category, penalty: u16, dir: Dir) -> Answer<Vec<u16>> {
+    pub fn chained_column(&self, id: &str, c: Category, penalty: u16, dir: Dir) -> Answer<Times> {
         let (car, walk) = (self.mode("car")?, self.mode("walk")?);
         let (first, second) = if dir == Dir::From { (car, walk) } else { (walk, car) };
         let i = match self.source(id, first) {
@@ -316,9 +316,9 @@ impl Runtime {
         };
         let leg = self.column(&[Src { id: i, start: 0 }], first, dir, INF, Want::range(self.vocab.address.len(), self.vocab.n()))?;
         let src: Vec<Src> = self.transfers(c, car, walk).into_iter().map(|p| Src { id: p, start: leg.get(p).saturating_add(penalty) }).filter(|s| s.start != INF).collect();
-        let mut col = self.column(&src, second, dir, INF, Want::all(self.vocab.n()))?.into_dense();
+        let mut col = self.column(&src, second, dir, INF, Want::all(self.vocab.n()))?;
         if self.served(i, second).is_ok() {
-            col[i as usize] = 0;
+            col.set(i, 0);
         }
         Ok(Ok(col))
     }
@@ -347,7 +347,7 @@ impl Runtime {
                 }
             }
             "column" => match self.column_of(&sources_json(&args["sources"])?, s("mode")?, dir()?)? {
-                Ok(c) => column_json(&c),
+                Ok(c) => column_json(&c, self.vocab.n()),
                 Err(r) => refusal(r),
             },
             "isochrone" => {
@@ -395,7 +395,7 @@ impl Runtime {
                     }
                 } else {
                     match self.chained_column(s("id")?, c, penalty as u16, dir()?)? {
-                        Ok(col) => column_json(&col),
+                        Ok(col) => column_json(&col, self.vocab.n()),
                         Err(r) => refusal(r),
                     }
                 }
@@ -440,12 +440,20 @@ fn eval(e: &Expr, next: &mut usize, term: &impl Fn(usize) -> bool) -> bool {
     }
 }
 
-pub fn column_json(col: &[u16]) -> Value {
+pub fn column_json(col: &Times, n: usize) -> Value {
     let mut h = Sha256::new();
-    for t in col {
-        h.update(t.to_le_bytes());
-    }
-    json!({"times_sha256": hex::encode(h.finalize()), "beyond": col.iter().filter(|&&t| t == INF).count()})
+    let mut buf: Vec<u8> = Vec::with_capacity(1 << 16);
+    let mut beyond = 0usize;
+    col.for_each(n as u32, |t| {
+        beyond += (t == INF) as usize;
+        buf.extend_from_slice(&t.to_le_bytes());
+        if buf.len() >= 1 << 16 {
+            h.update(&buf);
+            buf.clear();
+        }
+    });
+    h.update(&buf);
+    json!({"times_sha256": hex::encode(h.finalize()), "beyond": beyond})
 }
 
 pub fn id_answer(ids: &[Id], with_ids: bool) -> Value {
