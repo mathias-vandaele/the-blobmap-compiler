@@ -47,12 +47,31 @@ impl Graph {
         };
         let word = if fam == Fam::Car { "turn" } else { "road" };
         let nm = t.metrics.len();
+        // Exact sizes first: grown by doubling, a continent's largest component would hold
+        // up to twice its links, more than the relayered copy.
+        let (mut links, mut arcs, mut ncopies) = (0usize, 0usize, 0usize);
+        for b in t.block_first[x as usize] as usize..t.block_first[x as usize + 1] as usize {
+            let p = format!("road/{f}/p{}/", t.b_pack[b]);
+            let (r0, r1) = (t.b_row_first[b] as usize, (t.b_row_first[b] + t.b_nodes[b]) as usize);
+            let span = |name: &str| -> Result<usize> {
+                let v = m.get::<u32>(&format!("{p}{name}"))?;
+                ensure!(r1 < v.len(), "{p}{name}: rows out of range");
+                Ok((v[r1] - v[r0]) as usize)
+            };
+            links += span("up_first")?;
+            if fam == Fam::Car {
+                arcs += span(&format!("{word}_first"))?;
+                ncopies += span("copy_first")?;
+            }
+        }
         let mut up_first = Vec::with_capacity(n + 1);
         up_first.push(0u64);
-        let mut up_head = Vec::new();
-        let (mut up, mut down) = (vec![Vec::new(); nm], vec![Vec::new(); nm]);
-        let (mut arc_first, mut arc_head, mut turn_cost) = (vec![0u64], Vec::new(), Vec::new());
-        let (mut copy_first, mut copies) = (vec![0u32], Vec::new());
+        let mut up_head = Vec::with_capacity(links);
+        let (mut up, mut down): (Vec<Vec<u16>>, Vec<Vec<u16>>) = ((0..nm).map(|_| Vec::with_capacity(links)).collect(), (0..nm).map(|_| Vec::with_capacity(links)).collect());
+        let (mut arc_first, mut arc_head, mut turn_cost) = (Vec::with_capacity(if fam == Fam::Car { n + 1 } else { 1 }), Vec::with_capacity(arcs), Vec::with_capacity(arcs));
+        arc_first.push(0u64);
+        let (mut copy_first, mut copies) = (Vec::with_capacity(if fam == Fam::Car { n + 1 } else { 1 }), Vec::with_capacity(ncopies));
+        copy_first.push(0u32);
         for b in t.block_first[x as usize] as usize..t.block_first[x as usize + 1] as usize {
             let (pack, row_first, id_first, nodes) = (t.b_pack[b], t.b_row_first[b], t.b_id_first[b], t.b_nodes[b]);
             ensure!(id_first == base + up_first.len() as u32 - 1, "{f} component {x}: blocks do not follow layout ids");
@@ -219,31 +238,43 @@ pub(crate) fn relayer(
         next[d] += 1;
     }
     drop(depth);
-    let nm = up.len();
+    // Heads first, with each new link's offset in its old row; then the old heads go, and
+    // each weight array is permuted and its old one dropped, so a continent's largest
+    // component never holds two full copies.
     let m = up_head.len();
     let mut g_first = Vec::with_capacity(n + 1);
     g_first.push(0u64);
     let mut g_head = Vec::with_capacity(m);
-    let (mut g_up, mut g_down): (Vec<Vec<u16>>, Vec<Vec<u16>>) = ((0..nm).map(|_| Vec::with_capacity(m)).collect(), (0..nm).map(|_| Vec::with_capacity(m)).collect());
+    let mut offs: Vec<u16> = Vec::with_capacity(m);
     let mut parent = vec![NONE; n];
-    let mut r: Vec<(u32, usize)> = Vec::new();
+    let mut r: Vec<(u32, u16)> = Vec::new();
     for i in 0..n {
         let v = old[i] as usize;
+        let rv = row(v);
+        assert!(rv.len() <= 1 << 16, "a row of {} links", rv.len());
         r.clear();
-        r.extend(row(v).map(|k| (new[up_head[k] as usize], k)));
+        r.extend(rv.clone().map(|k| (new[up_head[k] as usize], (k - rv.start) as u16)));
         r.sort_unstable();
-        if let Some(k) = row(v).last() {
+        if let Some(k) = rv.last() {
             parent[i] = new[up_head[k] as usize];
         }
-        for &(h, k) in &r {
+        for &(h, o) in &r {
             g_head.push(h);
-            for j in 0..nm {
-                g_up[j].push(up[j][k]);
-                g_down[j].push(down[j][k]);
-            }
+            offs.push(o);
         }
         g_first.push(g_head.len() as u64);
     }
+    drop(up_head);
+    let permute = |w: Vec<u16>| -> Vec<u16> {
+        let mut out = Vec::with_capacity(m);
+        for i in 0..n {
+            let base = up_first[old[i] as usize] as usize;
+            out.extend(offs[g_first[i] as usize..g_first[i + 1] as usize].iter().map(|&o| w[base + o as usize]));
+        }
+        out
+    };
+    let g_up: Vec<Vec<u16>> = up.into_iter().map(permute).collect();
+    let g_down: Vec<Vec<u16>> = down.into_iter().map(permute).collect();
     Graph { fam, n, level_first, up_first: g_first, up_head: g_head, down: g_down, up: g_up, new, parent, arc_first, arc_head, turn_cost, copy_first, copies }
 }
 
