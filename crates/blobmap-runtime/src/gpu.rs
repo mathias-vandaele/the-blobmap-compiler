@@ -726,6 +726,13 @@ struct Split {
     t: u32,
 }
 
+impl DevGraph {
+    /// Kernel launches of a sweep's downward half: the top, then one per wide level.
+    pub fn launches(&self) -> usize {
+        (self.top > 0) as usize + self.levels.len()
+    }
+}
+
 /// One component on the device.
 pub struct DevGraph {
     n: usize,
@@ -763,6 +770,8 @@ pub struct Gpu {
     /// last sweep's seeding and launches, and of its read-back.
     pub timing: bool,
     pub times: std::cell::Cell<[f64; 2]>,
+    /// The last sweep's seconds up to its launches' submission, before the device sync.
+    pub enqueue: std::cell::Cell<f64>,
 }
 
 impl Gpu {
@@ -786,7 +795,7 @@ impl Gpu {
         let top_threads = hw.max_units_per_cube.min(1024);
         let max_x = hw.max_cube_count.0.min(65535);
         let max_chunk = props.memory.max_page_size.min(1 << 30);
-        Ok(Gpu { kind, merge, max_shared, top_threads, max_x, max_chunk, timing: false, times: std::cell::Cell::new([0.0; 2]), client })
+        Ok(Gpu { kind, merge, max_shared, top_threads, max_x, max_chunk, timing: false, times: std::cell::Cell::new([0.0; 2]), enqueue: std::cell::Cell::new(0.0), client })
     }
 
     pub fn describe(&self) -> String {
@@ -1057,8 +1066,6 @@ impl Gpu {
         }
     }
 
-    /// One sweep of up to 2 · p_max columns of a component (metric, dir): labels by new id,
-    /// per column.
     /// A batched sweep, left on the device (`labels` or `heads` read it). Whether it pruned.
     pub fn sweep(&self, d: &mut DevGraph, metric: usize, dir: Dir, cols: &[&Column]) -> Result<bool> {
         let t0 = std::time::Instant::now();
@@ -1120,6 +1127,7 @@ impl Gpu {
         }
         let wi = 2 * metric + crate::sweep::dir_index(dir);
         self.enqueue_down(d, p, wi, prune);
+        self.enqueue.set(t0.elapsed().as_secs_f64());
         if self.timing {
             cubecl::future::block_on(cl.sync()).map_err(|e| anyhow!("sync: {e:?}"))?;
             self.times.set([t0.elapsed().as_secs_f64(), 0.0]);

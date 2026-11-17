@@ -78,7 +78,7 @@ fn main() -> Result<()> {
         }
     }
     let cols: Vec<Column> = picks.iter().map(|&v| Column { entries: upward(g, metric, dir, &[(v, 0)]), bound }).collect();
-    let (mut down, mut read) = (Vec::new(), Vec::new());
+    let (mut down, mut read, mut enq) = (Vec::new(), Vec::new(), Vec::new());
     for r in 0..rounds {
         for chunk in cols.chunks(b) {
             let refs: Vec<&Column> = chunk.iter().collect();
@@ -88,18 +88,21 @@ fn main() -> Result<()> {
             if r > 0 || rounds == 1 {
                 down.push(x * 1e3);
                 read.push(y * 1e3);
+                enq.push(gpu.enqueue.get() * 1e3);
             }
         }
     }
     println!(
-        "{:?} {} B={b} bound {bound}: {} sweeps, sweep p50 {:.3} ms p99 {:.3} ms; read-back p50 {:.3} ms p99 {:.3} ms",
+        "{:?} {} B={b} bound {bound}: {} sweeps, sweep p50 {:.3} ms p99 {:.3} ms; read-back p50 {:.3} ms p99 {:.3} ms; host enqueue p50 {:.3} ms ({} launches a sweep)",
         kind,
         f.fam.name(),
         down.len(),
         pct(&mut down, 0.5),
         pct(&mut down, 0.99),
         pct(&mut read, 0.5),
-        pct(&mut read, 0.99)
+        pct(&mut read, 0.99),
+        pct(&mut enq, 0.5),
+        d.launches()
     );
     Ok(())
 }

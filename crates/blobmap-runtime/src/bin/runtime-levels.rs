@@ -83,5 +83,21 @@ fn main() -> Result<()> {
     println!("format: top {l_top} levels + deepest cell {max_cell} = {}; {launches} level launches one per block level", widths(&fw));
     println!("relayered (longest path): {}", widths(&rw));
     println!("nodes in a different layer: {differ} of {} ({shallower} deeper in the format)", g.n);
+    // Runs of consecutive layers by width class, relayered: (class, first layer, layers, nodes).
+    let class = |w: u64| if w <= 512 { "≤512" } else if w < 4096 { "<4096" } else if w < 16384 { "<16384" } else { "≥16384" };
+    let mut runs: Vec<(&str, usize, usize, u64)> = Vec::new();
+    for (l, &w) in rw.iter().enumerate() {
+        match runs.last_mut() {
+            Some(r) if r.0 == class(w) => {
+                r.2 += 1;
+                r.3 += w;
+            }
+            _ => runs.push((class(w), l, 1, w)),
+        }
+    }
+    println!("relayered runs (width class, first layer, layers, nodes):");
+    for r in &runs {
+        println!("  {:>7} from {:5}: {:5} layers, {:9} nodes", r.0, r.1, r.2, r.3);
+    }
     Ok(())
 }
