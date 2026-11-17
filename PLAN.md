@@ -226,13 +226,17 @@ bytes as they are and changes neither document.
 - **Dependencies:** `blobmap-runtime` depends on `blobmap-model` only, never on `blobc`.
   `tools/runtime-deps.sh`, run by `ci.sh`, fails when `cargo tree -p blobmap-runtime`
   names `blobc`.
-- **No CUDA needed by default:** the crate is a workspace member left out of
-  `default-members`. Its CUDA code sits behind a `cuda` feature, off by default. Without it
-  the crate builds a CPU backend only and its build script never calls nvcc, so
-  `cargo build`, `cargo test --workspace`, clippy and `ci.sh` keep working without CUDA.
-  The GPU build is `cargo build -p blobmap-runtime --features cuda`.
-- **Branch:** all work happens on the branch `runtime`, in the worktree
-  `../the-blobmap-compiler-runtime`, and merges to `main` only after a gate passes.
+- **No CUDA needed to build:** the crate is a workspace member left out of
+  `default-members`. Its GPU code is CubeCL 0.11.4 (Rust kernels), on CubeCL's CUDA runtime
+  and its wgpu runtime. The CUDA driver and NVRTC are loaded at run time, so no CUDA toolkit
+  or nvcc is needed: `cargo build`, `cargo test --workspace`, clippy and `ci.sh` work on a
+  machine without CUDA. There is no `cuda` feature and no `.cu` file.
+- **Backends:** three, all first class: CPU, CubeCL cuda and CubeCL wgpu (here through
+  Vulkan). Each passes every golden at zero mismatches at each milestone gate and has its
+  own timings. Metal and HIP are untested until they pass the full gate on their own
+  hardware.
+- **Branch:** all work happens on the branch `runtime`, in the main checkout (no
+  worktree), and merges to `main` only after a gate passes.
   `crates/blobc` is not touched, apart from the one mechanical rename below.
 - **GPU use:**
   - free VRAM is checked before every run, and each run stays inside its budget;
@@ -261,6 +265,10 @@ bytes as they are and changes neither document.
 - Load fails with a clear error when the hot set, the entry bounds and the label pool for
   B_max columns exceed the budget. Inside it, the label pool sets how many columns can be
   in flight.
+- **As built at R1:** a component is loaded on first use. Its graph is copied to the host
+  and relayered top-first by longest-path level (new ids, rows sorted by head), instead of
+  using the format's own levels. It then goes to the device under an LRU VRAM budget.
+  The vocabulary tables are borrowed from the mapping, with no host copy.
 
 **Seeds and upward search on the CPU.**
 - Sources resolve to their slots and offsets, plus the car exit turns for `from`, or the
@@ -268,10 +276,13 @@ bytes as they are and changes neither document.
 - The upward search climbs the thin chain of ancestors on the host. Its labels go to the
   GPU as one sparse seed list per column.
 
-**Downward sweep on the GPU**, ported from the research's `cuda/sweep.cu`:
+**Downward sweep on the GPU**, ported from the research's `cuda/sweep.cu` to CubeCL
+kernels (u32 words only, u16 labels packed two per word):
 - **Top block:** resident in shared memory, as `top_resident`; it fits on France (20 KB).
-- **Wide levels:** one launch per wide level, captured as a CUDA graph, with lane groups
-  for high-degree nodes.
+- **Wide levels:** one plain launch per wide level, chunked, with lane groups for
+  high-degree nodes. CUDA graph capture was tried and removed: it gave wrong
+  `chained_column` labels and capture errors (India, Japan, FR+5) at the same speed as
+  plain launches, cause unknown.
 - **Cells:** below the top block, cells share no links (FORMAT §5.2). Each cell's levels
   run as independent work, one thread block per cell for its narrow and medium levels,
   instead of one launch per cell level. This attacks the 972 launches that cost France
@@ -305,6 +316,10 @@ bytes as they are and changes neither document.
   - upload the family's per-ID entry tables, a warm tensor, and run the heads on the GPU.
   - Moving a warm tensor to the GPU is a change from the brief, so I'll make it only if the
     measurements show it pays.
+- **As built at R1:** labels are read back and unpacked into columns, and the heads run on
+  the host over every ID of the component. That is 92% of a Europe car column (34.5 s of
+  37.3 s), so R2 moves the heads onto the GPU for cuda and wgpu, as one streaming pass on
+  the CPU backend, over only the IDs the query needs.
 
 **API:**
 - **Types:**
@@ -317,17 +332,18 @@ bytes as they are and changes neither document.
   thread does its own upward search, and one GPU worker per device drains the batch queue.
 - **Golden replay:** a `golden` module answers `queries.jsonl` lines through the typed API,
   for replay and benchmarks.
-- **CPU backend:** the same front end with a CPU downward sweep. It is used without
-  `cuda`, and as the second opinion in the randomized tests.
+- **CPU backend:** the same front end with a CPU downward sweep. It is a first-class
+  backend, used when no GPU is present, and the second opinion in the randomized tests.
 
-**Kernels:** `.cu` files under `crates/blobmap-runtime/cu/`, compiled by nvcc for sm_89 in
-`build.rs` (`cuda` feature only), as in the smoke test.
+**Kernels:** CubeCL kernels in `crates/blobmap-runtime/src/gpu.rs`, compiled at run time
+by each runtime (NVRTC for cuda, the wgpu shader compiler for wgpu). There is no
+`build.rs`.
 
 ### Order of work
 
 1. Step 0: rename and proof.
 2. Crate skeleton:
-   - feature gate, dependency check, CPU backend;
+   - dependency check, CPU backend;
    - typed operations matching the reference on the tiny tier.
 3. GPU loading:
    - hot upload, VRAM budget, label pool;
@@ -344,21 +360,25 @@ bytes as they are and changes neither document.
 ### Gates
 
 - **R1, correct** (stop and report):
-  - zero mismatches replaying the golden files of every tier whose hot part fits in 16 GB:
+  - zero mismatches on every backend (CPU, cuda, wgpu), replaying the golden files of:
     - tiny (all scenarios);
     - small: Lille, Great Britain, Japan, Fiji, Norway, India, California;
     - HdF, France and FR+5 (`frbeluchde`);
-    - Europe one family at a time where it fits: active, about 8 GB hot plus 2 GB of
-      entry bounds. Europe car's hot set (about 14–15 GB plus 2.4 GB of entry bounds) does
-      not fit a 16 GB card, so it is reported as not run.
+    - Europe car, active and mixed. Car fits a 16 GB card with entry bounds off and at
+      most 2 columns per sweep; mixed runs with the GPU on one family at a time.
+  - The development gate after each change is tiny, small and HdF on all three backends.
   - The existing models in `data/models` match the golden `inputs_hash` of their tier, so
     no rebuild is needed.
   - **Randomized comparison** with `blobmap_model::reference` on HdF and France, fixed
     seed: columns, isochrones, nearest, multi-criteria and chained, in both directions,
     with start times, same-piece pairs and border sources.
-- **R2, fast** (stop and report):
-  - **Latency** (median, p95) per query type, on France and Europe (each family where it
-    fits):
+- **R2, fast** (stop and report): a query's time is dominated by the sweep, on every
+  backend, with zero mismatches. Order: heads, unpack removed, per-column upload, host
+  memory borrowed from the mapping (the format's own levels against the relayering),
+  then the sweep (cuda at 7.44 ms or below without graphs, then the wgpu gap). Each step
+  is measured before and after with the phase timers.
+  - **Latency** (p50, p99, end to end) per backend and query type, with the phase
+    breakdown, on France and Europe:
     - travel_time;
     - isochrone at 5/15/30/60 min, with the border sources Strasbourg, Saint-Louis and
       Menton included;
@@ -366,7 +386,8 @@ bytes as they are and changes neither document.
     - full column;
     - multi-criteria.
   - Throughput at B = 1, 8, 32 and 64.
-  - VRAM used.
+  - Host RAM and VRAM, steady and peak, for Europe car, active and mixed.
+  - The full gate's wall time.
   - France car compared with the research's 5.7 ms and the smoke test's 7.4 ms.
 - **R3, ready for the API:**
   - the public API documented in `crates/blobmap-runtime/README.md`, with examples;
