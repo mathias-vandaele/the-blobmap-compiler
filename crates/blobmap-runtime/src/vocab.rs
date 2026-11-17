@@ -1,13 +1,52 @@
 //! What the runtime reads from the model besides the hierarchy: each family's tables
-//! (FORMAT §5.1) and the vocabulary (FORMAT §7), held in host memory (warm).
+//! (FORMAT §5.1) and the vocabulary (FORMAT §7). The per-ID tables stay on the model's
+//! memory map (`Tab`); only each mode's component is computed and held.
 
 use anyhow::{Context, Result, bail, ensure};
 use blobmap_model::manifest::Manifest;
 use blobmap_model::{Model, NONE, NONE16};
 use serde_json::Value;
+use std::borrow::Cow;
+use std::ops::Deref;
 
 pub use blobmap_model::reference::model::Id;
 pub use blobmap_model::reference::{Dir, Fam, Reason};
+
+/// A table read from the model: borrowed from its memory map when aligned, else owned.
+/// The borrow is given a `'static` lifetime; whoever holds a `Tab` must drop it before the
+/// `Model` it came from (`Runtime` declares its `model` last).
+pub struct Tab<T: Clone + 'static>(Cow<'static, [T]>);
+
+impl<T: Clone + 'static> Tab<T> {
+    /// Safety: the caller keeps `m` alive, unmoved maps included, while the `Tab` lives.
+    unsafe fn of(c: Cow<'_, [T]>) -> Tab<T> {
+        Tab(match c {
+            Cow::Borrowed(b) => Cow::Borrowed(unsafe { std::slice::from_raw_parts(b.as_ptr(), b.len()) }),
+            Cow::Owned(v) => Cow::Owned(v),
+        })
+    }
+}
+
+impl<T: Clone> Deref for Tab<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.0
+    }
+}
+
+/// Rows of K elements of a raw table as fixed-size arrays (owned when not castable).
+fn rows<T: bytemuck::Pod + Clone, const K: usize>(t: Tab<T>) -> Tab<[T; K]>
+where
+    [T; K]: bytemuck::Pod,
+{
+    match t.0 {
+        Cow::Borrowed(b) => match bytemuck::try_cast_slice::<T, [T; K]>(b) {
+            Ok(r) => Tab(Cow::Borrowed(r)),
+            Err(_) => Tab(Cow::Owned(b.as_chunks::<K>().0.to_vec())),
+        },
+        Cow::Owned(v) => Tab(Cow::Owned(v.as_chunks::<K>().0.to_vec())),
+    }
+}
 
 /// A family's component and block tables (FORMAT §5.1).
 pub struct Family {
@@ -71,24 +110,55 @@ impl Family {
 
 /// One mode's entries (FORMAT §7.2) in a common shape. CAR: `node` = `seg`, `road` = NONE,
 /// `off` = [before₀, after₀, before₁, after₁]. ACTIVE: `node` = [U, V], `off` = [U → ID,
-/// ID → U, V → ID, ID → V]. Nodes are numbered within the ID's component (`component`,
-/// `NONE` when the ID is not served).
+/// ID → U, V → ID, ID → V]. `node(i)` numbers nodes within the ID's component
+/// (`component`, `NONE` when the ID is not served).
 pub struct Mode {
     pub name: String,
     pub fam: Fam,
     pub metric: usize,
     pub component: Vec<u32>,
-    pub node: Vec<[u32; 2]>,
-    pub road: Vec<u32>,
-    pub off: Vec<[u16; 4]>,
+    /// The family's first layout id per component.
+    first: Vec<u32>,
+    /// Layout ids as the model stores them.
+    raw_node: Tab<[u32; 2]>,
+    raw_road: Option<Tab<u32>>,
+    raw_off: Tab<[u16; 4]>,
     /// (internal index, code), sorted by index.
     pub reasons: Vec<(u32, u8)>,
 }
 
+impl Mode {
+    pub fn node(&self, i: usize) -> [u32; 2] {
+        let x = self.component[i];
+        let n = self.raw_node[i];
+        if x == NONE {
+            return n;
+        }
+        let b = self.first[x as usize];
+        n.map(|v| if v == NONE { NONE } else { v - b })
+    }
+
+    pub fn road(&self, i: usize) -> u32 {
+        self.raw_road.as_ref().map_or(NONE, |r| r[i])
+    }
+
+    pub fn off(&self, i: usize) -> [u16; 4] {
+        self.raw_off[i]
+    }
+
+    pub fn len(&self) -> usize {
+        self.component.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.component.is_empty()
+    }
+}
+
 pub struct Vocab {
-    pub address: Vec<Id>,
-    pub place: Vec<Id>,
-    pub alias: Vec<Id>,
+    pub address: Tab<Id>,
+    pub place: Tab<Id>,
+    pub alias: Tab<Id>,
     pub alias_to: Vec<u32>,
     pub modes: Vec<Mode>,
     pub status: Vec<u8>,
@@ -117,12 +187,18 @@ fn strings(m: &Model, name: &str) -> Result<Vec<String>> {
     first.windows(2).map(|w| Ok(String::from_utf8(bytes[w[0] as usize..w[1] as usize].to_vec())?)).collect()
 }
 
-fn ids(m: &Model, name: &str) -> Result<Vec<Id>> {
-    let (v, n) = m.get_rows::<u8>(name, &[16])?;
-    Ok((0..n).map(|i| v[16 * i..16 * i + 16].try_into().unwrap()).collect())
+fn ids(m: &Model, name: &str) -> Result<Tab<Id>> {
+    let (v, _) = m.get_rows::<u8>(name, &[16])?;
+    Ok(rows::<u8, 16>(unsafe { Tab::of(v) }))
 }
 
-pub fn load(m: &Model, man: &Manifest) -> Result<(Vec<Family>, Vocab)> {
+/// The families and the vocabulary.
+///
+/// # Safety
+///
+/// The returned tables borrow `m`'s memory map; the caller keeps `m` alive, and
+/// drops them first.
+pub unsafe fn load(m: &Model, man: &Manifest) -> Result<(Vec<Family>, Vocab)> {
     let fams = vec![Family::load(m, man, Fam::Car)?, Family::load(m, man, Fam::Active)?];
     let address = ids(m, "vocab/ids/address")?;
     let place = ids(m, "vocab/ids/place")?;
@@ -136,24 +212,23 @@ pub fn load(m: &Model, man: &Manifest) -> Result<(Vec<Family>, Vocab)> {
         let (nodes, k) = m.get_rows::<u32>(&format!("{p}{}", if fam == Fam::Car { "seg" } else { "node" }), &[2])?;
         let (o, k2) = m.get_rows::<u16>(&format!("{p}off"), if fam == Fam::Car { &[2, 2] } else { &[4] })?;
         ensure!(k == n && k2 == n, "{p}: entries do not cover every ID");
-        let road = if fam == Fam::Car { vec![NONE; n] } else { m.get_len::<u32>(&format!("{p}road"), n)?.into_owned() };
-        let mut node: Vec<[u32; 2]> = (0..n).map(|i| [nodes[2 * i], nodes[2 * i + 1]]).collect();
-        let off: Vec<[u16; 4]> = (0..n).map(|i| o[4 * i..4 * i + 4].try_into().unwrap()).collect();
+        let road = if fam == Fam::Car { None } else { Some(unsafe { Tab::of(m.get_len::<u32>(&format!("{p}road"), n)?) }) };
+        let node: Tab<[u32; 2]> = rows::<u32, 2>(unsafe { Tab::of(nodes) });
+        let off: Tab<[u16; 4]> = rows::<u16, 4>(unsafe { Tab::of(o) });
         let mut component = vec![NONE; n];
-        for (i, nd) in node.iter_mut().enumerate() {
+        for (i, nd) in node.iter().enumerate() {
             let Some(&v) = nd.iter().find(|&&v| v != NONE) else { continue };
             ensure!((v as usize) < *t.first.last().unwrap() as usize, "{p}: ID {i} names layout id {v}, out of range");
             let x = (t.first.partition_point(|&f| f <= v) - 1) as u32;
             component[i] = x;
-            for v in nd.iter_mut().filter(|v| **v != NONE) {
-                ensure!(*v >= t.first[x as usize] && *v < t.first[x as usize + 1], "{p}: ID {i} has nodes in two components");
-                *v -= t.first[x as usize];
+            for &v in nd.iter().filter(|v| **v != NONE) {
+                ensure!(v >= t.first[x as usize] && v < t.first[x as usize + 1], "{p}: ID {i} has nodes in two components");
             }
         }
         let rid = m.get::<u32>(&format!("{p}reason_id"))?;
         let rcode = m.get_len::<u8>(&format!("{p}reason_code"), rid.len())?;
         let reasons = (0..rid.len()).map(|k| (rid[k], rcode[k])).collect();
-        modes.push(Mode { name: name.clone(), fam, metric, component, node, road, off, reasons });
+        modes.push(Mode { name: name.clone(), fam, metric, component, first: t.first.clone(), raw_node: node, raw_road: road, raw_off: off, reasons });
     }
     let np = place.len();
     let vocab = Vocab {

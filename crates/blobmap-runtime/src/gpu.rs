@@ -587,7 +587,14 @@ impl Gpu {
 
     fn upload(&self, bytes: &[u8], used: &mut u64) -> Handle {
         *used += bytes.len() as u64;
-        self.client.create_from_slice(bytes)
+        let h = self.client.create_from_slice(bytes);
+        // A large upload's staging memory goes back before the next one (wgpu kept it,
+        // and a continent's component went past the device).
+        if bytes.len() >= 64 << 20 {
+            let _ = cubecl::future::block_on(self.client.sync());
+            let _ = self.client.memory_cleanup();
+        }
+        h
     }
 
     /// The bytes a graph would take on the device (hot set, state for `p_max` words, entry

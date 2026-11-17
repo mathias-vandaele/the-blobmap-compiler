@@ -73,7 +73,7 @@ fn main() -> Result<()> {
         s ^= s << 17;
         let i = (s % mv.component.len() as u64) as usize;
         if mv.component[i] == x {
-            let v = mv.node[i].iter().copied().find(|&v| v != NONE).unwrap();
+            let v = mv.node(i).iter().copied().find(|&v| v != NONE).unwrap();
             picks.push(g.new[v as usize]);
         }
     }

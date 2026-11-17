@@ -81,7 +81,6 @@ pub struct ColReq {
 }
 
 pub struct Runtime {
-    pub model: Model,
     pub manifest: Manifest,
     pub fams: Vec<Family>,
     pub vocab: Vocab,
@@ -91,6 +90,8 @@ pub struct Runtime {
     loading: Mutex<()>,
     gpu: Option<GpuEngine>,
     pub opts: Options,
+    /// Last, so that it is dropped after the vocabulary's tables that borrow its maps.
+    pub model: Model,
 }
 
 impl Runtime {
@@ -98,7 +99,9 @@ impl Runtime {
         let model = Model::open(dir)?;
         let manifest = Manifest::from_value(&model.manifest).context("manifest")?;
         ensure!(manifest.parts.vocabulary.road_hash == manifest.parts.road.hash, "the vocabulary names another road part (FORMAT §9)");
-        let (fams, vocab) = vocab::load(&model, &manifest)?;
+        // Safety: `model` moves into the Runtime, which drops it after `vocab` (its maps do
+        // not move with it).
+        let (fams, vocab) = unsafe { vocab::load(&model, &manifest)? };
         let rh = model.get_len::<u8>("vocab/road_hash", 32)?;
         ensure!(hex::encode(&rh[..]) == manifest.parts.road.hash, "vocab/road_hash differs from the manifest (FORMAT §9)");
         let members = vocab
@@ -278,11 +281,11 @@ impl Runtime {
             let g = &p.comp.g;
             let (first, ids) = &self.members[q.mode];
             let ids = &ids[first[p.x as usize] as usize..first[p.x as usize + 1] as usize];
-            let mut by_piece: Vec<([u32; 2], u32, usize)> = p.srcs.iter().enumerate().map(|(j, s)| (mv.node[s.id as usize], mv.road[s.id as usize], j)).collect();
+            let mut by_piece: Vec<([u32; 2], u32, usize)> = p.srcs.iter().enumerate().map(|(j, s)| (mv.node(s.id as usize), mv.road(s.id as usize), j)).collect();
             by_piece.sort_unstable();
             let time = |i: usize| -> u16 {
                 let mut t = head(g, mv, i, |v| lab[g.new[v as usize] as usize], q.dir);
-                let key = (mv.node[i], mv.road[i]);
+                let key = (mv.node(i), mv.road(i));
                 let from = by_piece.partition_point(|b| (b.0, b.1) < key);
                 for &(_, _, j) in by_piece[from..].iter().take_while(|b| (b.0, b.1) == key) {
                     let s = &p.srcs[j];
@@ -341,7 +344,7 @@ pub fn bound_of(t: u64) -> u16 {
 /// Puts each seed of a source (FORMAT §8): a new id and its label.
 fn seed(g: &Graph, mv: &Mode, s: &Src, dir: Dir, put: &mut impl FnMut(u32, u16)) {
     let i = s.id as usize;
-    let (nodes, off) = (mv.node[i], mv.off[i]);
+    let (nodes, off) = (mv.node(i), mv.off(i));
     let nw = |v: u32| g.new[v as usize];
     match (mv.fam, dir) {
         (Fam::Car, Dir::From) => {
@@ -377,7 +380,7 @@ fn seed(g: &Graph, mv: &Mode, s: &Src, dir: Dir, put: &mut impl FnMut(u32, u16))
 
 /// The head of ID i (FORMAT §8), from the labels of layout ids.
 fn head(g: &Graph, mv: &Mode, i: usize, label: impl Fn(u32) -> u16, dir: Dir) -> u16 {
-    let (nodes, off) = (mv.node[i], mv.off[i]);
+    let (nodes, off) = (mv.node(i), mv.off(i));
     let mut t = INF;
     match (mv.fam, dir) {
         (Fam::Car, Dir::From) => {
@@ -412,14 +415,14 @@ fn head(g: &Graph, mv: &Mode, i: usize, label: impl Fn(u32) -> u16, dir: Dir) ->
 
 /// Two IDs on the same piece (FORMAT §8 "Direct drive").
 pub fn same_piece(mv: &Mode, a: usize, b: usize) -> bool {
-    mv.component[a] == mv.component[b] && mv.node[a] == mv.node[b] && mv.road[a] == mv.road[b]
+    mv.component[a] == mv.component[b] && mv.node(a) == mv.node(b) && mv.road(a) == mv.road(b)
 }
 
 /// The direct term from a to b on their shared piece.
 pub fn direct(mv: &Mode, a: usize, b: usize) -> u16 {
-    let (oa, ob) = (mv.off[a], mv.off[b]);
+    let (oa, ob) = (mv.off(a), mv.off(b));
     let before: [(usize, bool); 2] = match mv.fam {
-        Fam::Car => [(0, mv.node[a][0] != NONE), (2, mv.node[a][1] != NONE)],
+        Fam::Car => [(0, mv.node(a)[0] != NONE), (2, mv.node(a)[1] != NONE)],
         Fam::Active => [(0, true), (2, true)],
     };
     let mut t = INF;
