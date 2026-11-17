@@ -174,8 +174,9 @@ pub struct Part<'a> {
     pub g: &'a Graph,
     pub mv: &'a Mode,
     pub x: u32,
-    /// The component's IDs, ascending.
-    pub ids: &'a [u32],
+    /// The component's IDs, ascending, for a small component; else every ID whose layout
+    /// ids are the component's.
+    pub ids: Option<&'a [u32]>,
     pub srcs: &'a [Src],
     pub dir: Dir,
     /// The sweep's pruning bound (`DEAD` or above: none).
@@ -231,13 +232,21 @@ fn run<L: Fn(usize) -> u16 + Sync>(p: &Part, lab: L, want: Want, out: Option<&mu
         }
         if pruned && t > p.bound { INF } else { t }
     };
-    let span = |lo: u32, hi: u32| &p.ids[p.ids.partition_point(|&i| i < lo)..p.ids.partition_point(|&i| i < hi)];
+    // The component's IDs in lo .. hi: from its list, or those whose layout id is in it.
+    let n = g.n as u32;
+    let member = |i: u32| {
+        let nd = mv.raw_node(i as usize);
+        let v = if nd[0] != NONE { nd[0] } else { nd[1] };
+        v != NONE && v >= first && v - first < n
+    };
+    let each = |lo: u32, hi: u32, f: &mut dyn FnMut(u32)| match p.ids {
+        Some(ids) => ids[ids.partition_point(|&i| i < lo)..ids.partition_point(|&i| i < hi)].iter().for_each(|&i| f(i)),
+        None => (lo..hi).filter(|&i| member(i)).for_each(f),
+    };
     if let Some(out) = out {
         out.par_chunks_mut(CHUNK).enumerate().for_each(|(c, o)| {
             let lo = want.lo + (c * CHUNK) as u32;
-            for &i in span(lo, lo + o.len() as u32) {
-                o[(i - lo) as usize] = time(i as usize);
-            }
+            each(lo, lo + o.len() as u32, &mut |i| o[(i - lo) as usize] = time(i as usize));
         });
         return Vec::new();
     }
@@ -255,20 +264,24 @@ fn run<L: Fn(usize) -> u16 + Sync>(p: &Part, lab: L, want: Want, out: Option<&mu
         let k = by_piece.partition_point(|b| b.0 < nd);
         k < by_piece.len() && by_piece[k].0 == nd
     };
-    let ids = span(want.lo, want.hi);
-    let parts: Vec<Vec<(u32, u16)>> = ids
-        .par_chunks(CHUNK)
-        .map(|ch| {
-            ch.iter()
-                .filter_map(|&i| {
-                    let nd = mv.raw_node(i as usize);
-                    if !is_near(nd[0]) && !is_near(nd[1]) && !on_source(nd) {
-                        return None;
-                    }
-                    let t = time(i as usize);
-                    (t <= max).then_some((i, t))
-                })
-                .collect()
+    let chunks = (want.hi.saturating_sub(want.lo) as usize).div_ceil(CHUNK);
+    let parts: Vec<Vec<(u32, u16)>> = (0..chunks)
+        .into_par_iter()
+        .map(|c| {
+            let lo = want.lo + (c * CHUNK) as u32;
+            let hi = (lo + CHUNK as u32).min(want.hi);
+            let mut v = Vec::new();
+            each(lo, hi, &mut |i| {
+                let nd = mv.raw_node(i as usize);
+                if !is_near(nd[0]) && !is_near(nd[1]) && !on_source(nd) {
+                    return;
+                }
+                let t = time(i as usize);
+                if t <= max {
+                    v.push((i, t));
+                }
+            });
+            v
         })
         .collect();
     parts.concat()

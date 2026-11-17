@@ -123,8 +123,6 @@ pub struct Runtime {
     pub manifest: Manifest,
     pub fams: Vec<Family>,
     pub vocab: Vocab,
-    /// Per mode, the IDs of each component (CSR).
-    members: Vec<(Vec<u32>, Vec<u32>)>,
     comps: Mutex<BTreeMap<(u8, u32), Arc<Comp>>>,
     loading: Mutex<()>,
     pub opts: Options,
@@ -143,31 +141,6 @@ impl Runtime {
         let (fams, vocab) = unsafe { vocab::load(&model, &manifest)? };
         let rh = model.get_len::<u8>("vocab/road_hash", 32)?;
         ensure!(hex::encode(&rh[..]) == manifest.parts.road.hash, "vocab/road_hash differs from the manifest (FORMAT §9)");
-        let members = vocab
-            .modes
-            .iter()
-            .map(|mv| {
-                let k = fams[mv.fam as usize].components();
-                let mut first = vec![0u32; k + 1];
-                for &x in &mv.component {
-                    if x != NONE {
-                        first[x as usize + 1] += 1;
-                    }
-                }
-                for i in 0..k {
-                    first[i + 1] += first[i];
-                }
-                let mut at = first.clone();
-                let mut ids = vec![0u32; first[k] as usize];
-                for (i, &x) in mv.component.iter().enumerate() {
-                    if x != NONE {
-                        ids[at[x as usize] as usize] = i as u32;
-                        at[x as usize] += 1;
-                    }
-                }
-                (first, ids)
-            })
-            .collect();
         let gpu = match opts.backend {
             Backend::Cpu => None,
             Backend::Cuda | Backend::Wgpu | Backend::Auto => {
@@ -193,7 +166,7 @@ impl Runtime {
                 got
             }
         };
-        Ok(Runtime { model, manifest, fams, vocab, members, comps: Mutex::new(BTreeMap::new()), loading: Mutex::new(()), gpu, opts, prof: Profile::default() })
+        Ok(Runtime { model, manifest, fams, vocab, comps: Mutex::new(BTreeMap::new()), loading: Mutex::new(()), gpu, opts, prof: Profile::default() })
     }
 
     /// The backend sweeps run on, described.
@@ -222,7 +195,7 @@ impl Runtime {
             return Ok(c.clone());
         }
         let g = Graph::load(&self.model, &self.fams[fam as usize], x, self.opts.format_levels)?;
-        let c = Arc::new(Comp { g, bounds: std::sync::OnceLock::new() });
+        let c = Arc::new(Comp::new(g));
         self.comps.lock().unwrap().insert(k, c.clone());
         Ok(c)
     }
@@ -256,7 +229,7 @@ impl Runtime {
             let mv = &self.vocab.modes[q.mode];
             let mut by: BTreeMap<u32, Vec<Src>> = BTreeMap::new();
             for s in &q.sources {
-                let x = mv.component[s.id as usize];
+                let x = mv.component(s.id as usize);
                 ensure!(x != NONE, "a column source must be served (internal index {})", s.id);
                 by.entry(x).or_default().push(*s);
             }
@@ -369,12 +342,13 @@ impl Runtime {
                     continue;
                 }
             };
-            let (first, ids) = &self.members[q.mode];
+            let mv = &self.vocab.modes[q.mode];
+            let members = p.comp.members(q.mode, mv, p.x, self.fams[mv.fam as usize].nodes_total());
             let part = heads::Part {
                 g: &p.comp.g,
-                mv: &self.vocab.modes[q.mode],
+                mv,
                 x: p.x,
-                ids: &ids[first[p.x as usize] as usize..first[p.x as usize + 1] as usize],
+                ids: members.as_deref().map(|v| &v[..]),
                 srcs: &p.srcs,
                 dir: q.dir,
                 bound: q.bound,
@@ -414,8 +388,8 @@ impl Runtime {
     /// shared piece.
     pub fn pair(&self, o: u32, d: u32, mode: usize) -> Result<u16> {
         let mv = &self.vocab.modes[mode];
-        let x = mv.component[o as usize];
-        ensure!(x != NONE && x == mv.component[d as usize], "a pair must be served in one component (internal indices {o}, {d})");
+        let x = mv.component(o as usize);
+        ensure!(x != NONE && x == mv.component(d as usize), "a pair must be served in one component (internal indices {o}, {d})");
         let c = self.comp(mv.fam, x)?;
         let g = &c.g;
         let up = |i: u32, dir: Dir| {
@@ -477,7 +451,7 @@ fn seed(g: &Graph, mv: &Mode, s: &Src, dir: Dir, put: &mut impl FnMut(u32, u16))
 
 /// Two IDs on the same piece (FORMAT §8 "Direct drive").
 pub fn same_piece(mv: &Mode, a: usize, b: usize) -> bool {
-    mv.component[a] == mv.component[b] && mv.node(a) == mv.node(b) && mv.road(a) == mv.road(b)
+    mv.component(a) == mv.component(b) && mv.node(a) == mv.node(b) && mv.road(a) == mv.road(b)
 }
 
 /// The direct term from a to b on their shared piece.

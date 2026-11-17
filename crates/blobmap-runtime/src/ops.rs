@@ -121,7 +121,7 @@ impl Runtime {
             return Ok(Ok(Some(0)));
         }
         let mv = &self.vocab.modes[m];
-        if mv.component[ia as usize] != mv.component[ib as usize] {
+        if mv.component(ia as usize) != mv.component(ib as usize) {
             return Ok(Err(Refusal { reason: Reason::DifferentComponent, id: b.to_string() }));
         }
         Ok(Ok(time(self.pair(ia, ib, m)?)))

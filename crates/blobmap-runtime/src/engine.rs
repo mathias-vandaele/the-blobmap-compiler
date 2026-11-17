@@ -16,13 +16,48 @@ use crate::heads::{Labels, Times};
 use crate::sweep::{Bounds, Column, Key, all_bounds, cpu_down};
 use crate::vocab::{Dir, Mode};
 
-/// A loaded component: its graph, and its entry bounds once a pruned CPU sweep needs them.
+/// A loaded component: its graph, its entry bounds once a pruned CPU sweep needs them, and
+/// per mode the IDs of a small component once its heads need them.
 pub struct Comp {
     pub g: Graph,
     pub bounds: OnceLock<Result<Bounds, String>>,
+    pub members: Mutex<BTreeMap<usize, Arc<Vec<u32>>>>,
 }
 
+/// A component of fewer than 1/this of its family's nodes keeps its IDs' list; a larger one's
+/// heads scan the IDs' layout ids, which they read anyway.
+const SMALL: usize = 16;
+
 impl Comp {
+    pub fn new(g: Graph) -> Comp {
+        Comp { g, bounds: OnceLock::new(), members: Mutex::new(BTreeMap::new()) }
+    }
+
+    /// The IDs of component x in mode `mode`, ascending, for a small component (found by one
+    /// scan of the mode's IDs, then kept); `None` for a large one.
+    pub fn members(&self, mode: usize, mv: &Mode, x: u32, family_nodes: usize) -> Option<Arc<Vec<u32>>> {
+        if self.g.n * SMALL >= family_nodes {
+            return None;
+        }
+        if let Some(v) = self.members.lock().unwrap().get(&mode) {
+            return Some(v.clone());
+        }
+        use rayon::prelude::*;
+        let (a, b) = (mv.first(x), mv.first(x) + self.g.n as u32);
+        let ids: Vec<u32> = (0..mv.len() as u32)
+            .into_par_iter()
+            .with_min_len(1 << 16)
+            .filter(|&i| {
+                let nd = mv.raw_node(i as usize);
+                let v = if nd[0] != u32::MAX { nd[0] } else { nd[1] };
+                v >= a && v < b
+            })
+            .collect();
+        let ids = Arc::new(ids);
+        self.members.lock().unwrap().insert(mode, ids.clone());
+        Some(ids)
+    }
+
     pub fn bounds(&self) -> Result<&Bounds> {
         self.bounds.get_or_init(|| all_bounds(&self.g).map_err(|e| format!("{e:#}"))).as_ref().map_err(|e| anyhow!("{e}"))
     }

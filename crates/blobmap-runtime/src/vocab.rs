@@ -9,6 +9,8 @@ use serde_json::Value;
 use std::borrow::Cow;
 use std::ops::Deref;
 
+use rayon::prelude::*;
+
 pub use blobmap_model::reference::model::Id;
 pub use blobmap_model::reference::{Dir, Fam, Reason};
 
@@ -70,11 +72,11 @@ impl Family {
         let f = fam.name();
         let metrics = man.families.get(f).with_context(|| format!("no family {f}"))?.metrics.clone();
         let g = |t: &str| -> Result<Vec<u32>> { Ok(m.get::<u32>(&format!("road/{f}/{t}"))?.into_owned()) };
-        let component = g("nodes/component")?;
+        let component = m.get::<u32>(&format!("road/{f}/nodes/component"))?;
         ensure!(component.first().is_none_or(|&x| x == 0) && component.windows(2).all(|w| w[1] == w[0] || w[1] == w[0] + 1), "road/{f}/nodes/component: components are not consecutive ranges from 0");
         let k = component.last().map_or(0, |&x| x as usize + 1);
         let mut first = vec![0u32; k + 1];
-        for &x in &component {
+        for &x in component.iter() {
             first[x as usize + 1] += 1;
         }
         for i in 0..k {
@@ -103,6 +105,11 @@ impl Family {
         self.first.len() - 1
     }
 
+    /// The family's layout nodes.
+    pub fn nodes_total(&self) -> usize {
+        *self.first.last().unwrap() as usize
+    }
+
     pub fn nodes(&self, x: u32) -> usize {
         (self.first[x as usize + 1] - self.first[x as usize]) as usize
     }
@@ -116,7 +123,8 @@ pub struct Mode {
     pub name: String,
     pub fam: Fam,
     pub metric: usize,
-    pub component: Vec<u32>,
+    /// The family's `nodes/component` (FORMAT §5.1).
+    node_comp: Tab<u32>,
     /// The family's first layout id per component.
     first: Vec<u32>,
     /// Layout ids as the model stores them.
@@ -128,8 +136,15 @@ pub struct Mode {
 }
 
 impl Mode {
+    /// ID i's component: that of its layout ids, `NONE` when it is not served.
+    pub fn component(&self, i: usize) -> u32 {
+        let n = self.raw_node[i];
+        let v = if n[0] != NONE { n[0] } else { n[1] };
+        if v == NONE { NONE } else { self.node_comp[v as usize] }
+    }
+
     pub fn node(&self, i: usize) -> [u32; 2] {
-        let x = self.component[i];
+        let x = self.component(i);
         let n = self.raw_node[i];
         if x == NONE {
             return n;
@@ -163,11 +178,11 @@ impl Mode {
     }
 
     pub fn len(&self) -> usize {
-        self.component.len()
+        self.raw_node.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.component.is_empty()
+        self.raw_node.is_empty()
     }
 }
 
@@ -231,20 +246,20 @@ pub unsafe fn load(m: &Model, man: &Manifest) -> Result<(Vec<Family>, Vocab)> {
         let road = if fam == Fam::Car { None } else { Some(unsafe { Tab::of(m.get_len::<u32>(&format!("{p}road"), n)?) }) };
         let node: Tab<[u32; 2]> = rows::<u32, 2>(unsafe { Tab::of(nodes) });
         let off: Tab<[u16; 4]> = rows::<u16, 4>(unsafe { Tab::of(o) });
-        let mut component = vec![NONE; n];
-        for (i, nd) in node.iter().enumerate() {
-            let Some(&v) = nd.iter().find(|&&v| v != NONE) else { continue };
-            ensure!((v as usize) < *t.first.last().unwrap() as usize, "{p}: ID {i} names layout id {v}, out of range");
-            let x = (t.first.partition_point(|&f| f <= v) - 1) as u32;
-            component[i] = x;
-            for &v in nd.iter().filter(|v| **v != NONE) {
-                ensure!(v >= t.first[x as usize] && v < t.first[x as usize + 1], "{p}: ID {i} has nodes in two components");
-            }
+        let node_comp = unsafe { Tab::of(m.get_len::<u32>(&format!("road/{}/nodes/component", mode.family), *t.first.last().unwrap() as usize)?) };
+        // Every layout id in range, and an ID's two in one component.
+        let nn = node_comp.len();
+        let bad = node.par_iter().position_any(|nd| {
+            let (a, b) = (nd[0], nd[1]);
+            (a != NONE && a as usize >= nn) || (b != NONE && b as usize >= nn) || (a != NONE && b != NONE && node_comp[a as usize] != node_comp[b as usize])
+        });
+        if let Some(i) = bad {
+            bail!("{p}: ID {i} names a layout id out of range, or nodes in two components");
         }
         let rid = m.get::<u32>(&format!("{p}reason_id"))?;
         let rcode = m.get_len::<u8>(&format!("{p}reason_code"), rid.len())?;
         let reasons = (0..rid.len()).map(|k| (rid[k], rcode[k])).collect();
-        modes.push(Mode { name: name.clone(), fam, metric, component, first: t.first.clone(), raw_node: node, raw_road: road, raw_off: off, reasons });
+        modes.push(Mode { name: name.clone(), fam, metric, node_comp, first: t.first.clone(), raw_node: node, raw_road: road, raw_off: off, reasons });
     }
     let np = place.len();
     let vocab = Vocab {
@@ -307,7 +322,7 @@ impl Vocab {
             return Err(Reason::FilteredPlace);
         }
         let mv = &self.modes[mode];
-        match mv.component[i as usize] {
+        match mv.component(i as usize) {
             NONE => {
                 let k = mv.reasons.binary_search_by_key(&i, |r| r.0).map_err(|_| Reason::NoRoad)?;
                 Err(reason_from_code(mv.reasons[k].1))
