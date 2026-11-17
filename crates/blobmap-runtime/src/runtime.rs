@@ -56,11 +56,13 @@ pub struct Options {
     pub prune: bool,
     /// Per family (car, active), whether its sweeps go to the GPU (else the CPU).
     pub gpu_families: [bool; 2],
+    /// Sweep layers from the format's levels instead of the longest path (measurement).
+    pub format_levels: bool,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { backend: Backend::Auto, gpu_min_nodes: 1 << 16, b_max: 16, vram_budget: 14 << 30, prune: true, gpu_families: [true, true] }
+        Options { backend: Backend::Auto, gpu_min_nodes: 1 << 16, b_max: 16, vram_budget: 14 << 30, prune: true, gpu_families: [true, true], format_levels: false }
     }
 }
 
@@ -219,7 +221,7 @@ impl Runtime {
         if let Some(c) = self.comps.lock().unwrap().get(&k) {
             return Ok(c.clone());
         }
-        let g = Graph::load(&self.model, &self.fams[fam as usize], x)?;
+        let g = Graph::load(&self.model, &self.fams[fam as usize], x, self.opts.format_levels)?;
         let c = Arc::new(Comp { g, bounds: std::sync::OnceLock::new() });
         self.comps.lock().unwrap().insert(k, c.clone());
         Ok(c)

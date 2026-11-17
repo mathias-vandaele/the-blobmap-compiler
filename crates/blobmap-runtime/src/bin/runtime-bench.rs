@@ -1,5 +1,5 @@
 //! `runtime-bench <model> --backend cuda|wgpu [--family car|active] [--metric k] [--dir
-//! from|to] [--sources n] [--rounds r] [--b k] [--bound t]`: GPU sweeps of a
+//! from|to] [--sources n] [--rounds r] [--b k] [--bound t] [--format-levels]`: GPU sweeps of a
 //! family's largest component from pseudo-random served IDs (fixed seed), B columns each:
 //! the seconds of seeding and launches up to a device sync and of the read-back, as p50 and
 //! p99 per sweep. The trial's measure is the first.
@@ -23,6 +23,7 @@ fn main() -> Result<()> {
     let a: Vec<String> = std::env::args().skip(1).collect();
     ensure!(!a.is_empty(), "usage: runtime-bench <model> --backend cuda|wgpu [options]");
     let (mut kind, mut fam, mut metric, mut dir, mut sources, mut rounds, mut b, mut bound) = (Kind::Cuda, 0usize, 0usize, Dir::From, 1000usize, 2usize, 1usize, INF);
+    let mut format_levels = false;
     let mut i = 1;
     while i < a.len() {
         let v = || a.get(i + 1).context("option value");
@@ -41,11 +42,15 @@ fn main() -> Result<()> {
             "--rounds" => rounds = v()?.parse()?,
             "--b" => b = v()?.parse()?,
             "--bound" => bound = v()?.parse()?,
+            "--format-levels" => {
+                format_levels = true;
+                i -= 1;
+            }
             x => bail!("unknown option {x}"),
         }
         i += 2;
     }
-    let rt = Runtime::open(Path::new(&a[0]), Options { backend: Backend::Cpu, ..Options::default() })?;
+    let rt = Runtime::open(Path::new(&a[0]), Options { backend: Backend::Cpu, format_levels, ..Options::default() })?;
     let f = &rt.fams[fam];
     let x = (0..f.components() as u32).max_by_key(|&x| f.nodes(x)).context("no component")?;
     let t = Instant::now();

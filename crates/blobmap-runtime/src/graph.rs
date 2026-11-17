@@ -35,7 +35,9 @@ pub struct Graph {
 }
 
 impl Graph {
-    pub fn load(m: &Model, t: &Family, x: u32) -> Result<Graph> {
+    /// A component, layered by longest path from the top, or by the format's own levels
+    /// (`format_levels`: the top block's, then every cell's level l together).
+    pub fn load(m: &Model, t: &Family, x: u32, format_levels: bool) -> Result<Graph> {
         let fam = t.fam;
         let f = fam.name();
         ensure!((x as usize) < t.components(), "{f} component {x} does not exist");
@@ -117,7 +119,8 @@ impl Graph {
             }
         }
         ensure!(up_first.len() == n + 1, "{f} component {x}: blocks cover {} of {n} nodes", up_first.len() - 1);
-        Ok(relayer(fam, n, up_first, up_head, up, down, arc_first, arc_head, turn_cost, copy_first, copies))
+        let layers = if format_levels { Some(format_layers(m, t, x)?) } else { None };
+        Ok(relayer_by(fam, n, up_first, up_head, up, down, arc_first, arc_head, turn_cost, copy_first, copies, layers))
     }
 
     pub fn levels(&self) -> usize {
@@ -198,6 +201,32 @@ impl Graph {
     }
 }
 
+/// The format's layer of each node of component x (numbered from 0): its level in the top
+/// or whole block, or the top's level count plus its level in its cell.
+pub fn format_layers(m: &Model, t: &Family, x: u32) -> Result<Vec<u32>> {
+    let base = t.first[x as usize];
+    let mut layer = vec![u32::MAX; t.nodes(x)];
+    let mut l_top = 0u32;
+    for b in t.block_first[x as usize] as usize..t.block_first[x as usize + 1] as usize {
+        let lf = m.get::<u32>(&format!("road/{}/p{}/level_first", t.fam.name(), t.b_pack[b]))?;
+        let (lb, nl) = (t.b_level_base[b] as usize, t.b_levels[b] as usize);
+        ensure!(lb + nl < lf.len(), "road/{}/p{}/level_first: block {b}'s levels out of range", t.fam.name(), t.b_pack[b]);
+        let add = if t.b_kind[b] == 2 { l_top } else { 0 };
+        for l in 0..nl {
+            for v in lf[lb + l]..lf[lb + l + 1] {
+                ensure!(v >= base && ((v - base) as usize) < layer.len(), "block {b}'s level {l} names layout id {v}, outside its component");
+                layer[(v - base) as usize] = add + l as u32;
+            }
+        }
+        if t.b_kind[b] != 2 {
+            l_top = nl as u32;
+        }
+    }
+    ensure!(layer.iter().all(|&l| l != u32::MAX), "{} component {x}: the blocks' levels do not cover it", t.fam.name());
+    Ok(layer)
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn relayer(
     fam: Fam,
@@ -212,15 +241,48 @@ pub(crate) fn relayer(
     copy_first: Vec<u32>,
     copies: Vec<u32>,
 ) -> Graph {
+    relayer_by(fam, n, up_first, up_head, up, down, arc_first, arc_head, turn_cost, copy_first, copies, None)
+}
+
+/// Renumbers by layer, the longest path from the top unless `layers` are given (each
+/// upper neighbour must be in a smaller layer).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn relayer_by(
+    fam: Fam,
+    n: usize,
+    up_first: Vec<u64>,
+    up_head: Vec<u32>,
+    up: Vec<Vec<u16>>,
+    down: Vec<Vec<u16>>,
+    arc_first: Vec<u64>,
+    arc_head: Vec<u32>,
+    turn_cost: Vec<u16>,
+    copy_first: Vec<u32>,
+    copies: Vec<u32>,
+    layers: Option<Vec<u32>>,
+) -> Graph {
     let row = |v: usize| up_first[v] as usize..up_first[v + 1] as usize;
-    let mut depth = vec![0u32; n];
-    for v in 0..n {
-        let mut d = 0;
-        for k in row(v) {
-            d = d.max(depth[up_head[k] as usize] + 1);
+    let depth = match layers {
+        Some(l) => {
+            for v in 0..n {
+                for k in row(v) {
+                    assert!(l[up_head[k] as usize] < l[v], "node {v}'s upper neighbour {} is not in a smaller layer", up_head[k]);
+                }
+            }
+            l
         }
-        depth[v] = d;
-    }
+        None => {
+            let mut depth = vec![0u32; n];
+            for v in 0..n {
+                let mut d = 0;
+                for k in row(v) {
+                    d = d.max(depth[up_head[k] as usize] + 1);
+                }
+                depth[v] = d;
+            }
+            depth
+        }
+    };
     let levels = depth.iter().max().map_or(0, |&d| d as usize + 1);
     let mut level_first = vec![0u32; levels + 1];
     for &d in &depth {
