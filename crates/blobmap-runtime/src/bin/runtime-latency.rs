@@ -80,7 +80,7 @@ fn main() -> Result<()> {
             for t in [900u64, 1800, 3600] {
                 for _ in 0..4 {
                     let src = served(&mut r, m);
-                    let args = json!({"sources": [{"id": id_string(&v.id(src))}], "t": t, "mode": mode, "dir": if *&dir == Dir::From { "from" } else { "to" }});
+                    let args = json!({"sources": [{"id": id_string(&v.id(src))}], "t": t, "mode": mode, "dir": if dir == Dir::From { "from" } else { "to" }});
                     jobs.push(("isochrone".into(), args, Job::Iso { m, dir, src, t }));
                 }
             }
@@ -89,7 +89,7 @@ fn main() -> Result<()> {
                     let src = served(&mut r, m);
                     // Targets: any IDs (served or not, any component), as a client would list them.
                     let targets: Vec<u32> = (0..k).map(|_| r.below(n) as u32).collect();
-                    let args = json!({"sources": [{"id": id_string(&v.id(src))}], "mode": mode, "dir": if *&dir == Dir::From { "from" } else { "to" }, "targets": targets.iter().map(|&i| id_string(&v.id(i))).collect::<Vec<_>>()});
+                    let args = json!({"sources": [{"id": id_string(&v.id(src))}], "mode": mode, "dir": if dir == Dir::From { "from" } else { "to" }, "targets": targets.iter().map(|&i| id_string(&v.id(i))).collect::<Vec<_>>()});
                     jobs.push(("column".into(), args, Job::At { m, dir, src, targets }));
                 }
             }
