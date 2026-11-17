@@ -50,7 +50,8 @@ pub struct Options {
     /// Pruned sweeps for answers that compare times with a bound (entry bounds on the
     /// device: 2 bytes per link, metric and direction).
     pub prune: bool,
-    /// CUDA graphs for the sweep's launches.
+    /// CUDA graphs for the sweep's launches: off by default: with them, R1 gave
+    /// wrong labels and capture errors on India, Japan and FR+5 (cause not found).
     pub graphs: bool,
     /// Per family (car, active), whether its sweeps go to the GPU (else the CPU).
     pub gpu_families: [bool; 2],
@@ -58,7 +59,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Options {
-        Options { backend: Backend::Auto, gpu_min_nodes: 1 << 16, b_max: 16, vram_budget: 14 << 30, prune: true, graphs: true, gpu_families: [true, true] }
+        Options { backend: Backend::Auto, gpu_min_nodes: 1 << 16, b_max: 16, vram_budget: 14 << 30, prune: true, graphs: false, gpu_families: [true, true] }
     }
 }
 

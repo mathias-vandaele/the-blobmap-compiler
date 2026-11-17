@@ -173,6 +173,9 @@ fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Sta
                     let Some((&victim, _)) = loaded.iter().min_by_key(|(_, l)| l.used_at) else { break };
                     used -= loaded.remove(&victim).unwrap().dev.bytes;
                     stats.lock().unwrap().evictions += 1;
+                    // Give the evicted buffers back to the device, not to CubeCL's pool.
+                    cubecl::future::block_on(gpu.client.sync()).map_err(|e| anyhow!("sync: {e:?}"))?;
+                    gpu.client.memory_cleanup().map_err(|e| anyhow!("memory cleanup: {e:?}"))?;
                 }
                 if used + need > cfg.budget {
                     bail!(

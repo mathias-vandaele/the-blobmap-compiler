@@ -919,11 +919,10 @@ impl Gpu {
         } else {
             0.0
         };
-        // The used words, copied to a buffer of their exact size, read whole.
+        // The used words, read straight from the state as a one-dimensional tensor.
         let words = d.n * p as usize;
-        let h = cl.empty(words * 4);
-        copy_words::launch(&cl, grid(words as u32, 256, self.max_x), dim, arg(&d.state, words), words as u32, arg(&h, words));
-        let bytes = cl.read_one(h).map_err(|e| anyhow!("read: {e:?}"))?;
+        let desc = d.state.clone().copy_descriptor(cubecl::zspace::Shape::new([words]), cubecl::zspace::Strides::new(&[1]), 4);
+        let bytes = cl.read_tensor(vec![desc]).map_err(|e| anyhow!("read: {e:?}"))?.remove(0);
         ensure!(bytes.len() >= words * 4, "read {} bytes of {}", bytes.len(), words * 4);
         let all: &[u32] = bytemuck::cast_slice(&bytes[..words * 4]);
         if self.timing {

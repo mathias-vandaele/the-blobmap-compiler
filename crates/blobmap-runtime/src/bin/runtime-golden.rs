@@ -1,7 +1,7 @@
 //! `runtime-golden <model> <golden dir> [options]`: replays a golden file (FORMAT §11)
 //! through blobmap-runtime and counts the answers that differ. Options: `--backend
 //! auto|cpu|cuda|wgpu`, `--threads n` (queries at once), `--min-nodes n` (components below
-//! sweep on the CPU), `--b-max n`, `--budget-gib x`, `--no-prune`, `--no-graphs`, `--ops a,b`,
+//! sweep on the CPU), `--b-max n`, `--budget-gib x`, `--no-prune`, `--graphs`, `--ops a,b`,
 //! `--gpu-family car|active` (the other family sweeps on the CPU), `--family
 //! car|active|mixed` (only the queries of that family's modes, or of both).
 
@@ -36,8 +36,8 @@ fn main() -> Result<()> {
                 o.prune = false;
                 i -= 1;
             }
-            "--no-graphs" => {
-                o.graphs = false;
+            "--graphs" => {
+                o.graphs = true;
                 i -= 1;
             }
             "--ops" => ops = Some(v()?.split(',').map(String::from).collect()),

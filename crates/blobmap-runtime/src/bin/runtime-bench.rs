@@ -1,5 +1,5 @@
 //! `runtime-bench <model> --backend cuda|wgpu [--family car|active] [--metric k] [--dir
-//! from|to] [--sources n] [--rounds r] [--b k] [--bound t] [--no-graphs]`: GPU sweeps of a
+//! from|to] [--sources n] [--rounds r] [--b k] [--bound t] [--graphs]`: GPU sweeps of a
 //! family's largest component from pseudo-random served IDs (fixed seed), B columns each:
 //! the seconds of seeding and launches up to a device sync, and of the read-back, as p50
 //! and p99 per sweep. The trial's measure is the first.
@@ -22,7 +22,7 @@ fn pct(v: &mut [f64], p: f64) -> f64 {
 fn main() -> Result<()> {
     let a: Vec<String> = std::env::args().skip(1).collect();
     ensure!(!a.is_empty(), "usage: runtime-bench <model> --backend cuda|wgpu [options]");
-    let (mut kind, mut fam, mut metric, mut dir, mut sources, mut rounds, mut b, mut bound, mut graphs) = (Kind::Cuda, 0usize, 0usize, Dir::From, 1000usize, 2usize, 1usize, INF, true);
+    let (mut kind, mut fam, mut metric, mut dir, mut sources, mut rounds, mut b, mut bound, mut graphs) = (Kind::Cuda, 0usize, 0usize, Dir::From, 1000usize, 2usize, 1usize, INF, false);
     let mut i = 1;
     while i < a.len() {
         let v = || a.get(i + 1).context("option value");
@@ -41,8 +41,8 @@ fn main() -> Result<()> {
             "--rounds" => rounds = v()?.parse()?,
             "--b" => b = v()?.parse()?,
             "--bound" => bound = v()?.parse()?,
-            "--no-graphs" => {
-                graphs = false;
+            "--graphs" => {
+                graphs = true;
                 i -= 1;
             }
             x => bail!("unknown option {x}"),
