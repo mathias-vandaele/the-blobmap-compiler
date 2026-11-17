@@ -159,6 +159,29 @@ impl Runtime {
         Ok(Ok(self.column(&src, m, dir, INF, Want::all(self.vocab.n()))?))
     }
 
+    /// A column at listed targets only (a runtime's size limit on a column, SPEC §9): each
+    /// target's time, in the order given (`INF` for BEYOND). An unknown target is refused.
+    pub fn column_at(&self, sources: &[Source], mode: &str, dir: Dir, targets: &[String]) -> Answer<Vec<u16>> {
+        let m = self.mode(mode)?;
+        let src = match self.sources(sources, m) {
+            Ok(s) => s,
+            Err(r) => return Ok(Err(r)),
+        };
+        let mut idx = Vec::with_capacity(targets.len());
+        for t in targets {
+            match self.resolve(t) {
+                Ok(i) => idx.push(i),
+                Err(reason) => return Ok(Err(Refusal { reason, id: t.clone() })),
+            }
+        }
+        let mut sorted = idx.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        let req = ColReq { sources: src, mode: m, dir, bound: INF, want: Want::none(), targets: Some(std::sync::Arc::new(sorted)) };
+        let col = self.columns(&[req])?.pop().unwrap();
+        Ok(Ok(idx.iter().map(|&i| col.get(i)).collect()))
+    }
+
     /// The IDs within t seconds, sorted.
     pub fn isochrone(&self, sources: &[Source], t: u64, mode: &str, dir: Dir) -> Answer<Vec<Id>> {
         let m = self.mode(mode)?;
@@ -180,7 +203,7 @@ impl Runtime {
         };
         let bound = if self.opts.prune { bound_of(t) } else { INF };
         let want = Want::all(self.vocab.n()).within(t);
-        let reqs: Vec<ColReq> = src.iter().map(|s| ColReq { sources: vec![*s], mode: m, dir: Dir::From, bound, want }).collect();
+        let reqs: Vec<ColReq> = src.iter().map(|s| ColReq { sources: vec![*s], mode: m, dir: Dir::From, bound, want, targets: None }).collect();
         let mut lists = self.columns(&reqs)?.iter().map(|c| c.finite()).collect::<Vec<_>>().into_iter();
         let mut hit = lists.next().unwrap_or_default();
         for l in lists {
@@ -220,12 +243,12 @@ impl Runtime {
             }
             reqs.push(match &t.target {
                 Target::Sources(s) => match self.sources(s, m) {
-                    Ok(src) => ColReq { sources: src, mode: m, dir: t.dir, bound, want },
+                    Ok(src) => ColReq { sources: src, mode: m, dir: t.dir, bound, want, targets: None },
                     Err(r) => return Ok(Err(r)),
                 },
                 // The time to the nearest place, as `nearest`: the column of the category's
                 // places in the other direction.
-                Target::Category { key, basic } => ColReq { sources: self.places_of(self.category(key, *basic)?, m), mode: m, dir: t.dir.flip(), bound, want },
+                Target::Category { key, basic } => ColReq { sources: self.places_of(self.category(key, *basic)?, m), mode: m, dir: t.dir.flip(), bound, want, targets: None },
             });
             if !modes.contains(&m) {
                 modes.push(m);
@@ -290,8 +313,8 @@ impl Runtime {
         }
         let places = Want::range(self.vocab.address.len(), self.vocab.n());
         let cols = self.columns(&[
-            ColReq { sources: vec![Src { id: ia, start: 0 }], mode: car, dir: Dir::From, bound: INF, want: places },
-            ColReq { sources: vec![Src { id: ib, start: 0 }], mode: walk, dir: Dir::To, bound: INF, want: places },
+            ColReq { sources: vec![Src { id: ia, start: 0 }], mode: car, dir: Dir::From, bound: INF, want: places, targets: None },
+            ColReq { sources: vec![Src { id: ib, start: 0 }], mode: walk, dir: Dir::To, bound: INF, want: places, targets: None },
         ])?;
         let (drive, on_foot) = (&cols[0], &cols[1]);
         let mut best: Option<(u16, Id)> = None;
@@ -343,6 +366,13 @@ impl Runtime {
                 let c = category_json(self, &args["category"])?;
                 match self.nearest(c, s("id")?, s("mode")?, dir()?)? {
                     Ok(b) => best(b),
+                    Err(r) => refusal(r),
+                }
+            }
+            "column" if args.get("targets").is_some() => {
+                let targets: Vec<String> = args["targets"].as_array().context("targets")?.iter().map(|v| v.as_str().map(str::to_string).context("target id")).collect::<Result<_>>()?;
+                match self.column_at(&sources_json(&args["sources"])?, s("mode")?, dir()?, &targets)? {
+                    Ok(t) => targets_json(&t),
                     Err(r) => refusal(r),
                 }
             }
@@ -454,6 +484,11 @@ pub fn column_json(col: &Times, n: usize) -> Value {
     });
     h.update(&buf);
     json!({"times_sha256": hex::encode(h.finalize()), "beyond": beyond})
+}
+
+/// A column at listed targets: each target's time in order, `BEYOND` as itself.
+pub fn targets_json(t: &[u16]) -> Value {
+    json!({"times": t.iter().map(|&x| if x == INF { json!("BEYOND") } else { json!(x) }).collect::<Vec<_>>()})
 }
 
 pub fn id_answer(ids: &[Id], with_ids: bool) -> Value {

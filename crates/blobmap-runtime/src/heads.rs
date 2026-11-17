@@ -45,6 +45,11 @@ impl Want {
         Want { max: t.min(INF as u64 - 1) as u16, ..self }
     }
 
+    /// No range: a column at listed targets.
+    pub fn none() -> Want {
+        Want { lo: 0, hi: 0, max: INF - 1 }
+    }
+
     pub fn dense(&self) -> bool {
         self.max == INF
     }
@@ -203,42 +208,10 @@ fn run<L: Fn(usize) -> u16 + Sync>(p: &Part, lab: L, want: Want, out: Option<&mu
     let (g, mv) = (p.g, p.mv);
     let h = node_pass(g, p.dir, &lab);
     let first = mv.first(p.x);
-    let koff = (p.dir == Dir::To) as usize;
-    let pruned = p.bound < DEAD;
-    // Sources by piece: (layout ids, road, source).
-    let mut by_piece: Vec<([u32; 2], u32, usize)> = p.srcs.iter().enumerate().map(|(j, s)| (mv.raw_node(s.id as usize), mv.road(s.id as usize), j)).collect();
-    by_piece.sort_unstable();
-    let time = |i: usize| -> u16 {
-        let (nd, off) = (mv.raw_node(i), mv.off(i));
-        let mut t = INF;
-        for k in 0..2 {
-            if nd[k] != NONE {
-                t = t.min(h[(nd[k] - first) as usize].saturating_add(off[2 * k + koff]));
-            }
-        }
-        if !by_piece.is_empty() {
-            let key = (nd, mv.road(i));
-            let from = by_piece.partition_point(|b| (b.0, b.1) < key);
-            for &(_, _, j) in by_piece[from..].iter().take_while(|b| (b.0, b.1) == key) {
-                let s = &p.srcs[j];
-                let si = s.id as usize;
-                if si == i {
-                    t = t.min(s.start);
-                } else {
-                    let d = if p.dir == Dir::From { direct(mv, si, i) } else { direct(mv, i, si) };
-                    t = t.min(s.start.saturating_add(d));
-                }
-            }
-        }
-        if pruned && t > p.bound { INF } else { t }
-    };
+    let by_piece = by_piece(p);
+    let time = |i: usize| time_of(p, &by_piece, first, &|v| h[v], i);
     // The component's IDs in lo .. hi: from its list, or those whose layout id is in it.
-    let n = g.n as u32;
-    let member = |i: u32| {
-        let nd = mv.raw_node(i as usize);
-        let v = if nd[0] != NONE { nd[0] } else { nd[1] };
-        v != NONE && v >= first && v - first < n
-    };
+    let member = |i: u32| member(p, first, i);
     let each = |lo: u32, hi: u32, f: &mut dyn FnMut(u32)| match p.ids {
         Some(ids) => ids[ids.partition_point(|&i| i < lo)..ids.partition_point(|&i| i < hi)].iter().for_each(|&i| f(i)),
         None => (lo..hi).filter(|&i| member(i)).for_each(f),
@@ -287,19 +260,100 @@ fn run<L: Fn(usize) -> u16 + Sync>(p: &Part, lab: L, want: Want, out: Option<&mu
     parts.concat()
 }
 
+/// The part's sources by piece: (layout ids, road, source).
+fn by_piece(p: &Part) -> Vec<([u32; 2], u32, usize)> {
+    let mv = p.mv;
+    let mut v: Vec<([u32; 2], u32, usize)> = p.srcs.iter().enumerate().map(|(j, s)| (mv.raw_node(s.id as usize), mv.road(s.id as usize), j)).collect();
+    v.sort_unstable();
+    v
+}
+
+/// ID i's time: the least of h(node k) ⊕ its offset, the direct terms from or to a source
+/// on its piece, and a source's own start; pruned to the part's bound. h takes a layout id
+/// numbered from the component's first.
+fn time_of(p: &Part, by_piece: &[([u32; 2], u32, usize)], first: u32, h: &impl Fn(usize) -> u16, i: usize) -> u16 {
+    let mv = p.mv;
+    let koff = (p.dir == Dir::To) as usize;
+    let (nd, off) = (mv.raw_node(i), mv.off(i));
+    let mut t = INF;
+    for k in 0..2 {
+        if nd[k] != NONE {
+            t = t.min(h((nd[k] - first) as usize).saturating_add(off[2 * k + koff]));
+        }
+    }
+    if !by_piece.is_empty() {
+        let key = (nd, mv.road(i));
+        let from = by_piece.partition_point(|b| (b.0, b.1) < key);
+        for &(_, _, j) in by_piece[from..].iter().take_while(|b| (b.0, b.1) == key) {
+            let s = &p.srcs[j];
+            let si = s.id as usize;
+            if si == i {
+                t = t.min(s.start);
+            } else {
+                let d = if p.dir == Dir::From { direct(mv, si, i) } else { direct(mv, i, si) };
+                t = t.min(s.start.saturating_add(d));
+            }
+        }
+    }
+    if p.bound < DEAD && t > p.bound { INF } else { t }
+}
+
+/// Whether ID i's layout ids are the part's component's.
+fn member(p: &Part, first: u32, i: u32) -> bool {
+    let nd = p.mv.raw_node(i as usize);
+    let v = if nd[0] != NONE { nd[0] } else { nd[1] };
+    v != NONE && v >= first && v - first < p.g.n as u32
+}
+
+/// The new ids whose labels give the heads of `targets` (ascending internal indices): the
+/// nodes' arrivals (CAR `From`), their exit turns' heads (CAR `To`), or the nodes (ACTIVE).
+pub fn needed(p: &Part, targets: &[u32]) -> Vec<u32> {
+    let (g, first) = (p.g, p.mv.first(p.x));
+    let mut v = Vec::new();
+    for &i in targets {
+        if !member(p, first, i) {
+            continue;
+        }
+        for &n in p.mv.raw_node(i as usize).iter().filter(|&&n| n != NONE) {
+            let u = n - first;
+            match (g.fam, p.dir) {
+                (Fam::Car, Dir::From) => v.extend(g.arrivals(u).map(|a| g.new[a as usize])),
+                (Fam::Car, Dir::To) => v.extend(g.arcs(u).map(|a| g.new[g.arc_head[a] as usize])),
+                (Fam::Active, _) => v.push(g.new[u as usize]),
+            }
+        }
+    }
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// The times of the part's IDs among `targets` (ascending internal indices), from labels by
+/// new id: h only at their nodes, no pass over the component.
+pub fn at<L: Fn(usize) -> u16>(p: &Part, lab: L, targets: &[u32]) -> Vec<(u32, u16)> {
+    let first = p.mv.first(p.x);
+    let by_piece = by_piece(p);
+    let h = |v: usize| node_h(p.g, p.dir, &lab, v as u32);
+    targets.iter().filter(|&&i| member(p, first, i)).map(|&i| (i, time_of(p, &by_piece, first, &h, i as usize))).collect()
+}
+
+/// h(v) of one layout node (numbered from the component's first).
+fn node_h<L: Fn(usize) -> u16>(g: &Graph, dir: Dir, lab: &L, v: u32) -> u16 {
+    let at = |v: u32| lab(g.new[v as usize] as usize);
+    match (g.fam, dir) {
+        (Fam::Car, Dir::From) => g.arrivals(v).map(at).min().unwrap_or(INF),
+        (Fam::Car, Dir::To) => g.arcs(v).map(|a| g.turn_cost[a].saturating_add(at(g.arc_head[a]))).min().unwrap_or(INF),
+        (Fam::Active, _) => at(v),
+    }
+}
+
 /// h(v) for every layout node of the component (numbered from 0).
 fn node_pass<L: Fn(usize) -> u16 + Sync>(g: &Graph, dir: Dir, lab: &L) -> Vec<u16> {
     let mut h = vec![INF; g.n];
-    let at = |v: u32| lab(g.new[v as usize] as usize);
     h.par_chunks_mut(CHUNK).enumerate().for_each(|(c, o)| {
         let v0 = (c * CHUNK) as u32;
         for (j, x) in o.iter_mut().enumerate() {
-            let v = v0 + j as u32;
-            *x = match (g.fam, dir) {
-                (Fam::Car, Dir::From) => g.arrivals(v).map(at).min().unwrap_or(INF),
-                (Fam::Car, Dir::To) => g.arcs(v).map(|a| g.turn_cost[a].saturating_add(at(g.arc_head[a]))).min().unwrap_or(INF),
-                (Fam::Active, _) => at(v),
-            };
+            *x = node_h(g, dir, lab, v0 + j as u32);
         }
     });
     h

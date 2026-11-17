@@ -73,6 +73,8 @@ pub fn cpu_sweep(c: &Comp, metric: usize, dir: Dir, col: &Column, prune: bool) -
 pub enum ColOut {
     Times(Times),
     Labels(Labels),
+    /// Labels at the new ids the job listed for this column.
+    Gathered(Vec<u16>),
 }
 
 type Reply = mpsc::Sender<Result<Vec<ColOut>, String>>;
@@ -95,6 +97,8 @@ struct Job {
     comp: Arc<Comp>,
     cols: Vec<Column>,
     heads: Option<JobHeads>,
+    /// Per column, the new ids whose labels alone come back (instead of heads or labels).
+    gather: Option<Vec<Vec<u32>>>,
     reply: Reply,
 }
 
@@ -167,10 +171,10 @@ impl GpuEngine {
     }
 
     /// Queues a sweep; the receiver gets each column's heads or labels.
-    pub fn submit(&self, key: Key, comp: Arc<Comp>, cols: Vec<Column>, heads: Option<JobHeads>) -> mpsc::Receiver<Result<Vec<ColOut>, String>> {
+    pub fn submit(&self, key: Key, comp: Arc<Comp>, cols: Vec<Column>, heads: Option<JobHeads>, gather: Option<Vec<Vec<u32>>>) -> mpsc::Receiver<Result<Vec<ColOut>, String>> {
         let (tx, rx) = mpsc::channel();
         let (m, cv) = &*self.q;
-        m.lock().unwrap().jobs.push_back(Job { key, comp, cols, heads, reply: tx });
+        m.lock().unwrap().jobs.push_back(Job { key, comp, cols, heads, gather, reply: tx });
         cv.notify_one();
         rx
     }
@@ -230,7 +234,8 @@ fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Sta
             let mut batch = vec![first];
             let mut i = 0;
             while i < g.jobs.len() {
-                if g.jobs[i].key == key && cols + g.jobs[i].cols.len() <= 2 * p_max as usize {
+                // One batch either gathers labels for every column or for none.
+                if g.jobs[i].key == key && g.jobs[i].gather.is_some() == batch[0].gather.is_some() && cols + g.jobs[i].cols.len() <= 2 * p_max as usize {
                     cols += g.jobs[i].cols.len();
                     batch.push(g.jobs.remove(i).unwrap());
                 } else {
@@ -333,7 +338,12 @@ fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Sta
             let prune = gpu.sweep(&mut l.dev, key.metric as usize, dir, &cols)?;
             let [down, _] = gpu.times.get();
             let mut out = None;
-            if want_heads && let Some((dids, at)) = ids.get_mut(&mk) {
+            if batch[0].gather.is_some() {
+                let lists: Vec<&[u32]> = batch.iter().flat_map(|j| j.gather.as_ref().unwrap().iter().map(|l| &l[..])).collect();
+                let got = gpu.gather(&l.dev, &lists)?;
+                stats.lock().unwrap().read_s += gpu.times.get()[1];
+                out = Some(got.into_iter().map(ColOut::Gathered).collect());
+            } else if want_heads && let Some((dids, at)) = ids.get_mut(&mk) {
                 *at = clock;
                 let t = std::time::Instant::now();
                 let hc: Vec<&HeadCol> = batch.iter().flat_map(|j| j.heads.as_ref().unwrap().cols.iter()).collect();

@@ -102,7 +102,14 @@ fn main() -> Result<()> {
         let t1 = Instant::now();
         let one = |q: &Value| {
                 let op = q["op"].as_str().unwrap_or("?").to_string();
-                let key = format!("{op} {}", of(q));
+                // The size too: an isochrone's or reachable's limit, a column's target count.
+                let a = &q["args"];
+                let size = match (a.get("t"), a.get("targets")) {
+                    (Some(t), _) => format!(" t={t}"),
+                    (_, Some(v)) => format!(" N={}", v.as_array().map_or(0, |v| v.len())),
+                    _ => String::new(),
+                };
+                let key = format!("{op}{size} {}", of(q));
                 let p0 = phases();
                 let t = Instant::now();
                 let got = rt.answer(&op, &q["args"]);
@@ -176,8 +183,32 @@ fn main() -> Result<()> {
         ld(&pr.heads_threads)
     );
     println!("{}: {} queries, {} mismatches, {wall:.1} s on {threads} threads{}, backend {}", dir.display(), total.0, total.1, if sequential { " one query at a time" } else { "" }, rt.backend());
+    memory_report();
     if total.1 > 0 {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// The process's page faults since it started, and its cgroup's memory: peak, file pages
+/// evicted and read again (workingset refaults), and the current mapped and anonymous bytes.
+fn memory_report() {
+    let (minor, major) = blobmap_runtime::runtime::faults();
+    let cg = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    let dir = format!("/sys/fs/cgroup{}", cg.lines().find_map(|l| l.strip_prefix("0::")).unwrap_or(""));
+    let stat = std::fs::read_to_string(format!("{dir}/memory.stat")).unwrap_or_default();
+    let field = |k: &str| stat.lines().find_map(|l| l.strip_prefix(k).and_then(|v| v.trim().parse::<u64>().ok())).unwrap_or(0);
+    let peak = std::fs::read_to_string(format!("{dir}/memory.peak")).ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
+    let max = std::fs::read_to_string(format!("{dir}/memory.max")).unwrap_or_default();
+    let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+    println!(
+        "memory: page faults {minor} minor, {major} major; cgroup max {}, peak {:.1} GiB, file refaults {} ({:.1} GiB of 4 KiB pages), now file {:.1} GiB, mapped {:.1} GiB, anon {:.1} GiB",
+        max.trim(),
+        gib(peak),
+        field("workingset_refault_file "),
+        gib(field("workingset_refault_file ") * 4096),
+        gib(field("file ")),
+        gib(field("file_mapped ")),
+        gib(field("anon ")),
+    );
 }

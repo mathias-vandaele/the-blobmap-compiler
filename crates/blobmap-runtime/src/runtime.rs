@@ -82,6 +82,8 @@ pub struct ColReq {
     pub dir: Dir,
     pub bound: u16,
     pub want: Want,
+    /// Only these IDs' times (ascending internal indices), with `want` `Want::none()`.
+    pub targets: Option<Arc<Vec<u32>>>,
 }
 
 /// Where `columns` spends its time, summed over calls (nanoseconds, every thread).
@@ -254,15 +256,23 @@ impl Runtime {
         });
         pr.upward.fetch_add(since(t), Relaxed);
         // Sweeps: GPU jobs first (one per component, metric and direction), then the CPU's.
-        let mut groups: BTreeMap<Key, Vec<usize>> = BTreeMap::new();
+        // Columns at listed targets sweep apart from the others: only their labels come back.
+        let mut groups: BTreeMap<(Key, bool), Vec<usize>> = BTreeMap::new();
         for (i, p) in parts.iter().enumerate() {
             let mv = &self.vocab.modes[reqs[p.req].mode];
-            groups.entry(Key { fam: mv.fam as u8, component: p.x, metric: mv.metric as u8, dir: dir_index(reqs[p.req].dir) as u8 }).or_default().push(i);
+            let key = Key { fam: mv.fam as u8, component: p.x, metric: mv.metric as u8, dir: dir_index(reqs[p.req].dir) as u8 };
+            groups.entry((key, reqs[p.req].targets.is_some())).or_default().push(i);
+        }
+        fn part_of<'a>(rt: &'a Runtime, reqs: &[ColReq], p: &'a Part) -> heads::Part<'a> {
+            let q = &reqs[p.req];
+            heads::Part { g: &p.comp.g, mv: &rt.vocab.modes[q.mode], x: p.x, ids: None, srcs: &p.srcs, dir: q.dir, bound: q.bound }
         }
         let mut labels: Vec<Option<ColOut>> = (0..parts.len()).map(|_| None).collect();
+        // Per part at listed targets on the device: the new ids its labels come back at.
+        let mut lists: Vec<Option<Vec<u32>>> = (0..parts.len()).map(|_| None).collect();
         let mut pending = Vec::new();
         let mut on_cpu = Vec::new();
-        for (key, idx) in &groups {
+        for ((key, at), idx) in &groups {
             let comp = &parts[idx[0]].comp;
             match &self.gpu {
                 Some(gpu) if comp.g.n >= self.opts.gpu_min_nodes && self.opts.gpu_families[key.fam as usize] => {
@@ -278,8 +288,16 @@ impl Runtime {
                     // Safety: `gpu` is dropped before `vocab` (field order), and the worker
                     // holds a mode only while this call waits for its reply.
                     let mode = ModeRef(unsafe { &*(mv as *const Mode) });
-                    let heads = JobHeads { mode, first: mv.first(key.component), cols: hc };
-                    pending.push((idx.clone(), gpu.submit(*key, comp.clone(), cols, Some(heads))));
+                    if *at {
+                        let ls: Vec<Vec<u32>> = idx.iter().map(|&i| heads::needed(&part_of(self, reqs, &parts[i]), reqs[parts[i].req].targets.as_ref().unwrap())).collect();
+                        for (&i, l) in idx.iter().zip(&ls) {
+                            lists[i] = Some(l.clone());
+                        }
+                        pending.push((idx.clone(), gpu.submit(*key, comp.clone(), cols, None, Some(ls))));
+                    } else {
+                        let heads = JobHeads { mode, first: mv.first(key.component), cols: hc };
+                        pending.push((idx.clone(), gpu.submit(*key, comp.clone(), cols, Some(heads), None)));
+                    }
                 }
                 _ => on_cpu.extend(idx.iter().map(|&i| (*key, i))),
             }
@@ -325,9 +343,24 @@ impl Runtime {
         let mut sparse: Vec<Vec<(u32, u16)>> = reqs.iter().map(|_| Vec::new()).collect();
         pr.heads_init.fetch_add(since(t), Relaxed);
         let ti = Instant::now();
-        for (p, lab) in parts.iter().zip(labels) {
+        for (k, (p, lab)) in parts.iter().zip(labels).enumerate() {
             let q = &reqs[p.req];
             let lab = match lab.unwrap() {
+                ColOut::Gathered(v) => {
+                    let l = lists[k].as_ref().unwrap();
+                    let get = |u: usize| l.binary_search(&(u as u32)).map_or(INF, |j| v[j]);
+                    sparse[p.req].extend(heads::at(&part_of(self, reqs, p), get, q.targets.as_ref().unwrap()));
+                    continue;
+                }
+                ColOut::Labels(l) if q.targets.is_some() => {
+                    let t = q.targets.as_ref().unwrap();
+                    let got = match &l {
+                        Labels::Plain(w) => heads::at(&part_of(self, reqs, p), |u| w[u], t),
+                        Labels::Packed { words, p: pw, c } => heads::at(&part_of(self, reqs, p), |u| (words[u * pw + c / 2] >> (16 * (c % 2))) as u16, t),
+                    };
+                    sparse[p.req].extend(got);
+                    continue;
+                }
                 ColOut::Labels(l) => l,
                 ColOut::Times(t) => {
                     if nparts[p.req] == 1 {
@@ -380,7 +413,7 @@ impl Runtime {
     }
 
     pub fn column(&self, sources: &[Src], mode: usize, dir: Dir, bound: u16, want: Want) -> Result<Times> {
-        Ok(self.columns(&[ColReq { sources: sources.to_vec(), mode, dir, bound, want }])?.pop().unwrap())
+        Ok(self.columns(&[ColReq { sources: sources.to_vec(), mode, dir, bound, want, targets: None }])?.pop().unwrap())
     }
 
     /// The time from o to d (o ≠ d, both served in one component), from their ancestors

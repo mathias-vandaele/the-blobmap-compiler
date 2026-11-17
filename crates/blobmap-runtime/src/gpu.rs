@@ -449,6 +449,18 @@ fn wide_split(
 
 // ---- heads (FORMAT §8; `heads` has the host passes and their meaning) ----------------
 
+/// Labels at listed new ids: entry k is (new id, column), out[k] that column's label there.
+#[cube(launch)]
+fn gather_labels(ent: &[u32], count: u32, d32: &[u32], p: u32, out: &mut [u32]) {
+    let k = gid();
+    if k < count {
+        let v = ent[(2u32 * k) as usize];
+        let c = ent[(2u32 * k + 1u32) as usize];
+        let w = d32[(v * p + c / 2u32) as usize];
+        out[k as usize] = (w >> (16u32 * (c % 2u32))) & 65535u32;
+    }
+}
+
 /// Car `From`: each copy's words, gathered (pair j's copy `cs_c[j]`).
 #[cube(launch)]
 fn copy_gather(cs_c: &[u32], count: u32, d32: &[u32], tmp: &mut [u32], p: u32) {
@@ -1136,6 +1148,42 @@ impl Gpu {
     }
 
     /// The last sweep's labels of k columns, read back.
+    /// After a sweep of `lists.len()` columns: column c's labels at the new ids `lists[c]`.
+    pub fn gather(&self, d: &DevGraph, lists: &[&[u32]]) -> Result<Vec<Vec<u16>>> {
+        let t0 = std::time::Instant::now();
+        let cl = &self.client;
+        let p = lists.len().div_ceil(2) as u32;
+        let mut ent = Vec::with_capacity(2 * lists.iter().map(|l| l.len()).sum::<usize>());
+        for (c, l) in lists.iter().enumerate() {
+            for &v in l.iter() {
+                ent.push(v);
+                ent.push(c as u32);
+            }
+        }
+        let count = ent.len() / 2;
+        if count == 0 {
+            return Ok(lists.iter().map(|_| Vec::new()).collect());
+        }
+        let eh = cl.create_from_slice(bytes_u32(&ent));
+        let oh = cl.empty(count * 4);
+        gather_labels::launch(cl, grid(count as u32, 256, self.max_x), CubeDim::new_1d(256), arg(&eh, ent.len()), count as u32, arg(&d.state, d.n * p as usize), p, arg(&oh, count));
+        let desc = oh.copy_descriptor(cubecl::zspace::Shape::new([count]), cubecl::zspace::Strides::new(&[1]), 4);
+        let bytes = cl.read_tensor(vec![desc]).map_err(|e| anyhow!("read: {e:?}"))?.remove(0);
+        ensure!(bytes.len() >= count * 4, "read {} bytes of {}", bytes.len(), count * 4);
+        let w: Vec<u32> = bytemuck::pod_collect_to_vec(&bytes[..count * 4]);
+        let mut out = Vec::with_capacity(lists.len());
+        let mut k = 0;
+        for l in lists {
+            out.push(w[k..k + l.len()].iter().map(|&x| x as u16).collect());
+            k += l.len();
+        }
+        if self.timing {
+            let [a, _] = self.times.get();
+            self.times.set([a, t0.elapsed().as_secs_f64()]);
+        }
+        Ok(out)
+    }
+
     pub fn labels(&self, d: &DevGraph, k: usize) -> Result<Vec<Labels>> {
         let t0 = std::time::Instant::now();
         let cl = &self.client;
