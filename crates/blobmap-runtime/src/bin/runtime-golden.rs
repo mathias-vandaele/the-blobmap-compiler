@@ -1,7 +1,7 @@
 //! `runtime-golden <model> <golden dir> [options]`: replays a golden file (FORMAT §11)
 //! through blobmap-runtime and counts the answers that differ. Options: `--backend
 //! auto|cpu|cuda|wgpu`, `--threads n` (queries at once), `--min-nodes n` (components below
-//! sweep on the CPU), `--b-max n`, `--budget-gib x`, `--no-prune`, `--graphs`, `--ops a,b`,
+//! sweep on the CPU), `--b-max n`, `--budget-gib x`, `--no-prune`, `--ops a,b`,
 //! `--gpu-family car|active` (the other family sweeps on the CPU), `--family
 //! car|active|mixed` (only the queries of that family's modes, or of both).
 
@@ -34,10 +34,6 @@ fn main() -> Result<()> {
             "--budget-gib" => o.vram_budget = (v()?.parse::<f64>()? * (1u64 << 30) as f64) as u64,
             "--no-prune" => {
                 o.prune = false;
-                i -= 1;
-            }
-            "--graphs" => {
-                o.graphs = true;
                 i -= 1;
             }
             "--ops" => ops = Some(v()?.split(',').map(String::from).collect()),
@@ -114,6 +110,17 @@ fn main() -> Result<()> {
     if let Some(s) = rt.gpu_stats() {
         println!("gpu: {s:?}");
     }
+    let ms = |a: &std::sync::atomic::AtomicU64| a.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6;
+    let pr = &rt.prof;
+    println!(
+        "columns: {} calls; summed ms: component load {:.0}, upward {:.0}, gpu wait {:.0}, cpu sweep {:.0}, heads {:.0}",
+        pr.calls.load(std::sync::atomic::Ordering::Relaxed),
+        ms(&pr.comp_load),
+        ms(&pr.upward),
+        ms(&pr.gpu_wait),
+        ms(&pr.cpu_sweep),
+        ms(&pr.heads)
+    );
     println!("{}: {} queries, {} mismatches, {wall:.1} s on {threads} threads, backend {}", dir.display(), total.0, total.1, rt.backend());
     if total.1 > 0 {
         std::process::exit(1);

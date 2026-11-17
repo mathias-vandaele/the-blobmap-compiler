@@ -63,6 +63,12 @@ pub struct Stats {
     pub evictions: u64,
     pub vram_used: u64,
     pub vram_peak: u64,
+    /// Seconds on the worker: uploads (with entry bounds), seeding and launches up to a
+    /// device sync, label read-back, unpacking into columns.
+    pub load_s: f64,
+    pub down_s: f64,
+    pub read_s: f64,
+    pub unpack_s: f64,
 }
 
 pub struct GpuConfig {
@@ -70,7 +76,6 @@ pub struct GpuConfig {
     pub b_max: u32,
     pub budget: u64,
     pub prune: bool,
-    pub graphs: bool,
 }
 
 impl GpuEngine {
@@ -90,7 +95,9 @@ impl GpuEngine {
                         return;
                     }
                 };
-                gpu.use_graphs &= cfg.graphs;
+                // Phase times for Stats: one device sync a sweep, which the read-back waits
+                // for anyway.
+                gpu.timing = true;
                 let _ = tx.send(Ok(gpu.describe()));
                 run(gpu, &cfg, &q2, &s2);
             })?;
@@ -188,10 +195,12 @@ fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Sta
                         (used + need - cfg.budget) as f64 / (1u64 << 30) as f64
                     );
                 }
+                let t = std::time::Instant::now();
                 let bounds = if cfg.prune { Some(all_bounds(g)?) } else { None };
                 let dev = gpu.load(g, bounds.as_ref(), p_max)?;
                 used += dev.bytes;
                 let mut s = stats.lock().unwrap();
+                s.load_s += t.elapsed().as_secs_f64();
                 s.loads += 1;
                 s.vram_used = used;
                 s.vram_peak = s.vram_peak.max(used);
@@ -202,6 +211,10 @@ fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Sta
             let cols: Vec<&Column> = batch.iter().flat_map(|j| j.cols.iter()).collect();
             let out = gpu.sweep(&mut l.dev, key.metric as usize, if key.dir == 0 { Dir::From } else { Dir::To }, &cols)?;
             let mut s = stats.lock().unwrap();
+            let [a, b, c] = gpu.times.get();
+            s.down_s += a;
+            s.read_s += b;
+            s.unpack_s += c;
             s.sweeps += 1;
             s.columns += cols.len() as u64;
             Ok(out)

@@ -3,7 +3,9 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use blobmap_model::manifest::Manifest;
@@ -50,16 +52,13 @@ pub struct Options {
     /// Pruned sweeps for answers that compare times with a bound (entry bounds on the
     /// device: 2 bytes per link, metric and direction).
     pub prune: bool,
-    /// CUDA graphs for the sweep's launches: off by default: with them, R1 gave
-    /// wrong labels and capture errors on India, Japan and FR+5 (cause not found).
-    pub graphs: bool,
     /// Per family (car, active), whether its sweeps go to the GPU (else the CPU).
     pub gpu_families: [bool; 2],
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { backend: Backend::Auto, gpu_min_nodes: 1 << 16, b_max: 16, vram_budget: 14 << 30, prune: true, graphs: false, gpu_families: [true, true] }
+        Options { backend: Backend::Auto, gpu_min_nodes: 1 << 16, b_max: 16, vram_budget: 14 << 30, prune: true, gpu_families: [true, true] }
     }
 }
 
@@ -80,6 +79,24 @@ pub struct ColReq {
     pub bound: u16,
 }
 
+/// Where `columns` spends its time, summed over calls (nanoseconds, every thread).
+#[derive(Default, Debug)]
+pub struct Profile {
+    pub calls: AtomicU64,
+    /// Components loaded on the host on first use (read and relayer).
+    pub comp_load: AtomicU64,
+    pub upward: AtomicU64,
+    /// Waiting on the GPU worker: its queue, upload on first use, sweep, read-back, unpack.
+    pub gpu_wait: AtomicU64,
+    pub cpu_sweep: AtomicU64,
+    /// Heads at every ID of the component, into a vector over every ID.
+    pub heads: AtomicU64,
+}
+
+fn since(t: Instant) -> u64 {
+    t.elapsed().as_nanos() as u64
+}
+
 pub struct Runtime {
     pub manifest: Manifest,
     pub fams: Vec<Family>,
@@ -90,6 +107,7 @@ pub struct Runtime {
     loading: Mutex<()>,
     gpu: Option<GpuEngine>,
     pub opts: Options,
+    pub prof: Profile,
     /// Last, so that it is dropped after the vocabulary's tables that borrow its maps.
     pub model: Model,
 }
@@ -140,7 +158,7 @@ impl Runtime {
                 let mut got = None;
                 let mut why = Vec::new();
                 for &kind in kinds {
-                    match GpuEngine::start(GpuConfig { kind, b_max: opts.b_max, budget: opts.vram_budget, prune: opts.prune, graphs: opts.graphs }) {
+                    match GpuEngine::start(GpuConfig { kind, b_max: opts.b_max, budget: opts.vram_budget, prune: opts.prune }) {
                         Ok(e) => {
                             got = Some(e);
                             break;
@@ -154,7 +172,7 @@ impl Runtime {
                 got
             }
         };
-        Ok(Runtime { model, manifest, fams, vocab, members, comps: Mutex::new(BTreeMap::new()), loading: Mutex::new(()), gpu, opts })
+        Ok(Runtime { model, manifest, fams, vocab, members, comps: Mutex::new(BTreeMap::new()), loading: Mutex::new(()), gpu, opts, prof: Profile::default() })
     }
 
     /// The backend sweeps run on, described.
@@ -209,6 +227,9 @@ impl Runtime {
             srcs: Vec<Src>,
             col: Column,
         }
+        let pr = &self.prof;
+        pr.calls.fetch_add(1, Relaxed);
+        let t = Instant::now();
         let mut parts = Vec::new();
         for (r, q) in reqs.iter().enumerate() {
             let mv = &self.vocab.modes[q.mode];
@@ -223,6 +244,8 @@ impl Runtime {
                 parts.push(Part { req: r, comp, x, srcs, col: Column { entries: Vec::new(), bound: q.bound } });
             }
         }
+        pr.comp_load.fetch_add(since(t), Relaxed);
+        let t = Instant::now();
         parts.par_iter_mut().for_each(|p| {
             let q = &reqs[p.req];
             let mv = &self.vocab.modes[q.mode];
@@ -235,6 +258,7 @@ impl Runtime {
             seeds.dedup_by_key(|s| s.0);
             p.col.entries = upward(g, mv.metric, q.dir, &seeds);
         });
+        pr.upward.fetch_add(since(t), Relaxed);
         // Sweeps: GPU jobs first (one per component, metric and direction), then the CPU's.
         let mut groups: BTreeMap<Key, Vec<usize>> = BTreeMap::new();
         for (i, p) in parts.iter().enumerate() {
@@ -254,6 +278,7 @@ impl Runtime {
                 _ => on_cpu.extend(idx.iter().map(|&i| (*key, i))),
             }
         }
+        let t = Instant::now();
         let cpu: Vec<(usize, Result<Vec<u16>>)> = on_cpu
             .par_iter()
             .map(|&(key, i)| {
@@ -265,13 +290,17 @@ impl Runtime {
         for (i, l) in cpu {
             labels[i] = Some(l?);
         }
+        pr.cpu_sweep.fetch_add(since(t), Relaxed);
+        let t = Instant::now();
         for (idx, rx) in pending {
             let out = rx.recv().map_err(|_| anyhow!("the GPU worker ended"))?.map_err(|e| anyhow!("{e}"))?;
             for (i, l) in idx.into_iter().zip(out) {
                 labels[i] = Some(l);
             }
         }
+        pr.gpu_wait.fetch_add(since(t), Relaxed);
         // Heads at every ID of each part's component.
+        let t = Instant::now();
         let n = self.vocab.n();
         let mut out: Vec<Vec<u16>> = reqs.iter().map(|_| vec![INF; n]).collect();
         for (p, lab) in parts.iter().zip(labels) {
@@ -305,6 +334,7 @@ impl Runtime {
                 o[i as usize] = o[i as usize].min(t);
             }
         }
+        pr.heads.fetch_add(since(t), Relaxed);
         Ok(out)
     }
 

@@ -15,8 +15,8 @@
 // comptime `if` cannot merge with a runtime one.
 #![allow(clippy::unnecessary_cast, clippy::collapsible_if)]
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
-use cubecl::client::{Client, Graph as CubeGraph};
+use anyhow::{Result, anyhow, bail, ensure};
+use cubecl::client::Client;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
@@ -528,7 +528,6 @@ pub struct DevGraph {
     mask: Handle,
     bound: Handle,
     last_mask: Option<(Handle, u32)>,
-    graphs: Vec<((u32, usize, bool), CubeGraph)>,
     pub bytes: u64,
     pub pruning: bool,
 }
@@ -541,11 +540,10 @@ pub struct Gpu {
     top_threads: u32,
     max_x: u32,
     max_chunk: u64,
-    pub use_graphs: bool,
     /// Time each sweep (a device sync after the launches): `times` holds the seconds of the
-    /// last sweep's seeding and launches, and of its read-back.
+    /// last sweep's seeding and launches, of its read-back, and of unpacking the labels.
     pub timing: bool,
-    pub times: std::cell::Cell<[f64; 2]>,
+    pub times: std::cell::Cell<[f64; 3]>,
 }
 
 impl Gpu {
@@ -569,19 +567,18 @@ impl Gpu {
         let top_threads = hw.max_units_per_cube.min(1024);
         let max_x = hw.max_cube_count.0.min(65535);
         let max_chunk = props.memory.max_page_size.min(1 << 30);
-        Ok(Gpu { kind, merge, max_shared, top_threads, max_x, max_chunk, use_graphs: kind == Kind::Cuda, timing: false, times: std::cell::Cell::new([0.0; 2]), client })
+        Ok(Gpu { kind, merge, max_shared, top_threads, max_x, max_chunk, timing: false, times: std::cell::Cell::new([0.0; 3]), client })
     }
 
     pub fn describe(&self) -> String {
         let p = self.client.properties();
         format!(
-            "{:?}: plane merge {}, shared {} B, top threads {}, max chunk {} MiB, graphs {}",
+            "{:?}: plane merge {}, shared {} B, top threads {}, max chunk {} MiB",
             self.kind,
             self.merge,
             self.max_shared,
             self.top_threads,
-            self.max_chunk >> 20,
-            self.use_graphs
+            self.max_chunk >> 20
         ) + &format!(", planes {}..{}", p.hardware.plane_size_min, p.hardware.plane_size_max)
     }
 
@@ -750,7 +747,6 @@ impl Gpu {
             mask: self.upload(bytes_u32(&vec![0u32; mask_words]), &mut used),
             bound: self.upload(bytes_u32(&vec![u32::MAX; p_max as usize]), &mut used),
             last_mask: None,
-            graphs: Vec::new(),
             bytes: used,
             pruning: bounds.is_some(),
         })
@@ -903,23 +899,7 @@ impl Gpu {
             copy_words::launch(&cl, CubeCount::Static(1, 1, 1), CubeDim::new_1d(p.max(1)), arg(&bh, b.len()), p, arg(&d.bound, d.p_max as usize));
         }
         let wi = 2 * metric + crate::sweep::dir_index(dir);
-        if self.use_graphs {
-            let key = (p, wi, prune);
-            if !d.graphs.iter().any(|g| g.0 == key) {
-                // CubeCL's capture: prepare, one real run (a rerun of a sweep gives the same
-                // labels), then record.
-                cl.graph_prepare().map_err(|e| anyhow!("graph prepare: {e:?}"))?;
-                self.enqueue_down(d, p, wi, prune);
-                cl.start_capture().map_err(|e| anyhow!("start capture: {e:?}"))?;
-                self.enqueue_down(d, p, wi, prune);
-                let g = cl.stop_capture().map_err(|e| anyhow!("stop capture: {e:?}"))?;
-                d.graphs.push((key, g));
-            }
-            let g = &d.graphs.iter().find(|g| g.0 == key).context("graph")?.1;
-            unsafe { g.replay() }.map_err(|e| anyhow!("replay: {e:?}"))?;
-        } else {
-            self.enqueue_down(d, p, wi, prune);
-        }
+        self.enqueue_down(d, p, wi, prune);
         let t_down = if self.timing {
             cubecl::future::block_on(cl.sync()).map_err(|e| anyhow!("sync: {e:?}"))?;
             t0.elapsed().as_secs_f64()
@@ -932,9 +912,7 @@ impl Gpu {
         let bytes = cl.read_tensor(vec![desc]).map_err(|e| anyhow!("read: {e:?}"))?.remove(0);
         ensure!(bytes.len() >= words * 4, "read {} bytes of {}", bytes.len(), words * 4);
         let all: &[u32] = bytemuck::cast_slice(&bytes[..words * 4]);
-        if self.timing {
-            self.times.set([t_down, t0.elapsed().as_secs_f64() - t_down]);
-        }
+        let t_read = t0.elapsed().as_secs_f64();
         let mut out = Vec::with_capacity(cols.len());
         for c in 0..cols.len() {
             let (q, sh) = (c / 2, 16 * (c % 2));
@@ -942,6 +920,9 @@ impl Gpu {
         }
         if out.iter().any(|o: &Vec<u16>| o.len() != d.n) {
             bail!("short read");
+        }
+        if self.timing {
+            self.times.set([t_down, t_read - t_down, t0.elapsed().as_secs_f64() - t_read]);
         }
         let _ = DEAD;
         Ok(out)
