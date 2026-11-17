@@ -3,7 +3,11 @@
 //! auto|cpu|cuda|wgpu`, `--threads n` (queries at once), `--min-nodes n` (components below
 //! sweep on the CPU), `--b-max n`, `--budget-gib x`, `--no-prune`, `--format-levels`, `--ops a,b`,
 //! `--gpu-family car|active` (the other family sweeps on the CPU), `--family
-//! car|active|mixed` (only the queries of that family's modes, or of both).
+//! car|active|mixed` (only the queries of that family's modes, or of both), `--repeat r`
+//! (replay r times; timings from the last pass), `--sequential` (one query at a time, on
+//! a pool of `--threads` threads). Per query type (operation and family): p50, p99 and mean
+//! of each query's time, answer included; one query at a time, its phases too (component
+//! load, upward, GPU wait, CPU sweep, heads).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -23,6 +27,8 @@ fn main() -> Result<()> {
     let mut threads = 8usize;
     let mut ops: Option<Vec<String>> = None;
     let mut family: Option<String> = None;
+    let mut repeat = 1usize;
+    let mut sequential = false;
     let mut i = 2;
     while i < a.len() {
         let v = || a.get(i + 1).context("option value");
@@ -43,6 +49,11 @@ fn main() -> Result<()> {
             "--ops" => ops = Some(v()?.split(',').map(String::from).collect()),
             "--gpu-family" => o.gpu_families = [v()? == "car", v()? == "active"],
             "--family" => family = Some(v()?.clone()),
+            "--repeat" => repeat = v()?.parse::<usize>()?.max(1),
+            "--sequential" => {
+                sequential = true;
+                i -= 1;
+            }
             x => bail!("unknown option {x}"),
         }
         i += 2;
@@ -60,52 +71,82 @@ fn main() -> Result<()> {
     if let Some(ops) = &ops {
         queries.retain(|q| ops.iter().any(|o| q["op"] == o.as_str()));
     }
+    // The families a query's modes belong to: car, active, or both (mixed).
+    let of = |q: &Value| -> &'static str {
+        let s = q.to_string();
+        let car = s.contains("\"mode\":\"car\"") || q["op"].as_str().is_some_and(|o| o.starts_with("chained"));
+        let act = s.contains("\"mode\":\"bike\"") || s.contains("\"mode\":\"walk\"") || q["op"].as_str().is_some_and(|o| o.starts_with("chained"));
+        match (car, act) {
+            (true, false) => "car",
+            (false, true) => "active",
+            _ => "mixed",
+        }
+    };
     if let Some(f) = &family {
-        // The families a query's modes belong to: car, active, or both (mixed).
-        let of = |q: &Value| -> &str {
-            let s = q.to_string();
-            let car = s.contains("\"mode\":\"car\"") || q["op"].as_str().is_some_and(|o| o.starts_with("chained"));
-            let act = s.contains("\"mode\":\"bike\"") || s.contains("\"mode\":\"walk\"") || q["op"].as_str().is_some_and(|o| o.starts_with("chained"));
-            match (car, act) {
-                (true, false) => "car",
-                (false, true) => "active",
-                _ => "mixed",
-            }
-        };
         queries.retain(|q| of(q) == f);
     }
     let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build()?;
-    let per_op: Mutex<BTreeMap<String, (usize, usize, f64)>> = Mutex::default();
+    // Per query type: mismatches, each query's seconds, and (one thread) its phases' summed ns.
+    type Row = (usize, Vec<f64>, [u64; 5]);
+    let phases = || -> [u64; 5] {
+        let l = |a: &std::sync::atomic::AtomicU64| a.load(std::sync::atomic::Ordering::Relaxed);
+        let p = &rt.prof;
+        [l(&p.comp_load), l(&p.upward), l(&p.gpu_wait), l(&p.cpu_sweep), l(&p.heads)]
+    };
+    let mut per_op: BTreeMap<String, Row> = BTreeMap::new();
     let bad: Mutex<Vec<String>> = Mutex::default();
-    let t1 = Instant::now();
-    pool.install(|| {
-        queries.par_iter().with_max_len(1).for_each(|q| {
-            let op = q["op"].as_str().unwrap_or("?").to_string();
-            let t = Instant::now();
-            let got = rt.answer(&op, &q["args"]);
-            let dt = t.elapsed().as_secs_f64();
-            let ok = matches!(&got, Ok(x) if *x == q["answer"]);
-            if !ok {
-                let msg = match got {
-                    Ok(x) => format!("{op} {}: got {x}, want {}", q["args"], q["answer"]),
-                    Err(e) => format!("{op} {}: error {e:#}", q["args"]),
-                };
-                bad.lock().unwrap().push(msg);
+    let mut wall = 0.0;
+    for pass in 0..repeat {
+        let rows: Mutex<BTreeMap<String, Row>> = Mutex::default();
+        bad.lock().unwrap().clear();
+        let t1 = Instant::now();
+        let one = |q: &Value| {
+                let op = q["op"].as_str().unwrap_or("?").to_string();
+                let key = format!("{op} {}", of(q));
+                let p0 = phases();
+                let t = Instant::now();
+                let got = rt.answer(&op, &q["args"]);
+                let dt = t.elapsed().as_secs_f64();
+                let p1 = phases();
+                let ok = matches!(&got, Ok(x) if *x == q["answer"]);
+                if !ok {
+                    let msg = match got {
+                        Ok(x) => format!("{op} {}: got {x}, want {}", q["args"], q["answer"]),
+                        Err(e) => format!("{op} {}: error {e:#}", q["args"]),
+                    };
+                    bad.lock().unwrap().push(msg);
+                }
+                let mut m = rows.lock().unwrap();
+                let e = m.entry(key).or_default();
+                e.0 += !ok as usize;
+                e.1.push(dt);
+                for k in 0..5 {
+                    e.2[k] += p1[k] - p0[k];
+                }
+        };
+        pool.install(|| {
+            if sequential {
+                queries.iter().for_each(one);
+            } else {
+                queries.par_iter().with_max_len(1).for_each(one);
             }
-            let mut m = per_op.lock().unwrap();
-            let e = m.entry(op).or_default();
-            e.0 += 1;
-            e.1 += !ok as usize;
-            e.2 += dt;
         });
-    });
-    let wall = t1.elapsed().as_secs_f64();
-    let per_op = per_op.into_inner().unwrap();
+        wall = t1.elapsed().as_secs_f64();
+        if pass + 1 == repeat {
+            per_op = rows.into_inner().unwrap();
+        }
+    }
     let mut total = (0, 0);
-    for (op, (n, b, s)) in &per_op {
-        println!("{op:>20} {n:6} queries {b:5} mismatches  {:9.2} ms mean", 1e3 * s / *n as f64);
+    println!("{:>28} {:>7} {:>6} {:>10} {:>10} {:>10}{}", "query type", "queries", "bad", "p50 ms", "p99 ms", "mean ms", if threads == 1 || sequential { "   phases, mean ms: load / upward / gpu wait / cpu sweep / heads" } else { "" });
+    for (op, (b, v, ph)) in per_op.iter_mut() {
+        v.sort_by(f64::total_cmp);
+        let n = v.len();
+        let pct = |p: f64| 1e3 * v[((n as f64 - 1.0) * p).round() as usize];
+        let mean = 1e3 * v.iter().sum::<f64>() / n as f64;
+        let phase = if threads == 1 || sequential { ph.iter().map(|&x| format!("{:.2}", x as f64 / 1e6 / n as f64)).collect::<Vec<_>>().join(" / ") } else { String::new() };
+        println!("{op:>28} {n:7} {b:6} {:10.2} {:10.2} {mean:10.2}   {phase}", pct(0.5), pct(0.99));
         total.0 += n;
-        total.1 += b;
+        total.1 += *b;
     }
     let bad = bad.into_inner().unwrap();
     for m in bad.iter().take(10) {
@@ -134,7 +175,7 @@ fn main() -> Result<()> {
         ld(&pr.heads_majflt),
         ld(&pr.heads_threads)
     );
-    println!("{}: {} queries, {} mismatches, {wall:.1} s on {threads} threads, backend {}", dir.display(), total.0, total.1, rt.backend());
+    println!("{}: {} queries, {} mismatches, {wall:.1} s on {threads} threads{}, backend {}", dir.display(), total.0, total.1, if sequential { " one query at a time" } else { "" }, rt.backend());
     if total.1 > 0 {
         std::process::exit(1);
     }
