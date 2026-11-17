@@ -101,10 +101,38 @@ impl Runtime {
         (0..self.vocab.place.len()).filter(|&p| self.vocab.matches(p, c) && self.served((na + p) as u32, mode).is_ok()).map(|p| Src { id: (na + p) as u32, start: 0 }).collect()
     }
 
+    /// The IDs of these internal indices, sorted by their bytes. Addresses and places are
+    /// each in ascending ID order (FORMAT §7), so this merges the two runs.
     fn sorted_ids(&self, idx: impl Iterator<Item = u32>) -> Vec<Id> {
-        let mut ids: Vec<Id> = idx.map(|i| self.vocab.id(i)).collect();
-        ids.sort_unstable();
-        ids
+        let mut ix: Vec<u32> = idx.collect();
+        if !ix.is_sorted() {
+            ix.sort_unstable();
+        }
+        let na = self.vocab.address.len() as u32;
+        let k = ix.partition_point(|&i| i < na);
+        let (a, p) = ix.split_at(k);
+        let mut out = Vec::with_capacity(ix.len());
+        let (mut x, mut y) = (0, 0);
+        while x < a.len() || y < p.len() {
+            let ia = a.get(x).map(|&i| self.vocab.id(i));
+            let ip = p.get(y).map(|&i| self.vocab.id(i));
+            match (ia, ip) {
+                (Some(u), Some(w)) if u <= w => {
+                    out.push(u);
+                    x += 1;
+                }
+                (Some(u), None) => {
+                    out.push(u);
+                    x += 1;
+                }
+                (_, Some(w)) => {
+                    out.push(w);
+                    y += 1;
+                }
+                (None, None) => unreachable!(),
+            }
+        }
+        out
     }
 
     pub fn travel_time(&self, a: &str, b: &str, mode: &str) -> Answer<Time> {
