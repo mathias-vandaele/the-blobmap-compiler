@@ -1,8 +1,8 @@
 //! `runtime-bench <model> --backend cuda|wgpu [--family car|active] [--metric k] [--dir
 //! from|to] [--sources n] [--rounds r] [--b k] [--bound t]`: GPU sweeps of a
 //! family's largest component from pseudo-random served IDs (fixed seed), B columns each:
-//! the seconds of seeding and launches up to a device sync, of the read-back, and of
-//! unpacking the labels into columns, as p50 and p99 per sweep. The trial's measure is the first.
+//! the seconds of seeding and launches up to a device sync and of the read-back, as p50 and
+//! p99 per sweep. The trial's measure is the first.
 
 use std::path::Path;
 use std::time::Instant;
@@ -73,30 +73,27 @@ fn main() -> Result<()> {
         }
     }
     let cols: Vec<Column> = picks.iter().map(|&v| Column { entries: upward(g, metric, dir, &[(v, 0)]), bound }).collect();
-    let (mut down, mut read, mut unpack) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut down, mut read) = (Vec::new(), Vec::new());
     for r in 0..rounds {
         for chunk in cols.chunks(b) {
             let refs: Vec<&Column> = chunk.iter().collect();
             gpu.sweep(&mut d, metric, dir, &refs)?;
-            let [x, y, z] = gpu.times.get();
+            let [x, y] = gpu.times.get();
             if r > 0 || rounds == 1 {
                 down.push(x * 1e3);
                 read.push(y * 1e3);
-                unpack.push(z * 1e3);
             }
         }
     }
     println!(
-        "{:?} {} B={b} bound {bound}: {} sweeps, sweep p50 {:.3} ms p99 {:.3} ms; read-back p50 {:.3} ms p99 {:.3} ms; unpack p50 {:.3} ms p99 {:.3} ms",
+        "{:?} {} B={b} bound {bound}: {} sweeps, sweep p50 {:.3} ms p99 {:.3} ms; read-back p50 {:.3} ms p99 {:.3} ms",
         kind,
         f.fam.name(),
         down.len(),
         pct(&mut down, 0.5),
         pct(&mut down, 0.99),
         pct(&mut read, 0.5),
-        pct(&mut read, 0.99),
-        pct(&mut unpack, 0.5),
-        pct(&mut unpack, 0.99)
+        pct(&mut read, 0.99)
     );
     Ok(())
 }

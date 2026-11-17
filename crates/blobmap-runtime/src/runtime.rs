@@ -15,6 +15,7 @@ use rayon::prelude::*;
 use crate::engine::{Comp, GpuConfig, GpuEngine, cpu_sweep};
 use crate::gpu::Kind;
 use crate::graph::{Graph, meet, upward};
+use crate::heads::{self, Labels, Times, Want};
 use crate::sweep::{Column, DEAD, Key, dir_index};
 use crate::vocab::{self, Dir, Fam, Family, Mode, Reason, Vocab};
 
@@ -69,14 +70,15 @@ pub struct Src {
     pub start: u16,
 }
 
-/// One column to compute: sources, mode, direction, and a bound for pruning (`DEAD` or
-/// above: none).
+/// One column to compute: sources, mode, direction, a bound for pruning (`DEAD` or
+/// above: none), and the IDs it answers.
 #[derive(Clone, Debug)]
 pub struct ColReq {
     pub sources: Vec<Src>,
     pub mode: usize,
     pub dir: Dir,
     pub bound: u16,
+    pub want: Want,
 }
 
 /// Where `columns` spends its time, summed over calls (nanoseconds, every thread).
@@ -86,11 +88,26 @@ pub struct Profile {
     /// Components loaded on the host on first use (read and relayer).
     pub comp_load: AtomicU64,
     pub upward: AtomicU64,
-    /// Waiting on the GPU worker: its queue, upload on first use, sweep, read-back, unpack.
+    /// Waiting on the GPU worker: its queue, upload on first use, sweep, read-back.
     pub gpu_wait: AtomicU64,
     pub cpu_sweep: AtomicU64,
-    /// Heads at every ID of the component, into a vector over every ID.
+    /// Heads at the wanted IDs (`heads`): the output vectors, the passes; the page faults
+    /// (minor, major) of the process meanwhile, and the threads of the pool they ran on.
     pub heads: AtomicU64,
+    pub heads_init: AtomicU64,
+    pub heads_ids: AtomicU64,
+    pub heads_minflt: AtomicU64,
+    pub heads_majflt: AtomicU64,
+    pub heads_threads: AtomicU64,
+}
+
+/// The process's page faults so far: minor, major (/proc/self/stat).
+pub fn faults() -> (u64, u64) {
+    let s = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    let f: Vec<&str> = s.rsplit_once(')').map_or("", |x| x.1).split_whitespace().collect();
+    let g = |i: usize| f.get(i).and_then(|x| x.parse().ok()).unwrap_or(0);
+    // After the command: state is field 3, minflt field 10, majflt field 12.
+    (g(7), g(9))
 }
 
 fn since(t: Instant) -> u64 {
@@ -215,10 +232,10 @@ impl Runtime {
         self.vocab.served(i, mode)
     }
 
-    /// Columns: for each, every ID's time from (`From`) or to (`To`) the nearest source plus
-    /// its start, `INF` for BEYOND or unserved. Sweeps on one component, metric and
+    /// Columns: for each, the wanted IDs' times from (`From`) or to (`To`) the nearest source
+    /// plus its start, `INF` for BEYOND or unserved. Sweeps on one component, metric and
     /// direction go as one batch.
-    pub fn columns(&self, reqs: &[ColReq]) -> Result<Vec<Vec<u16>>> {
+    pub fn columns(&self, reqs: &[ColReq]) -> Result<Vec<Times>> {
         // Per request and component: the sources, then the upward half.
         struct Part {
             req: usize,
@@ -265,7 +282,7 @@ impl Runtime {
             let mv = &self.vocab.modes[reqs[p.req].mode];
             groups.entry(Key { fam: mv.fam as u8, component: p.x, metric: mv.metric as u8, dir: dir_index(reqs[p.req].dir) as u8 }).or_default().push(i);
         }
-        let mut labels: Vec<Option<Vec<u16>>> = (0..parts.len()).map(|_| None).collect();
+        let mut labels: Vec<Option<Labels>> = (0..parts.len()).map(|_| None).collect();
         let mut pending = Vec::new();
         let mut on_cpu = Vec::new();
         for (key, idx) in &groups {
@@ -288,7 +305,7 @@ impl Runtime {
             })
             .collect();
         for (i, l) in cpu {
-            labels[i] = Some(l?);
+            labels[i] = Some(Labels::Plain(l?));
         }
         pr.cpu_sweep.fetch_add(since(t), Relaxed);
         let t = Instant::now();
@@ -299,47 +316,52 @@ impl Runtime {
             }
         }
         pr.gpu_wait.fetch_add(since(t), Relaxed);
-        // Heads at every ID of each part's component.
+        // Heads at the wanted IDs: dense wants into one vector per request, sparse ones
+        // gathered per request.
         let t = Instant::now();
-        let n = self.vocab.n();
-        let mut out: Vec<Vec<u16>> = reqs.iter().map(|_| vec![INF; n]).collect();
+        let f0 = faults();
+        pr.heads_threads.fetch_max(rayon::current_num_threads() as u64, Relaxed);
+        let mut dense: Vec<Option<Vec<u16>>> = reqs.iter().map(|q| q.want.dense().then(|| vec![INF; (q.want.hi - q.want.lo) as usize])).collect();
+        let mut sparse: Vec<Vec<(u32, u16)>> = reqs.iter().map(|_| Vec::new()).collect();
+        pr.heads_init.fetch_add(since(t), Relaxed);
+        let ti = Instant::now();
         for (p, lab) in parts.iter().zip(labels) {
-            let lab = lab.unwrap();
             let q = &reqs[p.req];
-            let mv = &self.vocab.modes[q.mode];
-            let g = &p.comp.g;
             let (first, ids) = &self.members[q.mode];
-            let ids = &ids[first[p.x as usize] as usize..first[p.x as usize + 1] as usize];
-            let mut by_piece: Vec<([u32; 2], u32, usize)> = p.srcs.iter().enumerate().map(|(j, s)| (mv.node(s.id as usize), mv.road(s.id as usize), j)).collect();
-            by_piece.sort_unstable();
-            let time = |i: usize| -> u16 {
-                let mut t = head(g, mv, i, |v| lab[g.new[v as usize] as usize], q.dir);
-                let key = (mv.node(i), mv.road(i));
-                let from = by_piece.partition_point(|b| (b.0, b.1) < key);
-                for &(_, _, j) in by_piece[from..].iter().take_while(|b| (b.0, b.1) == key) {
-                    let s = &p.srcs[j];
-                    let si = s.id as usize;
-                    if si == i {
-                        t = t.min(s.start);
-                    } else {
-                        let d = if q.dir == Dir::From { direct(mv, si, i) } else { direct(mv, i, si) };
-                        t = t.min(s.start.saturating_add(d));
-                    }
-                }
-                t
+            let part = heads::Part {
+                g: &p.comp.g,
+                mv: &self.vocab.modes[q.mode],
+                x: p.x,
+                ids: &ids[first[p.x as usize] as usize..first[p.x as usize + 1] as usize],
+                srcs: &p.srcs,
+                dir: q.dir,
+                bound: q.bound,
             };
-            let ts: Vec<u16> = ids.par_iter().with_min_len(1 << 12).map(|&i| time(i as usize)).collect();
-            let o = &mut out[p.req];
-            for (&i, t) in ids.iter().zip(ts) {
-                o[i as usize] = o[i as usize].min(t);
-            }
+            let got = heads::heads(&part, &lab.unwrap(), q.want, dense[p.req].as_deref_mut());
+            sparse[p.req].extend(got);
         }
+        pr.heads_ids.fetch_add(since(ti), Relaxed);
+        let out = dense
+            .into_iter()
+            .zip(sparse)
+            .zip(reqs)
+            .map(|((d, mut s), q)| match d {
+                Some(t) => Times::Dense { lo: q.want.lo, t },
+                None => {
+                    s.sort_unstable();
+                    Times::Sparse(s)
+                }
+            })
+            .collect();
+        let f1 = faults();
+        pr.heads_minflt.fetch_add(f1.0 - f0.0, Relaxed);
+        pr.heads_majflt.fetch_add(f1.1 - f0.1, Relaxed);
         pr.heads.fetch_add(since(t), Relaxed);
         Ok(out)
     }
 
-    pub fn column(&self, sources: &[Src], mode: usize, dir: Dir, bound: u16) -> Result<Vec<u16>> {
-        Ok(self.columns(&[ColReq { sources: sources.to_vec(), mode, dir, bound }])?.pop().unwrap())
+    pub fn column(&self, sources: &[Src], mode: usize, dir: Dir, bound: u16, want: Want) -> Result<Times> {
+        Ok(self.columns(&[ColReq { sources: sources.to_vec(), mode, dir, bound, want }])?.pop().unwrap())
     }
 
     /// The time from o to d (o ≠ d, both served in one component), from their ancestors
@@ -406,41 +428,6 @@ fn seed(g: &Graph, mv: &Mode, s: &Src, dir: Dir, put: &mut impl FnMut(u32, u16))
             put(nw(nodes[1]), s.start.saturating_add(off[2]));
         }
     }
-}
-
-/// The head of ID i (FORMAT §8), from the labels of layout ids.
-fn head(g: &Graph, mv: &Mode, i: usize, label: impl Fn(u32) -> u16, dir: Dir) -> u16 {
-    let (nodes, off) = (mv.node(i), mv.off(i));
-    let mut t = INF;
-    match (mv.fam, dir) {
-        (Fam::Car, Dir::From) => {
-            for k in 0..2 {
-                if nodes[k] == NONE {
-                    continue;
-                }
-                for y in g.arrivals(nodes[k]) {
-                    t = t.min(label(y).saturating_add(off[2 * k]));
-                }
-            }
-        }
-        (Fam::Car, Dir::To) => {
-            for k in 0..2 {
-                if nodes[k] == NONE {
-                    continue;
-                }
-                for a in g.arcs(nodes[k]) {
-                    t = t.min(off[2 * k + 1].saturating_add(g.turn_cost[a]).saturating_add(label(g.arc_head[a])));
-                }
-            }
-        }
-        (Fam::Active, Dir::From) => {
-            t = label(nodes[0]).saturating_add(off[0]).min(label(nodes[1]).saturating_add(off[2]));
-        }
-        (Fam::Active, Dir::To) => {
-            t = off[1].saturating_add(label(nodes[0])).min(off[3].saturating_add(label(nodes[1])));
-        }
-    }
-    t
 }
 
 /// Two IDs on the same piece (FORMAT §8 "Direct drive").

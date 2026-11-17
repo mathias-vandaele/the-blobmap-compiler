@@ -138,6 +138,16 @@ impl Mode {
         n.map(|v| if v == NONE { NONE } else { v - b })
     }
 
+    /// ID i's layout ids as the model stores them (family-wide).
+    pub fn raw_node(&self, i: usize) -> [u32; 2] {
+        self.raw_node[i]
+    }
+
+    /// The first layout id of component x.
+    pub fn first(&self, x: u32) -> u32 {
+        self.first[x as usize]
+    }
+
     pub fn road(&self, i: usize) -> u32 {
         self.raw_road.as_ref().map_or(NONE, |r| r[i])
     }

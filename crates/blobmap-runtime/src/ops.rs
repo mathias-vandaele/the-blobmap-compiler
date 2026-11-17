@@ -5,6 +5,7 @@ use blobmap_model::INF;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::heads::Want;
 use crate::runtime::{ColReq, Runtime, Src, bound_of};
 use crate::vocab::{Category, Dir, Id, Reason, id_string, parse_id};
 
@@ -132,11 +133,11 @@ impl Runtime {
             Ok(i) => i,
             Err(r) => return Ok(Err(r)),
         };
-        let col = self.column(&[Src { id: i, start: 0 }], m, dir, INF)?;
         let na = self.vocab.address.len();
+        let col = self.column(&[Src { id: i, start: 0 }], m, dir, INF, Want::range(na, self.vocab.n()))?.into_dense();
         let mut best: Option<(u16, Id)> = None;
         for p in 0..self.vocab.place.len() {
-            let t = col[na + p];
+            let t = col[p];
             if t == INF || !self.vocab.matches(p, c) {
                 continue;
             }
@@ -155,7 +156,7 @@ impl Runtime {
             Ok(s) => s,
             Err(r) => return Ok(Err(r)),
         };
-        Ok(Ok(self.column(&src, m, dir, INF)?))
+        Ok(Ok(self.column(&src, m, dir, INF, Want::all(self.vocab.n()))?.into_dense()))
     }
 
     /// The IDs within t seconds, sorted.
@@ -166,8 +167,8 @@ impl Runtime {
             Err(r) => return Ok(Err(r)),
         };
         let bound = if self.opts.prune { bound_of(t) } else { INF };
-        let col = self.column(&src, m, dir, bound)?;
-        Ok(Ok(self.sorted_ids((0..col.len() as u32).filter(|&i| col[i as usize] != INF && col[i as usize] as u64 <= t))))
+        let col = self.column(&src, m, dir, bound, Want::all(self.vocab.n()).within(t))?;
+        Ok(Ok(self.sorted_ids(col.finite().into_iter())))
     }
 
     /// The IDs within t seconds from every source (`all`) or from any.
@@ -178,53 +179,83 @@ impl Runtime {
             Err(r) => return Ok(Err(r)),
         };
         let bound = if self.opts.prune { bound_of(t) } else { INF };
-        let reqs: Vec<ColReq> = src.iter().map(|s| ColReq { sources: vec![*s], mode: m, dir: Dir::From, bound }).collect();
-        let cols = self.columns(&reqs)?;
-        let n = self.vocab.n();
-        let hit = |i: usize| {
-            let ok = |c: &Vec<u16>| c[i] != INF && c[i] as u64 <= t;
-            if all { !cols.is_empty() && cols.iter().all(ok) } else { cols.iter().any(ok) }
-        };
-        Ok(Ok(self.sorted_ids((0..n as u32).filter(|&i| hit(i as usize)))))
+        let want = Want::all(self.vocab.n()).within(t);
+        let reqs: Vec<ColReq> = src.iter().map(|s| ColReq { sources: vec![*s], mode: m, dir: Dir::From, bound, want }).collect();
+        let mut lists = self.columns(&reqs)?.iter().map(|c| c.finite()).collect::<Vec<_>>().into_iter();
+        let mut hit = lists.next().unwrap_or_default();
+        for l in lists {
+            if all {
+                hit.retain(|i| l.binary_search(i).is_ok());
+            } else {
+                hit.extend(l);
+            }
+        }
+        if !all {
+            hit.sort_unstable();
+            hit.dedup();
+        }
+        Ok(Ok(self.sorted_ids(hit.into_iter())))
     }
 
     pub fn multi_criteria(&self, expr: &Expr, kind: Kind, k: Option<usize>) -> Answer<Matches> {
         let mut terms: Vec<&Term> = Vec::new();
         collect(expr, &mut terms);
-        let mut modes: Vec<usize> = Vec::new();
-        let mut reqs = Vec::new();
-        for t in &terms {
-            let m = self.mode(&t.mode)?;
-            let bound = if self.opts.prune && k.is_none() { bound_of(t.max) } else { INF };
-            reqs.push(match &t.target {
-                Target::Sources(s) => match self.sources(s, m) {
-                    Ok(src) => ColReq { sources: src, mode: m, dir: t.dir, bound },
-                    Err(r) => return Ok(Err(r)),
-                },
-                // The time to the nearest place, as `nearest`: the column of the category's
-                // places in the other direction.
-                Target::Category { key, basic } => ColReq { sources: self.places_of(self.category(key, *basic)?, m), mode: m, dir: t.dir.flip(), bound },
-            });
-            if !modes.contains(&m) {
-                modes.push(m);
-            }
-        }
-        let times = self.columns(&reqs)?;
         let (n, na) = (self.vocab.n() as u32, self.vocab.address.len() as u32);
         let range = match kind {
             Kind::Addresses => 0..na,
             Kind::Places => na..n,
             Kind::Both => 0..n,
         };
-        let matching: Vec<u32> = range.filter(|&i| modes.iter().all(|&m| self.served(i, m).is_ok()) && eval(expr, &mut 0, &times, i as usize)).collect();
+        // Without k, and when an ID beyond every term does not match, only the IDs within
+        // some term's limit can match: each column answers those alone.
+        let sparse = k.is_none() && !eval(expr, &mut 0, &|_| false);
+        let mut modes: Vec<usize> = Vec::new();
+        let mut reqs = Vec::new();
+        for t in &terms {
+            let m = self.mode(&t.mode)?;
+            let bound = if self.opts.prune && k.is_none() { bound_of(t.max) } else { INF };
+            let mut want = Want::range(range.start as usize, range.end as usize);
+            if sparse {
+                want = want.within(t.max);
+            }
+            reqs.push(match &t.target {
+                Target::Sources(s) => match self.sources(s, m) {
+                    Ok(src) => ColReq { sources: src, mode: m, dir: t.dir, bound, want },
+                    Err(r) => return Ok(Err(r)),
+                },
+                // The time to the nearest place, as `nearest`: the column of the category's
+                // places in the other direction.
+                Target::Category { key, basic } => ColReq { sources: self.places_of(self.category(key, *basic)?, m), mode: m, dir: t.dir.flip(), bound, want },
+            });
+            if !modes.contains(&m) {
+                modes.push(m);
+            }
+        }
+        let times = self.columns(&reqs)?;
+        let (times, terms) = (&times, &terms);
+        let ok = |&i: &u32| {
+            modes.iter().all(|&m| self.served(i, m).is_ok())
+                && eval(expr, &mut 0, &|j: usize| {
+                    let c = times[j].get(i);
+                    c != INF && c as u64 <= terms[j].max
+                })
+        };
+        let matching: Vec<u32> = if sparse {
+            let mut cand: Vec<u32> = times.iter().flat_map(|c| c.finite()).collect();
+            cand.sort_unstable();
+            cand.dedup();
+            cand.into_iter().filter(ok).collect()
+        } else {
+            range.filter(ok).collect()
+        };
         Ok(Ok(match k {
             None => Matches::Ids(self.sorted_ids(matching.into_iter())),
             Some(k) => {
                 let weights: Vec<u64> = terms.iter().map(|t| t.weight.context("weight")).collect::<Result<_>>()?;
                 let mut scored: Vec<(u64, Id)> = matching
                     .into_iter()
-                    .filter(|&i| times.iter().all(|c| c[i as usize] != INF))
-                    .map(|i| (times.iter().zip(&weights).map(|(c, w)| w * c[i as usize] as u64).sum(), self.vocab.id(i)))
+                    .filter(|&i| times.iter().all(|c| c.get(i) != INF))
+                    .map(|i| (times.iter().zip(&weights).map(|(c, w)| w * c.get(i) as u64).sum(), self.vocab.id(i)))
                     .collect();
                 scored.sort_unstable();
                 scored.truncate(k);
@@ -257,14 +288,15 @@ impl Runtime {
         if ia == ib {
             return Ok(Ok(Some((0, None))));
         }
+        let places = Want::range(self.vocab.address.len(), self.vocab.n());
         let cols = self.columns(&[
-            ColReq { sources: vec![Src { id: ia, start: 0 }], mode: car, dir: Dir::From, bound: INF },
-            ColReq { sources: vec![Src { id: ib, start: 0 }], mode: walk, dir: Dir::To, bound: INF },
+            ColReq { sources: vec![Src { id: ia, start: 0 }], mode: car, dir: Dir::From, bound: INF, want: places },
+            ColReq { sources: vec![Src { id: ib, start: 0 }], mode: walk, dir: Dir::To, bound: INF, want: places },
         ])?;
         let (drive, on_foot) = (&cols[0], &cols[1]);
         let mut best: Option<(u16, Id)> = None;
         for p in self.transfers(c, car, walk) {
-            let t = drive[p as usize].saturating_add(penalty).saturating_add(on_foot[p as usize]);
+            let t = drive.get(p).saturating_add(penalty).saturating_add(on_foot.get(p));
             let cand = (t, self.vocab.id(p));
             if t != INF && best.is_none_or(|b| cand < b) {
                 best = Some(cand);
@@ -282,9 +314,9 @@ impl Runtime {
             Ok(i) => i,
             Err(r) => return Ok(Err(r)),
         };
-        let leg = self.column(&[Src { id: i, start: 0 }], first, dir, INF)?;
-        let src: Vec<Src> = self.transfers(c, car, walk).into_iter().map(|p| Src { id: p, start: leg[p as usize].saturating_add(penalty) }).filter(|s| s.start != INF).collect();
-        let mut col = self.column(&src, second, dir, INF)?;
+        let leg = self.column(&[Src { id: i, start: 0 }], first, dir, INF, Want::range(self.vocab.address.len(), self.vocab.n()))?;
+        let src: Vec<Src> = self.transfers(c, car, walk).into_iter().map(|p| Src { id: p, start: leg.get(p).saturating_add(penalty) }).filter(|s| s.start != INF).collect();
+        let mut col = self.column(&src, second, dir, INF, Want::all(self.vocab.n()))?.into_dense();
         if self.served(i, second).is_ok() {
             col[i as usize] = 0;
         }
@@ -381,29 +413,30 @@ fn collect<'a>(e: &'a Expr, out: &mut Vec<&'a Term>) {
     }
 }
 
-/// Evaluates the expression for ID i; `next` walks the terms in `collect` order.
-fn eval(e: &Expr, next: &mut usize, times: &[Vec<u16>], i: usize) -> bool {
+/// Evaluates the expression, `term(j)` telling whether the j-th term holds; `next` walks
+/// the terms in `collect` order.
+fn eval(e: &Expr, next: &mut usize, term: &impl Fn(usize) -> bool) -> bool {
     match e {
-        Expr::Term(t) => {
-            let c = times[*next][i];
+        Expr::Term(_) => {
+            let x = term(*next);
             *next += 1;
-            c != INF && c as u64 <= t.max
+            x
         }
         Expr::And(xs) => {
             let mut all = true;
             for x in xs {
-                all &= eval(x, next, times, i);
+                all &= eval(x, next, term);
             }
             all
         }
         Expr::Or(xs) => {
             let mut any = false;
             for x in xs {
-                any |= eval(x, next, times, i);
+                any |= eval(x, next, term);
             }
             any
         }
-        Expr::Not(x) => !eval(x, next, times, i),
+        Expr::Not(x) => !eval(x, next, term),
     }
 }
 

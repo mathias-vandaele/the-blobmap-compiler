@@ -12,6 +12,7 @@ use anyhow::{Result, anyhow, bail};
 
 use crate::gpu::{DevGraph, Gpu, Kind};
 use crate::graph::Graph;
+use crate::heads::Labels;
 use crate::sweep::{Bounds, Column, Key, all_bounds, cpu_down};
 use crate::vocab::Dir;
 
@@ -32,7 +33,7 @@ pub fn cpu_sweep(c: &Comp, metric: usize, dir: Dir, col: &Column, prune: bool) -
     Ok(cpu_down(&c.g, metric, dir, col, b))
 }
 
-type Reply = mpsc::Sender<Result<Vec<Vec<u16>>, String>>;
+type Reply = mpsc::Sender<Result<Vec<Labels>, String>>;
 
 struct Job {
     key: Key,
@@ -64,11 +65,10 @@ pub struct Stats {
     pub vram_used: u64,
     pub vram_peak: u64,
     /// Seconds on the worker: uploads (with entry bounds), seeding and launches up to a
-    /// device sync, label read-back, unpacking into columns.
+    /// device sync, label read-back.
     pub load_s: f64,
     pub down_s: f64,
     pub read_s: f64,
-    pub unpack_s: f64,
 }
 
 pub struct GpuConfig {
@@ -105,8 +105,8 @@ impl GpuEngine {
         Ok(GpuEngine { q, worker: Some(worker), kind, describe, stats })
     }
 
-    /// Queues a sweep; the receiver gets one label vector per column.
-    pub fn submit(&self, key: Key, comp: Arc<Comp>, cols: Vec<Column>) -> mpsc::Receiver<Result<Vec<Vec<u16>>, String>> {
+    /// Queues a sweep; the receiver gets each column's labels.
+    pub fn submit(&self, key: Key, comp: Arc<Comp>, cols: Vec<Column>) -> mpsc::Receiver<Result<Vec<Labels>, String>> {
         let (tx, rx) = mpsc::channel();
         let (m, cv) = &*self.q;
         m.lock().unwrap().jobs.push_back(Job { key, comp, cols, reply: tx });
@@ -171,7 +171,7 @@ fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Sta
         clock += 1;
         // A panic in CubeCL or a kernel becomes this batch's error: the worker lives on, so
         // that no later request waits on a queue nobody drains.
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Vec<Vec<u16>>> {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Vec<Labels>> {
             let ck = (key.fam, key.component);
             if !loaded.contains_key(&ck) {
                 let g = &batch[0].comp.g;
@@ -211,10 +211,9 @@ fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Sta
             let cols: Vec<&Column> = batch.iter().flat_map(|j| j.cols.iter()).collect();
             let out = gpu.sweep(&mut l.dev, key.metric as usize, if key.dir == 0 { Dir::From } else { Dir::To }, &cols)?;
             let mut s = stats.lock().unwrap();
-            let [a, b, c] = gpu.times.get();
+            let [a, b] = gpu.times.get();
             s.down_s += a;
             s.read_s += b;
-            s.unpack_s += c;
             s.sweeps += 1;
             s.columns += cols.len() as u64;
             Ok(out)

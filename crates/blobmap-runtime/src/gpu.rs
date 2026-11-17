@@ -15,12 +15,13 @@
 // comptime `if` cannot merge with a runtime one.
 #![allow(clippy::unnecessary_cast, clippy::collapsible_if)]
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Result, anyhow, ensure};
 use cubecl::client::Client;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use crate::graph::Graph;
+use crate::heads::Labels;
 use crate::sweep::{Bounds, Column, DEAD};
 use crate::vocab::Dir;
 
@@ -541,9 +542,9 @@ pub struct Gpu {
     max_x: u32,
     max_chunk: u64,
     /// Time each sweep (a device sync after the launches): `times` holds the seconds of the
-    /// last sweep's seeding and launches, of its read-back, and of unpacking the labels.
+    /// last sweep's seeding and launches, and of its read-back.
     pub timing: bool,
-    pub times: std::cell::Cell<[f64; 3]>,
+    pub times: std::cell::Cell<[f64; 2]>,
 }
 
 impl Gpu {
@@ -567,7 +568,7 @@ impl Gpu {
         let top_threads = hw.max_units_per_cube.min(1024);
         let max_x = hw.max_cube_count.0.min(65535);
         let max_chunk = props.memory.max_page_size.min(1 << 30);
-        Ok(Gpu { kind, merge, max_shared, top_threads, max_x, max_chunk, timing: false, times: std::cell::Cell::new([0.0; 3]), client })
+        Ok(Gpu { kind, merge, max_shared, top_threads, max_x, max_chunk, timing: false, times: std::cell::Cell::new([0.0; 2]), client })
     }
 
     pub fn describe(&self) -> String {
@@ -840,7 +841,7 @@ impl Gpu {
 
     /// One sweep of up to 2 · p_max columns of a component (metric, dir): labels by new id,
     /// per column.
-    pub fn sweep(&self, d: &mut DevGraph, metric: usize, dir: Dir, cols: &[&Column]) -> Result<Vec<Vec<u16>>> {
+    pub fn sweep(&self, d: &mut DevGraph, metric: usize, dir: Dir, cols: &[&Column]) -> Result<Vec<Labels>> {
         let t0 = std::time::Instant::now();
         let k = cols.len() as u32;
         ensure!(k >= 1 && k <= 2 * d.p_max, "{k} columns, outside 1..{}", 2 * d.p_max);
@@ -911,20 +912,15 @@ impl Gpu {
         let desc = d.state.clone().copy_descriptor(cubecl::zspace::Shape::new([words]), cubecl::zspace::Strides::new(&[1]), 4);
         let bytes = cl.read_tensor(vec![desc]).map_err(|e| anyhow!("read: {e:?}"))?.remove(0);
         ensure!(bytes.len() >= words * 4, "read {} bytes of {}", bytes.len(), words * 4);
-        let all: &[u32] = bytemuck::cast_slice(&bytes[..words * 4]);
+        // As words, without a copy when the buffer allows it.
+        let mut all: Vec<u32> = bytes.try_into_vec::<u32>().unwrap_or_else(|b| bytemuck::pod_collect_to_vec(&b[..words * 4]));
+        all.truncate(words);
         let t_read = t0.elapsed().as_secs_f64();
-        let mut out = Vec::with_capacity(cols.len());
-        for c in 0..cols.len() {
-            let (q, sh) = (c / 2, 16 * (c % 2));
-            out.push((0..d.n).map(|v| (all[v * p as usize + q] >> sh) as u16).collect());
-        }
-        if out.iter().any(|o: &Vec<u16>| o.len() != d.n) {
-            bail!("short read");
-        }
         if self.timing {
-            self.times.set([t_down, t_read - t_down, t0.elapsed().as_secs_f64() - t_read]);
+            self.times.set([t_down, t_read - t_down]);
         }
         let _ = DEAD;
-        Ok(out)
+        let all = std::sync::Arc::new(all);
+        Ok((0..cols.len()).map(|c| Labels::Packed { words: all.clone(), p: p as usize, c }).collect())
     }
 }

@@ -121,6 +121,15 @@ fn main() -> Result<()> {
         ms(&pr.cpu_sweep),
         ms(&pr.heads)
     );
+    let ld = |a: &std::sync::atomic::AtomicU64| a.load(std::sync::atomic::Ordering::Relaxed);
+    println!(
+        "heads: output vectors {:.0} ms, passes {:.0} ms; page faults {} minor, {} major; pool of {} threads",
+        ms(&pr.heads_init),
+        ms(&pr.heads_ids),
+        ld(&pr.heads_minflt),
+        ld(&pr.heads_majflt),
+        ld(&pr.heads_threads)
+    );
     println!("{}: {} queries, {} mismatches, {wall:.1} s on {threads} threads, backend {}", dir.display(), total.0, total.1, rt.backend());
     if total.1 > 0 {
         std::process::exit(1);

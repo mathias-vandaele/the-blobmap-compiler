@@ -6,16 +6,19 @@
 //! - `graph`: a component's hierarchy, renumbered by level, and the upward half on the host;
 //! - `sweep`: the downward half's semantics, pruning included, and the CPU sweep;
 //! - `gpu`: the CubeCL kernels and the device layout; `engine`: the GPU worker and batching;
-//! - `runtime`: columns, pairs, heads (FORMAT §8); `ops`: the operations and golden JSON.
+//! - `heads`: a column's times at the IDs it is asked for (FORMAT §8);
+//! - `runtime`: columns and pairs; `ops`: the operations and golden JSON.
 
 pub mod engine;
 pub mod gpu;
 pub mod graph;
+pub mod heads;
 pub mod ops;
 pub mod runtime;
 pub mod sweep;
 pub mod vocab;
 
 pub use ops::{Answer, Best, Expr, Kind as MatchKind, Matches, Refusal, Source, Target, Term, Time};
+pub use heads::{Times, Want};
 pub use runtime::{Backend, Options, Runtime};
 pub use vocab::{Category, Dir, Id, Reason};
