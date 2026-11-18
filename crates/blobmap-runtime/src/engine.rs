@@ -267,6 +267,11 @@ fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Sta
                     if !mats.contains_key(&ck) {
                         let need = DevMatrix::estimate(g) + g.links() as u64 * 4;
                         while used + need > cfg.budget {
+                            if let Some(k) = ids.iter().min_by_key(|(_, t)| t.1).map(|(&k, _)| k) {
+                                used -= ids.remove(&k).unwrap().0.bytes;
+                                sync_cleanup(&gpu)?;
+                                continue;
+                            }
                             let Some((k, _)) = loaded.iter().min_by_key(|(_, l)| l.used_at).map(|(&k, l)| (k, l.used_at)) else { break };
                             let l = loaded.remove(&k).unwrap();
                             used -= l.dev.bytes + l.heads.as_ref().map_or(0, |h| h.bytes);
@@ -339,21 +344,18 @@ fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Sta
             if !loaded.contains_key(&ck) {
                 let g = &batch[0].comp.g;
                 let need = Gpu::estimate(g, p_max, cfg.prune);
-                // The least recently used component or ID table goes first.
+                // ID tables go first, the least recently used first (an ID table is an
+                // optional accelerator, reloaded in a second, where a component takes many:
+                // under LRU alone, Europe active evicted its 13 GB main component 608 times
+                // for small ones); then components, the least recently used first.
                 while used + need > cfg.budget {
-                    let lc = loaded.iter().min_by_key(|(_, l)| l.used_at).map(|(&k, l)| (k, l.used_at));
-                    let li = ids.iter().min_by_key(|(_, t)| t.1).map(|(&k, t)| (k, t.1));
-                    match (lc, li) {
-                        (None, None) => break,
-                        (Some((k, a)), Some((_, b))) if a <= b => {
-                            let l = loaded.remove(&k).unwrap();
-                            used -= l.dev.bytes + l.heads.as_ref().map_or(0, |h| h.bytes);
-                        }
-                        (Some((k, _)), None) => {
-                            let l = loaded.remove(&k).unwrap();
-                            used -= l.dev.bytes + l.heads.as_ref().map_or(0, |h| h.bytes);
-                        }
-                        (_, Some((k, _))) => used -= ids.remove(&k).unwrap().0.bytes,
+                    if let Some(k) = ids.iter().min_by_key(|(_, t)| t.1).map(|(&k, _)| k) {
+                        used -= ids.remove(&k).unwrap().0.bytes;
+                    } else if let Some(k) = loaded.iter().min_by_key(|(_, l)| l.used_at).map(|(&k, _)| k) {
+                        let l = loaded.remove(&k).unwrap();
+                        used -= l.dev.bytes + l.heads.as_ref().map_or(0, |h| h.bytes);
+                    } else {
+                        break;
                     }
                     stats.lock().unwrap().evictions += 1;
                     // Give the evicted buffers back to the device, not to CubeCL's pool.

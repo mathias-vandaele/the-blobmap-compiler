@@ -273,6 +273,10 @@ impl Runtime {
             let q = &reqs[p.req];
             heads::Part { g: &p.comp.g, mv: &rt.vocab.modes[q.mode], x: p.x, ids: None, srcs: &p.srcs, dir: q.dir, bound: q.bound }
         }
+        let mut nparts = vec![0usize; reqs.len()];
+        for p in &parts {
+            nparts[p.req] += 1;
+        }
         let mut labels: Vec<Option<ColOut>> = (0..parts.len()).map(|_| None).collect();
         // Per part at listed targets on the device: the new ids its labels come back at.
         let mut lists: Vec<Option<Vec<u32>>> = (0..parts.len()).map(|_| None).collect();
@@ -302,6 +306,11 @@ impl Runtime {
                             lists[i] = Some(l.clone());
                         }
                         pending.push((idx.clone(), gpu.submit(*key, comp.clone(), cols, None, Some(ls))));
+                    } else if idx.iter().any(|&i| nparts[parts[i].req] > 1 && reqs[parts[i].req].want.dense()) {
+                        // Device heads give each part a dense vector over the request's whole
+                        // range, all at once; the host folds the parts' heads into one, a part
+                        // at a time (randomized France held 12 GB of such vectors).
+                        pending.push((idx.clone(), gpu.submit(*key, comp.clone(), cols, None, None)));
                     } else {
                         let heads = JobHeads { mode, first: mv.first(key.component), cols: hc };
                         pending.push((idx.clone(), gpu.submit(*key, comp.clone(), cols, Some(heads), None)));
@@ -337,10 +346,6 @@ impl Runtime {
         let f0 = faults();
         pr.heads_threads.fetch_max(rayon::current_num_threads() as u64, Relaxed);
         // A request answered by one part on the device takes its times as they are.
-        let mut nparts = vec![0usize; reqs.len()];
-        for p in &parts {
-            nparts[p.req] += 1;
-        }
         let mut whole: Vec<Option<Times>> = reqs.iter().map(|_| None).collect();
         let mut dense: Vec<Option<Vec<u16>>> = reqs.iter().enumerate().map(|(r, q)| (q.want.dense() && nparts[r] > 0).then(|| vec![INF; (q.want.hi - q.want.lo) as usize])).collect();
         for (p, l) in parts.iter().zip(&labels) {

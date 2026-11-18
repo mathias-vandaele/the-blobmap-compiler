@@ -1485,14 +1485,20 @@ impl Gpu {
             chunks.push((*a, read(hd, *count as usize * p as usize)?));
         }
         let out = std::sync::Arc::new(PackedOut { per, p: p as usize, chunks });
+        // The packed block is shared by every column of the batch until the last answer
+        // drops it: kept only when it costs no more than the dense columns' own vectors
+        // (every column dense over the whole range); else each dense column gets its range
+        // and the block goes here (a sparse column beside one dense one held 16 times the
+        // dense one's bytes: randomized France on the GPU went past 40 GiB of host memory).
+        let own: u64 = cols.iter().filter(|c| c.want.dense()).map(|c| (c.want.hi.min(ids.n as u32) - c.want.lo) as u64 * 2).sum();
+        let share = (hi - lo) as u64 * p as u64 * 4 <= own;
         Ok(Some(
             cols.iter()
                 .enumerate()
                 .map(|(c, col)| {
                     let t = Times::Packed { lo, hi, out: out.clone(), c, patch: None };
                     if col.want.dense() {
-                        // Each column covers its own range only.
-                        if col.want.lo == lo && col.want.hi.min(ids.n as u32) == hi { t } else { Times::Dense { lo: col.want.lo, t: (col.want.lo..col.want.hi).map(|i| t.get(i)).collect() } }
+                        if share { t } else { Times::Dense { lo: col.want.lo, t: (col.want.lo..col.want.hi).map(|i| t.get(i)).collect() } }
                     } else {
                         Times::Sparse(t.sparse(col.want.lo, col.want.hi, col.want.max))
                     }

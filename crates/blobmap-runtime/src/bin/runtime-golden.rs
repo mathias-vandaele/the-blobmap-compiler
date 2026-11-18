@@ -64,6 +64,8 @@ fn main() -> Result<()> {
     let body = std::fs::read(dir.join("queries.jsonl"))?;
     ensure!(header["queries_sha256"] == hex::encode(Sha256::digest(&body)).as_str(), "queries_sha256 differs");
     let mut queries: Vec<Value> = body.split(|&b| b == b'\n').filter(|l| !l.is_empty()).map(serde_json::from_slice).collect::<Result<_, _>>()?;
+    // The raw file (5.7 GB for randomized France) is no longer needed.
+    drop(body);
     if let Some(ops) = &ops {
         queries.retain(|q| ops.iter().any(|o| q["op"] == o.as_str()));
     }
