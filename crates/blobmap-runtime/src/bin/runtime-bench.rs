@@ -88,7 +88,7 @@ fn main() -> Result<()> {
         }
     }
     println!(
-        "{:?} {} B={b} bound {bound}: {} sweeps, sweep p50 {:.3} ms p99 {:.3} ms; read-back p50 {:.3} ms p99 {:.3} ms; host enqueue p50 {:.3} ms ({} launches a sweep: top, wide levels, runs, run layers {:?})",
+        "{:?} {} B={b} bound {bound}: {} sweeps, sweep p50 {:.3} ms p99 {:.3} ms; read-back p50 {:.3} ms p99 {:.3} ms; host enqueue p50 {:.3} ms ({} launches a sweep)",
         kind,
         f.fam.name(),
         down.len(),
@@ -97,8 +97,7 @@ fn main() -> Result<()> {
         pct(&mut read, 0.5),
         pct(&mut read, 0.99),
         pct(&mut enq, 0.5),
-        d.launches(),
-        d.shape()
+        d.launches()
     );
     Ok(())
 }
