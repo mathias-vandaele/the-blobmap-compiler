@@ -26,6 +26,10 @@ use crate::sweep::{Bounds, Column, DEAD};
 use crate::vocab::Dir;
 
 const WIDE_THREADS: u32 = 256;
+/// Narrow runs: consecutive layers below the top, each at most `RUN_WIDTH` nodes wide, swept
+/// in one launch of one cube of `RUN_THREADS` units per block.
+const RUN_THREADS: u32 = 256;
+const RUN_WIDTH: u32 = 4096;
 /// Research `TOP_CAP` and `WIDE_SPLIT_DEFAULT` (per lane width 1, 2, 4, 8, 16).
 const TOP_CAP: u32 = 512;
 const SPLIT_DEFAULT: [u32; 5] = [4, 8, 16, 16, 0];
@@ -37,7 +41,7 @@ const NONE: u32 = u32::MAX;
 // ---- kernels -------------------------------------------------------------------------
 
 #[cube]
-fn gid() -> u32 {
+pub(crate) fn gid() -> u32 {
     let x = CUBE_POS_Y as u32 * CUBE_COUNT_X as u32 + CUBE_POS_X as u32;
     x * CUBE_DIM_X + UNIT_POS_X
 }
@@ -48,7 +52,7 @@ fn seeded(mask: &[u32], v: u32) -> bool {
 }
 
 #[cube]
-fn vmin2(a: u32, b: u32) -> u32 {
+pub(crate) fn vmin2(a: u32, b: u32) -> u32 {
     let (al, bl, ah, bh) = (a & 0xFFFFu32, b & 0xFFFFu32, a >> 16u32, b >> 16u32);
     let lo = if al < bl { al } else { bl };
     let hi = if ah < bh { ah } else { bh };
@@ -56,7 +60,7 @@ fn vmin2(a: u32, b: u32) -> u32 {
 }
 
 #[cube]
-fn vadd2(a: u32, b: u32) -> u32 {
+pub(crate) fn vadd2(a: u32, b: u32) -> u32 {
     let lo = (a & 0xFFFFu32) + (b & 0xFFFFu32);
     let hi = (a >> 16u32) + (b >> 16u32);
     let lo = if lo < 0xFFFFu32 { lo } else { 0xFFFFu32 };
@@ -66,7 +70,7 @@ fn vadd2(a: u32, b: u32) -> u32 {
 
 /// Link k's u16 weight of a packed array, in both halves.
 #[cube]
-fn wpair(w: &[u32], k: u32) -> u32 {
+pub(crate) fn wpair(w: &[u32], k: u32) -> u32 {
     let x = (w[(k >> 1u32) as usize] >> ((k & 1u32) << 4u32)) & 0xFFFFu32;
     x | (x << 16u32)
 }
@@ -238,6 +242,63 @@ fn top_resident(
     }
 }
 
+/// One node's words q ≡ lane (mod lp): its upper neighbours' labels ⊕ the links' weights,
+/// links `k0..k1` of the bound slices `up_head`, `w` and `eb`.
+#[cube]
+fn relax(
+    v: u32,
+    lane: u32,
+    k0: u32,
+    k1: u32,
+    up_head: &[u32],
+    w: &[u32],
+    d32: &mut [u32],
+    p: u32,
+    mask: &[u32],
+    parent: &[u32],
+    eb: &[u32],
+    bound: &[u32],
+    top_nodes: u32,
+    #[comptime] lp: u32,
+    #[comptime] prune: bool,
+) {
+    let s = seeded(mask, v);
+    let mut par = 0xFFFF_FFFFu32;
+    if prune {
+        par = parent[v as usize];
+    }
+    let mut q = lane;
+    while q < p {
+        let mut acc = if s { d32[(v * p + q) as usize] } else { 0xFFFF_FFFFu32 };
+        let mut lb = 0xFFFF_FFFFu32;
+        let mut dl = false;
+        let mut dh = false;
+        let mut tq = 0xFFFF_FFFFu32;
+        if prune {
+            tq = bound[q as usize];
+            if par != 0xFFFF_FFFFu32 && par >= top_nodes {
+                let pd = d32[(par * p + q) as usize];
+                dl = dead_half(pd & 0xFFFFu32, tq & 0xFFFFu32);
+                dh = dead_half(pd >> 16u32, tq >> 16u32);
+            }
+        }
+        if !(dl && dh) {
+            for k in k0..k1 {
+                let x = d32[(up_head[k as usize] * p + q) as usize];
+                acc = vmin2(acc, vadd2(x, wpair(w, k)));
+                if prune {
+                    lb = vmin2(lb, vadd2(x, wpair(eb, k)));
+                }
+            }
+        }
+        if prune {
+            acc = prune_word(acc, lb, tq, s, dl, dh);
+        }
+        d32[(v * p + q) as usize] = acc;
+        q += lp;
+    }
+}
+
 /// One wide level, `lp` lanes per node, each lane owning words q ≡ lane (mod lp). `up_head`,
 /// `w` and `eb` are the level's slices; `rel_first` is indexed by node, relative to the
 /// level, with `links` its link count.
@@ -263,43 +324,51 @@ fn wide_level(
     if t < cnt * lp {
         let li = t / lp;
         let v = base + li;
-        let lane = t % lp;
-        let s = seeded(mask, v);
         let k0 = rel_first[v as usize];
         let k1 = if li + 1u32 < cnt { rel_first[(v + 1u32) as usize] } else { links };
-        let mut par = 0xFFFF_FFFFu32;
-        if prune {
-            par = parent[v as usize];
-        }
-        let mut q = lane;
-        while q < p {
-            let mut acc = if s { d32[(v * p + q) as usize] } else { 0xFFFF_FFFFu32 };
-            let mut lb = 0xFFFF_FFFFu32;
-            let mut dl = false;
-            let mut dh = false;
-            let mut tq = 0xFFFF_FFFFu32;
-            if prune {
-                tq = bound[q as usize];
-                if par != 0xFFFF_FFFFu32 && par >= top_nodes {
-                    let pd = d32[(par * p + q) as usize];
-                    dl = dead_half(pd & 0xFFFFu32, tq & 0xFFFFu32);
-                    dh = dead_half(pd >> 16u32, tq >> 16u32);
-                }
+        relax(v, t % lp, k0, k1, up_head, w, d32, p, mask, parent, eb, bound, top_nodes, lp, prune);
+    }
+}
+
+/// A narrow run of layers, one cube per block, layer after layer with a storage barrier
+/// between: block c's layers are `ranges` pairs (first new id, count) from `group_first[c]` to
+/// `group_first[c + 1]`. A cell's links stay in the cell or go to the top, and a run holds
+/// either top layers or cell layers, so blocks run independently. `up_head`, `w` and `eb` are
+/// the run's links; `run_first` is indexed by new id − `run_base`, relative to the run.
+#[cube(launch)]
+fn narrow_run(
+    groups: u32,
+    group_first: &[u32],
+    ranges: &[u32],
+    run_base: u32,
+    run_first: &[u32],
+    up_head: &[u32],
+    w: &[u32],
+    d32: &mut [u32],
+    p: u32,
+    mask: &[u32],
+    parent: &[u32],
+    eb: &[u32],
+    bound: &[u32],
+    top_nodes: u32,
+    #[comptime] lp: u32,
+    #[comptime] prune: bool,
+) {
+    let c = CUBE_POS_Y as u32 * CUBE_COUNT_X as u32 + CUBE_POS_X as u32;
+    // The same for every unit of the cube: the barriers are uniform.
+    if c < groups {
+        let nt = CUBE_DIM_X;
+        for j in group_first[c as usize]..group_first[(c + 1u32) as usize] {
+            let a = ranges[(2u32 * j) as usize];
+            let items = ranges[(2u32 * j + 1u32) as usize] * lp;
+            let mut t = UNIT_POS_X;
+            while t < items {
+                let v = a + t / lp;
+                let r = v - run_base;
+                relax(v, t % lp, run_first[r as usize], run_first[(r + 1u32) as usize], up_head, w, d32, p, mask, parent, eb, bound, top_nodes, lp, prune);
+                t += nt;
             }
-            if !(dl && dh) {
-                for k in k0..k1 {
-                    let x = d32[(up_head[k as usize] * p + q) as usize];
-                    acc = vmin2(acc, vadd2(x, wpair(w, k)));
-                    if prune {
-                        lb = vmin2(lb, vadd2(x, wpair(eb, k)));
-                    }
-                }
-            }
-            if prune {
-                acc = prune_word(acc, lb, tq, s, dl, dh);
-            }
-            d32[(v * p + q) as usize] = acc;
-            q += lp;
+            sync_storage();
         }
     }
 }
@@ -511,7 +580,7 @@ fn turn_pass(u0: u32, count: u32, tf: &[u32], th: &[u32], tc: &[u32], d32: &[u32
 }
 
 #[cube]
-fn sadd(a: u32, b: u32) -> u32 {
+pub(crate) fn sadd(a: u32, b: u32) -> u32 {
     let s = a + b;
     if s < 0xFFFFu32 { s } else { 0xFFFFu32 }
 }
@@ -678,12 +747,12 @@ fn heads_ids(
 
 // ---- host side -----------------------------------------------------------------------
 
-fn bytes_u32(x: &[u32]) -> &[u8] {
+pub(crate) fn bytes_u32(x: &[u32]) -> &[u8] {
     bytemuck::cast_slice(x)
 }
 
 /// u16s padded to whole u32 words.
-fn bytes_u16(x: &[u16]) -> Vec<u8> {
+pub(crate) fn bytes_u16(x: &[u16]) -> Vec<u8> {
     let mut b = bytemuck::cast_slice::<u16, u8>(x).to_vec();
     while !b.len().is_multiple_of(4) || b.is_empty() {
         b.push(0xFF);
@@ -691,7 +760,7 @@ fn bytes_u16(x: &[u16]) -> Vec<u8> {
     b
 }
 
-fn lanes_for(p: u32) -> u32 {
+pub(crate) fn lanes_for(p: u32) -> u32 {
     let mut lp = 1;
     while lp < p && lp < 32 {
         lp <<= 1;
@@ -700,12 +769,12 @@ fn lanes_for(p: u32) -> u32 {
 }
 
 /// A grid of `items` threads in cubes of `dim`, two-dimensional past the device's limit.
-fn grid(items: u32, dim: u32, max_x: u32) -> CubeCount {
+pub(crate) fn grid(items: u32, dim: u32, max_x: u32) -> CubeCount {
     let cubes = items.div_ceil(dim).max(1);
     if cubes <= max_x { CubeCount::Static(cubes, 1, 1) } else { CubeCount::Static(max_x, cubes.div_ceil(max_x), 1) }
 }
 
-fn arg(h: &Handle, len: usize) -> BufferArg {
+pub(crate) fn arg(h: &Handle, len: usize) -> BufferArg {
     unsafe { BufferArg::from_raw_parts(h.clone(), len.max(1)) }
 }
 
@@ -718,6 +787,7 @@ pub enum Kind {
 
 /// A wide level's links: a chunk, an aligned offset in it, and a count.
 struct LevelAt {
+    layer: usize,
     chunk: usize,
     off: u64,
     links: u32,
@@ -731,6 +801,29 @@ struct Chunk {
     eb: Vec<Handle>,
 }
 
+/// A narrow run (`narrow_run`): layers `layers`, new ids from `base` on.
+struct Run {
+    groups: u32,
+    group_first: Handle,
+    ranges: Handle,
+    base: u32,
+    nodes: usize,
+    first: Handle,
+    head: Handle,
+    w: Vec<Handle>,
+    eb: Vec<Handle>,
+    links: usize,
+    layers: std::ops::Range<usize>,
+}
+
+/// A sweep's downward half below the top, in layer order: a wide level (its index in
+/// `levels`) or a narrow run (in `runs`).
+#[derive(Clone, Copy)]
+enum Step {
+    Level(usize),
+    Run(usize),
+}
+
 struct Split {
     table: Handle,
     heavy: Handle,
@@ -739,9 +832,14 @@ struct Split {
 }
 
 impl DevGraph {
-    /// Kernel launches of a sweep's downward half: the top, then one per wide level.
+    /// Kernel launches of a sweep's downward half: the top, then one per wide level or run.
     pub fn launches(&self) -> usize {
-        (self.top > 0) as usize + self.levels.len()
+        (self.top > 0) as usize + self.plan.len()
+    }
+
+    /// Layers in the resident top, wide levels, narrow runs and the layers in them.
+    pub fn shape(&self) -> [usize; 4] {
+        [self.top, self.levels.len(), self.runs.len(), self.runs.iter().map(|r| r.layers.len()).sum()]
     }
 }
 
@@ -762,6 +860,8 @@ pub struct DevGraph {
     chunks: Vec<Chunk>,
     levels: Vec<LevelAt>,
     splits: Vec<Split>,
+    runs: Vec<Run>,
+    plan: Vec<Step>,
     state: Handle,
     mask: Handle,
     bound: Handle,
@@ -774,10 +874,10 @@ pub struct Gpu {
     pub kind: Kind,
     pub client: Client,
     merge: bool,
-    max_shared: usize,
+    pub(crate) max_shared: usize,
     top_threads: u32,
-    max_x: u32,
-    max_chunk: u64,
+    pub(crate) max_x: u32,
+    pub(crate) max_chunk: u64,
     /// Time each sweep (a device sync after the launches): `times` holds the seconds of the
     /// last sweep's seeding and launches, and of its read-back.
     pub timing: bool,
@@ -834,6 +934,66 @@ impl Gpu {
         h
     }
 
+    /// A narrow run of layers `l0..l1`: per block (most nodes first), its layers' new id
+    /// ranges (a block's nodes in a layer are consecutive new ids, as renumbering keeps layout
+    /// order within a layer), and the run's links in one binding. `old` maps new ids to
+    /// layout ids.
+    fn load_run(&self, g: &Graph, l0: usize, l1: usize, old: &[u32], bounds: Option<&Bounds>, used: &mut u64) -> Result<Run> {
+        let (base, end) = (g.level_first[l0], g.level_first[l1]);
+        // Per block: (nodes, ranges), filled layer by layer.
+        let nb = g.block_first.len();
+        let mut per: Vec<(u32, Vec<u32>)> = vec![(0, Vec::new()); nb];
+        for l in l0..l1 {
+            let mut v = g.level_first[l];
+            while v < g.level_first[l + 1] {
+                let b = g.block_first.partition_point(|&f| f <= old[v as usize]) - 1;
+                let next = g.block_first.get(b + 1).copied().unwrap_or(u32::MAX);
+                let a = v;
+                while v < g.level_first[l + 1] && old[v as usize] >= g.block_first[b] && old[v as usize] < next {
+                    v += 1;
+                }
+                let r = &mut per[b];
+                ensure!(r.1.len() < 2 || r.1[r.1.len() - 2] < g.level_first[l], "block {b}'s nodes in layer {l} are not consecutive new ids");
+                r.0 += v - a;
+                r.1.extend([a, v - a]);
+            }
+        }
+        per.retain(|r| r.0 > 0);
+        per.sort_by_key(|r| std::cmp::Reverse(r.0));
+        let mut group_first = vec![0u32];
+        let mut ranges = Vec::new();
+        for (_, r) in &per {
+            ranges.extend_from_slice(r);
+            group_first.push((ranges.len() / 2) as u32);
+        }
+        let s0 = g.up_first[base as usize] as usize;
+        let s1 = g.up_first[end as usize] as usize;
+        let first: Vec<u32> = (base as usize..=end as usize).map(|v| (g.up_first[v] as usize - s0) as u32).collect();
+        let mut w = Vec::new();
+        let mut eb = Vec::new();
+        for m in 0..g.down.len() {
+            for (di, d) in [Dir::From, Dir::To].into_iter().enumerate() {
+                w.push(self.upload(&bytes_u16(&g.going_down(m, d)[s0..s1]), used));
+                if let Some(bs) = bounds {
+                    eb.push(self.upload(&bytes_u16(&bs[2 * m + di][s0..s1]), used));
+                }
+            }
+        }
+        Ok(Run {
+            groups: per.len() as u32,
+            group_first: self.upload(bytes_u32(&group_first), used),
+            ranges: self.upload(bytes_u32(&ranges), used),
+            base,
+            nodes: (end - base) as usize,
+            first: self.upload(bytes_u32(&first), used),
+            head: self.upload(bytes_u32(if s1 == s0 { &[0] } else { &g.up_head[s0..s1] }), used),
+            w,
+            eb,
+            links: s1 - s0,
+            layers: l0..l1,
+        })
+    }
+
     /// The bytes a graph would take on the device (hot set, state for `p_max` words, entry
     /// bounds when given).
     pub fn estimate(g: &Graph, p_max: u32, bounds: bool) -> u64 {
@@ -883,13 +1043,46 @@ impl Gpu {
                 top_w.push(self.upload(&bytes_u16(&g.going_down(m, d)[..top_links]), &mut used));
             }
         }
+        // Below the top, in layer order: narrow runs (two or more layers, each at most
+        // `RUN_WIDTH` wide, all top layers or all cell layers, links in one binding), and
+        // wide levels between them.
+        let max_links = (self.max_chunk / 4).max(ALIGN_LINKS * 2);
+        // Only on cuda: wgpu's SPIR-V declares the Vulkan memory model but leaves storage
+        // accesses private, so its barriers do not carry one unit's label writes to the
+        // next layer's units (stale labels, measured: mismatches on the randomized HdF set).
+        let run_width = if self.kind == Kind::Cuda { std::env::var("BLOBRT_RUN_WIDTH").ok().and_then(|x| x.parse().ok()).unwrap_or(RUN_WIDTH) } else { 0 };
+        let l_top = g.l_top as usize;
+        let mut old: Vec<u32> = Vec::new();
+        let (mut plan, mut runs, mut wide) = (Vec::new(), Vec::new(), Vec::new());
+        let mut l = top;
+        while l < levels {
+            let mut e = l;
+            while e < levels && g.width(e) <= run_width && !(l < l_top && e == l_top) && g.up_first[g.level_first[e + 1] as usize] - g.up_first[g.level_first[l] as usize] <= max_links {
+                e += 1;
+            }
+            if e - l >= 2 {
+                if old.is_empty() {
+                    old = vec![0u32; n];
+                    for (u, &v) in g.new.iter().enumerate() {
+                        old[v as usize] = u as u32;
+                    }
+                }
+                plan.push(Step::Run(runs.len()));
+                runs.push(self.load_run(g, l, e, &old, bounds, &mut used)?);
+                l = e;
+            } else {
+                plan.push(Step::Level(wide.len()));
+                wide.push(l);
+                l += 1;
+            }
+        }
+        drop(old);
         // Wide levels: chunks of whole levels at aligned offsets.
         let mut rel_first = vec![0u32; n.max(1)];
         let mut at = Vec::new();
         let mut chunk_ranges: Vec<(u64, u64)> = Vec::new(); // link range of the graph per chunk
         let (mut c_start, mut c_len) = (g.up_first[top_nodes as usize], 0u64);
-        let max_links = (self.max_chunk / 4).max(ALIGN_LINKS * 2);
-        for l in top..levels {
+        for &l in &wide {
             let (a, b) = (g.level_first[l] as usize, g.level_first[l + 1] as usize);
             let (s, e) = (g.up_first[a], g.up_first[b]);
             ensure!(e - s < (1 << 31), "level {l} has {} links", e - s);
@@ -903,7 +1096,7 @@ impl Gpu {
                 c_len = 0;
             }
             ensure!(need <= max_links, "level {l}'s {} links exceed a device binding", e - s);
-            at.push(LevelAt { chunk: chunk_ranges.len(), off: c_len, links: (e - s) as u32 });
+            at.push(LevelAt { layer: l, chunk: chunk_ranges.len(), off: c_len, links: (e - s) as u32 });
             c_len += need;
         }
         chunk_ranges.push((c_start, c_len.max(ALIGN_LINKS)));
@@ -912,9 +1105,8 @@ impl Gpu {
             let mut head = vec![0u32; len as usize];
             let mut w: Vec<Vec<u16>> = vec![vec![0xFFFF; len as usize]; pairs];
             let mut eb: Vec<Vec<u16>> = if bounds.is_some() { vec![vec![0xFFFF; len as usize]; pairs] } else { Vec::new() };
-            for (li, la) in at.iter().enumerate().filter(|(_, la)| la.chunk == ci) {
-                let l = top + li;
-                let s = g.up_first[g.level_first[l] as usize] as usize;
+            for la in at.iter().filter(|la| la.chunk == ci) {
+                let s = g.up_first[g.level_first[la.layer] as usize] as usize;
                 let o = la.off as usize;
                 let k = la.links as usize;
                 head[o..o + k].copy_from_slice(&g.up_head[s..s + k]);
@@ -940,7 +1132,7 @@ impl Gpu {
             let mut heavy = Vec::new();
             let mut flat = Vec::new();
             let mut counts = Vec::new();
-            for l in top..levels {
+            for &l in &wide {
                 let first = heavy.len() as u32;
                 let mut count = [0u32; 5];
                 if t != 0 && (g.width(l) as u64) * (lp as u64) <= 65536 {
@@ -983,6 +1175,8 @@ impl Gpu {
             chunks,
             levels: at,
             splits,
+            runs,
+            plan,
             state: self.client.empty(state_bytes as usize),
             mask: self.upload(bytes_u32(&vec![0u32; mask_words]), &mut used),
             bound: self.upload(bytes_u32(&vec![u32::MAX; p_max as usize]), &mut used),
@@ -1015,59 +1209,90 @@ impl Gpu {
             );
         }
         let sp = if lp < 32 { Some(&d.splits[lp.trailing_zeros() as usize]) } else { None };
-        for (li, la) in d.levels.iter().enumerate() {
-            let l = d.top + li;
-            let base = d.level_first[l];
-            let cnt = d.level_first[l + 1] - base;
-            let c = &d.chunks[la.chunk];
-            let head = c.head.clone().offset_start(la.off * 4);
-            let w = c.w[wi].clone().offset_start(la.off * 2);
-            let eb = if prune { c.eb[wi].clone().offset_start(la.off * 2) } else { w.clone() };
-            let (hl, wl) = (la.links as usize, (la.links as usize).div_ceil(2));
-            match sp {
-                Some(s) if s.t != 0 && s.counts[li].iter().any(|&x| x > 0) => {
-                    let items = cnt * lp + (0..5).map(|c| s.counts[li][c] * (32u32 >> c).min(32 / lp) * lp).sum::<u32>();
-                    wide_split::launch(
-                        cl,
-                        grid(items, WIDE_THREADS, self.max_x),
-                        CubeDim::new_1d(WIDE_THREADS),
-                        base,
-                        cnt,
-                        la.links,
-                        li as u32,
-                        arg(&s.table, (s.table.size() / 4) as usize),
-                        arg(&s.heavy, (s.heavy.size() / 4) as usize),
-                        s.t,
-                        arg(&d.rel_first, d.n),
-                        arg(&head, hl),
-                        arg(&w, wl),
-                        arg(&d.state, words),
-                        p,
-                        arg(&d.mask, d.n.div_ceil(32)),
-                        arg(&d.parent, (d.parent.size() / 4) as usize),
-                        arg(&eb, wl),
-                        arg(&d.bound, d.p_max as usize),
-                        d.top_nodes,
-                        lp,
-                        prune,
-                    );
+        for &step in &d.plan {
+            match step {
+                Step::Level(li) => {
+                    let la = &d.levels[li];
+                    let l = la.layer;
+                    let base = d.level_first[l];
+                    let cnt = d.level_first[l + 1] - base;
+                    let c = &d.chunks[la.chunk];
+                    let head = c.head.clone().offset_start(la.off * 4);
+                    let w = c.w[wi].clone().offset_start(la.off * 2);
+                    let eb = if prune { c.eb[wi].clone().offset_start(la.off * 2) } else { w.clone() };
+                    let (hl, wl) = (la.links as usize, (la.links as usize).div_ceil(2));
+                    match sp {
+                        Some(s) if s.t != 0 && s.counts[li].iter().any(|&x| x > 0) => {
+                            let items = cnt * lp + (0..5).map(|c| s.counts[li][c] * (32u32 >> c).min(32 / lp) * lp).sum::<u32>();
+                            wide_split::launch(
+                                cl,
+                                grid(items, WIDE_THREADS, self.max_x),
+                                CubeDim::new_1d(WIDE_THREADS),
+                                base,
+                                cnt,
+                                la.links,
+                                li as u32,
+                                arg(&s.table, (s.table.size() / 4) as usize),
+                                arg(&s.heavy, (s.heavy.size() / 4) as usize),
+                                s.t,
+                                arg(&d.rel_first, d.n),
+                                arg(&head, hl),
+                                arg(&w, wl),
+                                arg(&d.state, words),
+                                p,
+                                arg(&d.mask, d.n.div_ceil(32)),
+                                arg(&d.parent, (d.parent.size() / 4) as usize),
+                                arg(&eb, wl),
+                                arg(&d.bound, d.p_max as usize),
+                                d.top_nodes,
+                                lp,
+                                prune,
+                            );
+                        }
+                        _ => {
+                            wide_level::launch(
+                                cl,
+                                grid(cnt * lp, WIDE_THREADS, self.max_x),
+                                CubeDim::new_1d(WIDE_THREADS),
+                                base,
+                                cnt,
+                                la.links,
+                                arg(&d.rel_first, d.n),
+                                arg(&head, hl),
+                                arg(&w, wl),
+                                arg(&d.state, words),
+                                p,
+                                arg(&d.mask, d.n.div_ceil(32)),
+                                arg(&d.parent, (d.parent.size() / 4) as usize),
+                                arg(&eb, wl),
+                                arg(&d.bound, d.p_max as usize),
+                                d.top_nodes,
+                                lp,
+                                prune,
+                            );
+                        }
+                    }
                 }
-                _ => {
-                    wide_level::launch(
+                Step::Run(ri) => {
+                    let r = &d.runs[ri];
+                    let eb = if prune { &r.eb[wi] } else { &r.w[wi] };
+                    let wl = r.links.div_ceil(2);
+                    narrow_run::launch(
                         cl,
-                        grid(cnt * lp, WIDE_THREADS, self.max_x),
-                        CubeDim::new_1d(WIDE_THREADS),
-                        base,
-                        cnt,
-                        la.links,
-                        arg(&d.rel_first, d.n),
-                        arg(&head, hl),
-                        arg(&w, wl),
+                        grid(r.groups, 1, self.max_x),
+                        CubeDim::new_1d(RUN_THREADS),
+                        r.groups,
+                        arg(&r.group_first, r.groups as usize + 1),
+                        arg(&r.ranges, (r.ranges.size() / 4) as usize),
+                        r.base,
+                        arg(&r.first, r.nodes + 1),
+                        arg(&r.head, r.links),
+                        arg(&r.w[wi], wl),
                         arg(&d.state, words),
                         p,
                         arg(&d.mask, d.n.div_ceil(32)),
                         arg(&d.parent, (d.parent.size() / 4) as usize),
-                        arg(&eb, wl),
+                        arg(eb, wl),
                         arg(&d.bound, d.p_max as usize),
                         d.top_nodes,
                         lp,

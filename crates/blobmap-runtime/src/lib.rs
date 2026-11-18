@@ -12,6 +12,7 @@
 pub mod engine;
 pub mod gpu;
 pub mod graph;
+pub mod matrix;
 pub mod heads;
 pub mod ops;
 pub mod runtime;

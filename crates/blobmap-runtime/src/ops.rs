@@ -210,6 +210,28 @@ impl Runtime {
         Ok(Ok(idx.iter().map(|&i| col.get(i)).collect()))
     }
 
+    /// `column_at` from each source alone (start 0) at the same targets, as one block: row s
+    /// of `targets.len()` times (`INF` for BEYOND) is `column_at([sources[s]], ...)`. The first
+    /// source or target a `column_at` would refuse refuses the block.
+    pub fn columns_at(&self, sources: &[String], mode: &str, dir: Dir, targets: &[String]) -> Answer<Vec<u16>> {
+        let m = self.mode(mode)?;
+        let mut src = Vec::with_capacity(sources.len());
+        for s in sources {
+            match self.source(s, m) {
+                Ok(i) => src.push(i),
+                Err(r) => return Ok(Err(r)),
+            }
+        }
+        let mut idx = Vec::with_capacity(targets.len());
+        for t in targets {
+            match self.resolve(t) {
+                Ok(i) => idx.push(i),
+                Err(reason) => return Ok(Err(Refusal { reason, id: t.clone() })),
+            }
+        }
+        Ok(Ok(self.columns_at_many(&src, m, dir, &idx)?))
+    }
+
     /// The IDs within t seconds, sorted.
     pub fn isochrone(&self, sources: &[Source], t: u64, mode: &str, dir: Dir) -> Answer<Vec<Id>> {
         let m = self.mode(mode)?;

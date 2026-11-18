@@ -32,6 +32,11 @@ pub struct Graph {
     pub turn_cost: Vec<u16>,
     pub copy_first: Vec<u32>,
     pub copies: Vec<u32>,
+    /// The top block's level count (0 for a whole component), and each block's first layout
+    /// id (FORMAT §5.2): a cell's links stay in the cell or go to the top, and its level l is
+    /// layer `l_top + l`.
+    pub l_top: u32,
+    pub block_first: Vec<u32>,
 }
 
 impl Graph {
@@ -120,7 +125,13 @@ impl Graph {
         }
         ensure!(up_first.len() == n + 1, "{f} component {x}: blocks cover {} of {n} nodes", up_first.len() - 1);
         let layers = format_layers(m, t, x)?;
-        renumber(fam, n, up_first, up_head, up, down, arc_first, arc_head, turn_cost, copy_first, copies, layers)
+        let blocks = t.block_first[x as usize] as usize..t.block_first[x as usize + 1] as usize;
+        let l_top = blocks.clone().find(|&b| t.b_kind[b] == 1).map_or(0, |b| t.b_levels[b]);
+        let block_first = blocks.map(|b| t.b_id_first[b] - base).collect();
+        let mut g = renumber(fam, n, up_first, up_head, up, down, arc_first, arc_head, turn_cost, copy_first, copies, layers)?;
+        g.l_top = l_top;
+        g.block_first = block_first;
+        Ok(g)
     }
 
     pub fn levels(&self) -> usize {
@@ -303,7 +314,7 @@ pub(crate) fn renumber(
     };
     let g_up: Vec<Vec<u16>> = up.into_iter().map(permute).collect();
     let g_down: Vec<Vec<u16>> = down.into_iter().map(permute).collect();
-    Ok(Graph { fam, n, level_first, up_first: g_first, up_head: g_head, down: g_down, up: g_up, new, parent, arc_first, arc_head, turn_cost, copy_first, copies })
+    Ok(Graph { fam, n, level_first, up_first: g_first, up_head: g_head, down: g_down, up: g_up, new, parent, arc_first, arc_head, turn_cost, copy_first, copies, l_top: 0, block_first: vec![0] })
 }
 
 thread_local! {

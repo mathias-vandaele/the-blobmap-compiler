@@ -13,6 +13,7 @@ use anyhow::{Result, anyhow, bail};
 use crate::gpu::{DevGraph, DevHeads, DevIds, Gpu, HeadCol, Kind};
 use crate::graph::Graph;
 use crate::heads::{Labels, Times};
+use crate::matrix::{DevMatrix, MatrixIn, MatrixOut};
 use crate::sweep::{Bounds, Column, Key, all_bounds, cpu_down};
 use crate::vocab::{Dir, Mode};
 
@@ -102,9 +103,19 @@ struct Job {
     reply: Reply,
 }
 
+/// Columns at one list of targets for many sources, as one device job (`matrix`).
+struct MatJob {
+    key: Key,
+    comp: Arc<Comp>,
+    input: MatrixIn,
+    timed: bool,
+    reply: mpsc::Sender<Result<MatrixOut, String>>,
+}
+
 #[derive(Default)]
 struct Queue {
     jobs: VecDeque<Job>,
+    mats: VecDeque<MatJob>,
     stop: bool,
 }
 
@@ -134,6 +145,12 @@ pub struct Stats {
     pub dev_heads: u64,
     pub heads_s: f64,
     pub id_loads: u64,
+    /// Batches run again after a device out of memory, everything evicted first.
+    pub oom_retries: u64,
+    /// Matrix jobs, their hierarchies' uploads, and their seconds on the worker.
+    pub matrices: u64,
+    pub matrix_loads: u64,
+    pub matrix_s: f64,
 }
 
 pub struct GpuConfig {
@@ -180,6 +197,17 @@ impl GpuEngine {
     }
 }
 
+impl GpuEngine {
+    /// Queues a matrix job (it runs before queued sweeps); `timed` syncs between phases.
+    pub fn matrix(&self, key: Key, comp: Arc<Comp>, input: MatrixIn, timed: bool) -> mpsc::Receiver<Result<MatrixOut, String>> {
+        let (tx, rx) = mpsc::channel();
+        let (m, cv) = &*self.q;
+        m.lock().unwrap().mats.push_back(MatJob { key, comp, input, timed, reply: tx });
+        cv.notify_one();
+        rx
+    }
+}
+
 impl Drop for GpuEngine {
     fn drop(&mut self) {
         let (m, cv) = &*self.q;
@@ -200,11 +228,14 @@ struct Loaded {
 /// ID tables unused for this many batches give way to another one.
 const STALE: u64 = 64;
 
+#[allow(clippy::map_entry)]
 fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Stats>) {
     let p_max = cfg.b_max.div_ceil(2).max(1);
     let mut loaded: BTreeMap<(u8, u32), Loaded> = BTreeMap::new();
     // Per mode (family, metric), its ID table.
     let mut ids: BTreeMap<(u8, u8), (DevIds, u64)> = BTreeMap::new();
+    // Per component, its hierarchy for matrix jobs.
+    let mut mats: BTreeMap<(u8, u32), (DevMatrix, u64)> = BTreeMap::new();
     let mut used = 0u64;
     let mut clock = 0u64;
     let sync_cleanup = |gpu: &Gpu| -> Result<()> {
@@ -212,12 +243,54 @@ fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Sta
         gpu.client.memory_cleanup().map_err(|e| anyhow!("memory cleanup: {e:?}"))
     };
     loop {
-        // The oldest job and every queued one with its key, up to b_max columns.
+        // A matrix job first; else the oldest job and every queued one with its key, up to
+        // b_max columns.
         let batch: Vec<Job> = {
             let (m, cv) = q;
             let mut g = m.lock().unwrap();
-            while g.jobs.is_empty() && !g.stop {
+            while g.jobs.is_empty() && g.mats.is_empty() && !g.stop {
                 g = cv.wait(g).unwrap();
+            }
+            if let Some(mj) = g.mats.pop_front() {
+                drop(g);
+                clock += 1;
+                let t = std::time::Instant::now();
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<MatrixOut> {
+                    let ck = (mj.key.fam, mj.key.component);
+                    let g = &mj.comp.g;
+                    if !mats.contains_key(&ck) {
+                        let need = DevMatrix::estimate(g) + g.links() as u64 * 4;
+                        while used + need > cfg.budget {
+                            let Some((k, _)) = loaded.iter().min_by_key(|(_, l)| l.used_at).map(|(&k, l)| (k, l.used_at)) else { break };
+                            let l = loaded.remove(&k).unwrap();
+                            used -= l.dev.bytes + l.heads.as_ref().map_or(0, |h| h.bytes);
+                            stats.lock().unwrap().evictions += 1;
+                            sync_cleanup(&gpu)?;
+                        }
+                        if used + need > cfg.budget {
+                            bail!("component {}'s hierarchy for matrices needs {:.2} GiB on the device, over the {:.2} GiB budget", mj.key.component, need as f64 / (1u64 << 30) as f64, cfg.budget as f64 / (1u64 << 30) as f64);
+                        }
+                        let dm = gpu.load_matrix(g)?;
+                        used += need;
+                        let mut s = stats.lock().unwrap();
+                        s.matrix_loads += 1;
+                        s.load_s += t.elapsed().as_secs_f64();
+                        s.vram_used = used;
+                        s.vram_peak = s.vram_peak.max(used);
+                        mats.insert(ck, (dm, clock));
+                    }
+                    let (dm, at) = mats.get_mut(&ck).unwrap();
+                    *at = clock;
+                    let dir = if mj.key.dir == 0 { Dir::From } else { Dir::To };
+                    gpu.matrix(dm, g, mj.key.metric as usize, dir, &mj.input, mj.timed)
+                }))
+                .unwrap_or_else(|e| Err(anyhow!("GPU panic: {}", e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default())));
+                let mut s = stats.lock().unwrap();
+                s.matrices += 1;
+                s.matrix_s += t.elapsed().as_secs_f64();
+                drop(s);
+                let _ = mj.reply.send(r.map_err(|e| format!("{e:#}")));
+                continue;
             }
             if g.jobs.is_empty() {
                 // Free the device buffers and wait for the device, so that nothing is left
@@ -225,6 +298,7 @@ fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Sta
                 drop(g);
                 loaded.clear();
                 ids.clear();
+                mats.clear();
                 let _ = cubecl::future::block_on(gpu.client.sync());
                 return;
             }
@@ -248,6 +322,11 @@ fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Sta
         clock += 1;
         // A panic in CubeCL or a kernel becomes this batch's error: the worker lives on, so
         // that no later request waits on a queue nobody drains.
+        // A device out of memory beyond the budget's accounting (the driver's context, other
+        // processes, the pool's slack): everything leaves the device and the batch runs once
+        // more with only what it needs.
+        let mut tries = 0;
+        let r = loop {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Vec<ColOut>> {
             let ck = (key.fam, key.component);
             let mk = (key.fam, key.metric);
@@ -370,6 +449,21 @@ fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Sta
             Ok(out)
         }))
         .unwrap_or_else(|e| Err(anyhow!("GPU panic: {}", e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default())));
+        match &r {
+            Err(e) if tries == 0 && format!("{e:#}").contains("out of device memory") => {
+                tries += 1;
+                loaded.clear();
+                ids.clear();
+                mats.clear();
+                used = 0;
+                let _ = sync_cleanup(&gpu);
+                let mut s = stats.lock().unwrap();
+                s.oom_retries += 1;
+                s.vram_used = 0;
+            }
+            _ => break r,
+        }
+        };
         match r {
             Ok(mut out) => {
                 for j in batch {

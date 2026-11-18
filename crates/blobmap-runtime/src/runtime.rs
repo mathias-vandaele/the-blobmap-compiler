@@ -16,6 +16,7 @@ use crate::engine::{ColOut, Comp, GpuConfig, GpuEngine, JobHeads, ModeRef, cpu_s
 use crate::gpu::{HeadCol, source_rows};
 use crate::gpu::Kind;
 use crate::graph::{Graph, meet, upward};
+use crate::matrix::MatrixIn;
 use crate::heads::{self, Labels, Times, Want};
 use crate::sweep::{Column, DEAD, Key, dir_index};
 use crate::vocab::{self, Dir, Fam, Family, Mode, Reason, Vocab};
@@ -56,11 +57,13 @@ pub struct Options {
     pub prune: bool,
     /// Per family (car, active), whether its sweeps go to the GPU (else the CPU).
     pub gpu_families: [bool; 2],
+    /// Measurement: a device sync between a matrix job's phases, to time each.
+    pub matrix_phases: bool,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { backend: Backend::Auto, gpu_min_nodes: 1 << 16, b_max: 16, vram_budget: 14 << 30, prune: true, gpu_families: [true, true] }
+        Options { backend: Backend::Auto, gpu_min_nodes: 1 << 16, b_max: 16, vram_budget: 14 << 30, prune: true, gpu_families: [true, true], matrix_phases: false }
     }
 }
 
@@ -102,6 +105,11 @@ pub struct Profile {
     pub heads_minflt: AtomicU64,
     pub heads_majflt: AtomicU64,
     pub heads_threads: AtomicU64,
+    /// `columns_at_many` on the device, summed (seconds): jobs, then the host's input, the
+    /// job's phases (upload, union, upward, sweep, heads, read-back; timed only with
+    /// `matrix_phases`), the worker's whole job, the host's output; the last job's union nodes
+    /// and sweep launches.
+    pub matrix: Mutex<[f64; 12]>,
 }
 
 /// The process's page faults so far: minor, major (/proc/self/stat).
@@ -270,7 +278,9 @@ impl Runtime {
         let mut lists: Vec<Option<Vec<u32>>> = (0..parts.len()).map(|_| None).collect();
         let mut pending = Vec::new();
         let mut on_cpu = Vec::new();
-        for ((key, at), idx) in &groups {
+        // At most b_max columns a job (the worker batches jobs up to that, never splits one).
+        let b_max = self.opts.b_max.max(1) as usize;
+        for ((key, at), idx) in groups.iter().flat_map(|(k, all)| all.chunks(b_max).map(move |c| (k, c.to_vec()))) {
             let comp = &parts[idx[0]].comp;
             match &self.gpu {
                 Some(gpu) if comp.g.n >= self.opts.gpu_min_nodes && self.opts.gpu_families[key.fam as usize] => {
@@ -408,6 +418,145 @@ impl Runtime {
         pr.heads_majflt.fetch_add(f1.1 - f0.1, Relaxed);
         pr.heads.fetch_add(since(t), Relaxed);
         Ok(out)
+    }
+
+    /// Columns at one list of targets for many sources: row s (of `targets.len()` times,
+    /// `INF` for BEYOND) is the column from `sources[s]` at start 0, at `targets`, exactly as
+    /// `columns` answers a column at listed targets. On a GPU, one matrix job per component of
+    /// the sources (`matrix`); else, or past a job's limits, one column per source.
+    pub fn columns_at_many(&self, sources: &[u32], mode: usize, dir: Dir, targets: &[u32]) -> Result<Vec<u16>> {
+        let mv = &self.vocab.modes[mode];
+        let nt = targets.len();
+        let mut out = vec![INF; sources.len() * nt];
+        if nt == 0 {
+            return Ok(out);
+        }
+        let mut by: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        for (r, &s) in sources.iter().enumerate() {
+            let x = mv.component(s as usize);
+            ensure!(x != NONE, "a column source must be served (internal index {s})");
+            by.entry(x).or_default().push(r);
+        }
+        for (x, rows) in by {
+            let comp = self.comp(mv.fam, x)?;
+            let on_gpu = self.gpu.is_some() && comp.g.n >= self.opts.gpu_min_nodes && self.opts.gpu_families[mv.fam as usize] && rows.len() <= 65535;
+            if on_gpu && self.matrix_job(&comp, mv, x, dir, sources, &rows, targets, &mut out)? {
+                continue;
+            }
+            let mut sorted = targets.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            let at = Arc::new(sorted);
+            let reqs: Vec<ColReq> = rows.iter().map(|&r| ColReq { sources: vec![Src { id: sources[r], start: 0 }], mode, dir, bound: INF, want: Want::none(), targets: Some(at.clone()) }).collect();
+            for (&r, c) in rows.iter().zip(self.columns(&reqs)?) {
+                for (j, &i) in targets.iter().enumerate() {
+                    out[r * nt + j] = c.get(i);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// One matrix job: the rows `rows` of `out`, sources all in component x. False when the
+    /// job could not answer (an upward chain past its buffer).
+    #[allow(clippy::too_many_arguments)]
+    fn matrix_job(&self, comp: &Arc<Comp>, mv: &Mode, x: u32, dir: Dir, sources: &[u32], rows: &[usize], targets: &[u32], out: &mut [u16]) -> Result<bool> {
+        let t0 = Instant::now();
+        let g = &comp.g;
+        let (first, n) = (mv.first(x), g.n as u32);
+        let nt = targets.len();
+        let koff = (dir == Dir::To) as usize;
+        let member = |i: u32| {
+            let nd = mv.raw_node(i as usize);
+            let v = if nd[0] != NONE { nd[0] } else { nd[1] };
+            v != NONE && v >= first && v - first < n
+        };
+        let mut job = MatrixIn { seeds_first: vec![0], seeds: Vec::new(), need: Vec::new(), hn_first: vec![0], terms: Vec::new(), tgt: Vec::with_capacity(4 * nt) };
+        let mut ss: Vec<(u32, u16)> = Vec::new();
+        for &r in rows {
+            ss.clear();
+            seed(g, mv, &Src { id: sources[r], start: 0 }, dir, &mut |v, t| ss.push((v, t)));
+            ss.sort_unstable();
+            ss.dedup_by_key(|s| s.0);
+            for &(v, t) in &ss {
+                job.seeds.extend([v, t as u32]);
+            }
+            job.seeds_first.push((job.seeds.len() / 2) as u32);
+        }
+        // The targets' layout nodes, numbered from the component's first; their terms.
+        let mut tn: Vec<u32> = targets.iter().filter(|&&i| member(i)).flat_map(|&i| mv.raw_node(i as usize)).filter(|&v| v != NONE).map(|v| v - first).collect();
+        tn.sort_unstable();
+        tn.dedup();
+        for &u in &tn {
+            match (mv.fam, dir) {
+                (Fam::Car, Dir::From) => g.arrivals(u).for_each(|a| job.terms.extend([g.new[a as usize], 0])),
+                (Fam::Car, Dir::To) => g.arcs(u).for_each(|a| job.terms.extend([g.new[g.arc_head[a] as usize], g.turn_cost[a] as u32])),
+                (Fam::Active, _) => job.terms.extend([g.new[u as usize], 0]),
+            }
+            job.hn_first.push((job.terms.len() / 2) as u32);
+        }
+        job.need = job.terms.iter().step_by(2).copied().collect();
+        for &i in targets {
+            if member(i) {
+                let (nd, off) = (mv.raw_node(i as usize), mv.off(i as usize));
+                let j = |v: u32| if v == NONE { NONE } else { tn.binary_search(&(v - first)).unwrap() as u32 };
+                job.tgt.extend([j(nd[0]), j(nd[1]), off[koff] as u32, off[2 + koff] as u32]);
+            } else {
+                job.tgt.extend([NONE, NONE, 0, 0]);
+            }
+        }
+        let t1 = Instant::now();
+        let key = Key { fam: mv.fam as u8, component: x, metric: mv.metric as u8, dir: dir_index(dir) as u8 };
+        let rx = self.gpu.as_ref().unwrap().matrix(key, comp.clone(), job, self.opts.matrix_phases);
+        let r = rx.recv().map_err(|_| anyhow!("the GPU worker ended"))?.map_err(|e| anyhow!("{e}"))?;
+        let t2 = Instant::now();
+        if r.overflow {
+            return Ok(false);
+        }
+        if r.split {
+            ensure!(rows.len() > 1, "one source's labels on a union of {} nodes exceed a device binding", r.union);
+            let (a, b) = rows.split_at(rows.len() / 2);
+            return Ok(self.matrix_job(comp, mv, x, dir, sources, a, targets, out)? && self.matrix_job(comp, mv, x, dir, sources, b, targets, out)?);
+        }
+        // Rows of u16 pairs, little-endian: the first nt halves of each.
+        let halves: &[u16] = bytemuck::cast_slice(&r.words);
+        for (ri, &row) in rows.iter().enumerate() {
+            out[row * nt..(row + 1) * nt].copy_from_slice(&halves[ri * 2 * r.tw..ri * 2 * r.tw + nt]);
+        }
+        // Sources and targets on one piece: the direct term, or start 0 for the same ID
+        // (`heads::time_of`).
+        let mut by_piece: Vec<(([u32; 2], u32), usize)> = rows.iter().map(|&r| ((mv.raw_node(sources[r] as usize), mv.road(sources[r] as usize)), r)).collect();
+        by_piece.sort_unstable();
+        for (j, &i) in targets.iter().enumerate() {
+            if !member(i) {
+                continue;
+            }
+            let key = (mv.raw_node(i as usize), mv.road(i as usize));
+            let from = by_piece.partition_point(|b| b.0 < key);
+            for &(_, r) in by_piece[from..].iter().take_while(|b| b.0 == key) {
+                let s = sources[r];
+                let d = if s == i {
+                    0
+                } else if dir == Dir::From {
+                    direct(mv, s as usize, i as usize)
+                } else {
+                    direct(mv, i as usize, s as usize)
+                };
+                let o = &mut out[r * nt + j];
+                *o = (*o).min(d);
+            }
+        }
+        let mut m = self.prof.matrix.lock().unwrap();
+        m[0] += 1.0;
+        m[1] += (t1 - t0).as_secs_f64();
+        for k in 0..6 {
+            m[2 + k] += r.phases[k];
+        }
+        m[8] += (t2 - t1).as_secs_f64();
+        m[9] += t2.elapsed().as_secs_f64();
+        m[10] = r.union as f64;
+        m[11] = r.launches as f64;
+        Ok(true)
     }
 
     pub fn column(&self, sources: &[Src], mode: usize, dir: Dir, bound: u16, want: Want) -> Result<Times> {
