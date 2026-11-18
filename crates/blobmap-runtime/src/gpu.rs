@@ -129,7 +129,7 @@ fn copy_words(src: &[u32], count: u32, dst: &mut [u32]) {
 /// The narrow top, one cube per word (two columns), labels resident in shared memory; a
 /// thread takes two arcs per round and a plane's arcs merge in one reduction when they share
 /// a tail (research `top_resident<false, MERGE_WARP>`).
-#[cube(launch)]
+#[cube(launch_unchecked)]
 fn top_resident(
     level_first: &[u32],
     arc_first: &[u32],
@@ -241,7 +241,7 @@ fn top_resident(
 /// One wide level, `lp` lanes per node, each lane owning words q ≡ lane (mod lp). `up_head`,
 /// `w` and `eb` are the level's slices; `rel_first` is indexed by node, relative to the
 /// level, with `links` its link count.
-#[cube(launch)]
+#[cube(launch_unchecked)]
 fn wide_level(
     base: u32,
     cnt: u32,
@@ -308,7 +308,7 @@ fn wide_level(
 /// (32, 16, 8, 4, 2 lane groups of `lp` lanes, a group taking every G-th arc), then every
 /// node with `lp` lanes, skipping those of more than `skip_t` arcs. `split` holds, per wide
 /// level, the first heavy node and the five class counts; `li` is this level's row there.
-#[cube(launch)]
+#[cube(launch_unchecked)]
 fn wide_split(
     base: u32,
     cnt: u32,
@@ -997,7 +997,7 @@ impl Gpu {
         let lp = lanes_for(p);
         let words = d.n * p as usize;
         if d.top > 0 {
-            top_resident::launch(
+            unsafe { top_resident::launch_unchecked(
                 cl,
                 CubeCount::Static(p, 1, 1),
                 CubeDim::new_1d(self.top_threads),
@@ -1012,7 +1012,7 @@ impl Gpu {
                 (d.max_top_level as usize).max(1),
                 (d.top_nodes as usize).max(1),
                 self.merge,
-            );
+            ) };
         }
         let sp = if lp < 32 { Some(&d.splits[lp.trailing_zeros() as usize]) } else { None };
         for (li, la) in d.levels.iter().enumerate() {
@@ -1027,7 +1027,7 @@ impl Gpu {
             match sp {
                 Some(s) if s.t != 0 && s.counts[li].iter().any(|&x| x > 0) => {
                     let items = cnt * lp + (0..5).map(|c| s.counts[li][c] * (32u32 >> c).min(32 / lp) * lp).sum::<u32>();
-                    wide_split::launch(
+                    unsafe { wide_split::launch_unchecked(
                         cl,
                         grid(items, WIDE_THREADS, self.max_x),
                         CubeDim::new_1d(WIDE_THREADS),
@@ -1050,10 +1050,10 @@ impl Gpu {
                         d.top_nodes,
                         lp,
                         prune,
-                    );
+                    ) };
                 }
                 _ => {
-                    wide_level::launch(
+                    unsafe { wide_level::launch_unchecked(
                         cl,
                         grid(cnt * lp, WIDE_THREADS, self.max_x),
                         CubeDim::new_1d(WIDE_THREADS),
@@ -1072,7 +1072,7 @@ impl Gpu {
                         d.top_nodes,
                         lp,
                         prune,
-                    );
+                    ) };
                 }
             }
         }
