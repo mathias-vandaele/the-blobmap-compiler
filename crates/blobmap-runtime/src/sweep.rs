@@ -115,7 +115,7 @@ pub fn cpu_down(g: &Graph, metric: usize, dir: Dir, c: &Column, bounds: Option<&
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{relayer, upward};
+    use crate::graph::{renumber, upward};
     use crate::vocab::Fam;
     use std::collections::BTreeSet;
 
@@ -153,7 +153,8 @@ mod tests {
         }
         let mut w = |m: u64| -> Vec<u16> { (0..head.len()).map(|_| if rnd(40) == 0 { 65000 } else { rnd(m) as u16 }).collect() };
         let (u, d) = (w(400), w(400));
-        relayer(Fam::Active, n, first, head, vec![u], vec![d], vec![0], Vec::new(), Vec::new(), vec![0], Vec::new())
+        // One node a level: every upper neighbour has a smaller id.
+        renumber(Fam::Active, n, first, head, vec![u], vec![d], vec![0], Vec::new(), Vec::new(), vec![0], Vec::new(), (0..n as u32).collect()).unwrap()
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! One component of a family, as the runtime sweeps it: its hierarchy (hot) renumbered
-//! top-first by longest-path level, so that a level is the widest set of nodes a downward
-//! sweep can settle at once, with rows sorted; and what the heads read (warm): CAR exit
+//! top-first by the format's levels (FORMAT §5.2), so that a level is a set of nodes a
+//! downward sweep can settle at once, with rows sorted; and what the heads read (warm): CAR exit
 //! turns and via-way copies, in the component's own layout ids (FORMAT §5, §8).
 
 use std::collections::BinaryHeap;
@@ -35,9 +35,9 @@ pub struct Graph {
 }
 
 impl Graph {
-    /// A component, layered by longest path from the top, or by the format's own levels
-    /// (`format_levels`: the top block's, then every cell's level l together).
-    pub fn load(m: &Model, t: &Family, x: u32, format_levels: bool) -> Result<Graph> {
+    /// A component, layered by the format's own levels: the top block's, then every cell's
+    /// level l together.
+    pub fn load(m: &Model, t: &Family, x: u32) -> Result<Graph> {
         let fam = t.fam;
         let f = fam.name();
         ensure!((x as usize) < t.components(), "{f} component {x} does not exist");
@@ -50,7 +50,7 @@ impl Graph {
         let word = if fam == Fam::Car { "turn" } else { "road" };
         let nm = t.metrics.len();
         // Exact sizes first: grown by doubling, a continent's largest component would hold
-        // up to twice its links, more than the relayered copy.
+        // up to twice its links, more than the renumbered copy.
         let (mut links, mut arcs, mut ncopies) = (0usize, 0usize, 0usize);
         for b in t.block_first[x as usize] as usize..t.block_first[x as usize + 1] as usize {
             let p = format!("road/{f}/p{}/", t.b_pack[b]);
@@ -119,8 +119,8 @@ impl Graph {
             }
         }
         ensure!(up_first.len() == n + 1, "{f} component {x}: blocks cover {} of {n} nodes", up_first.len() - 1);
-        let layers = if format_levels { Some(format_layers(m, t, x)?) } else { None };
-        Ok(relayer_by(fam, n, up_first, up_head, up, down, arc_first, arc_head, turn_cost, copy_first, copies, layers))
+        let layers = format_layers(m, t, x)?;
+        renumber(fam, n, up_first, up_head, up, down, arc_first, arc_head, turn_cost, copy_first, copies, layers)
     }
 
     pub fn levels(&self) -> usize {
@@ -226,9 +226,9 @@ pub fn format_layers(m: &Model, t: &Family, x: u32) -> Result<Vec<u32>> {
     Ok(layer)
 }
 
-#[cfg(test)]
+/// Renumbers by layer, top first; every upper neighbour of a node must be in a smaller layer.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn relayer(
+pub(crate) fn renumber(
     fam: Fam,
     n: usize,
     up_first: Vec<u64>,
@@ -240,49 +240,15 @@ pub(crate) fn relayer(
     turn_cost: Vec<u16>,
     copy_first: Vec<u32>,
     copies: Vec<u32>,
-) -> Graph {
-    relayer_by(fam, n, up_first, up_head, up, down, arc_first, arc_head, turn_cost, copy_first, copies, None)
-}
-
-/// Renumbers by layer, the longest path from the top unless `layers` are given (each
-/// upper neighbour must be in a smaller layer).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn relayer_by(
-    fam: Fam,
-    n: usize,
-    up_first: Vec<u64>,
-    up_head: Vec<u32>,
-    up: Vec<Vec<u16>>,
-    down: Vec<Vec<u16>>,
-    arc_first: Vec<u64>,
-    arc_head: Vec<u32>,
-    turn_cost: Vec<u16>,
-    copy_first: Vec<u32>,
-    copies: Vec<u32>,
-    layers: Option<Vec<u32>>,
-) -> Graph {
+    depth: Vec<u32>,
+) -> Result<Graph> {
     let row = |v: usize| up_first[v] as usize..up_first[v + 1] as usize;
-    let depth = match layers {
-        Some(l) => {
-            for v in 0..n {
-                for k in row(v) {
-                    assert!(l[up_head[k] as usize] < l[v], "node {v}'s upper neighbour {} is not in a smaller layer", up_head[k]);
-                }
-            }
-            l
+    ensure!(depth.len() == n, "{} levels: {} layers for {n} nodes", fam.name(), depth.len());
+    for v in 0..n {
+        for k in row(v) {
+            ensure!(depth[up_head[k] as usize] < depth[v], "{} levels: node {v}'s upper neighbour {} is not in a smaller level", fam.name(), up_head[k]);
         }
-        None => {
-            let mut depth = vec![0u32; n];
-            for v in 0..n {
-                let mut d = 0;
-                for k in row(v) {
-                    d = d.max(depth[up_head[k] as usize] + 1);
-                }
-                depth[v] = d;
-            }
-            depth
-        }
-    };
+    }
     let levels = depth.iter().max().map_or(0, |&d| d as usize + 1);
     let mut level_first = vec![0u32; levels + 1];
     for &d in &depth {
@@ -313,7 +279,7 @@ pub(crate) fn relayer_by(
     for i in 0..n {
         let v = old[i] as usize;
         let rv = row(v);
-        assert!(rv.len() <= 1 << 16, "a row of {} links", rv.len());
+        ensure!(rv.len() <= 1 << 16, "a row of {} links", rv.len());
         r.clear();
         r.extend(rv.clone().map(|k| (new[up_head[k] as usize], (k - rv.start) as u16)));
         r.sort_unstable();
@@ -337,7 +303,7 @@ pub(crate) fn relayer_by(
     };
     let g_up: Vec<Vec<u16>> = up.into_iter().map(permute).collect();
     let g_down: Vec<Vec<u16>> = down.into_iter().map(permute).collect();
-    Graph { fam, n, level_first, up_first: g_first, up_head: g_head, down: g_down, up: g_up, new, parent, arc_first, arc_head, turn_cost, copy_first, copies }
+    Ok(Graph { fam, n, level_first, up_first: g_first, up_head: g_head, down: g_down, up: g_up, new, parent, arc_first, arc_head, turn_cost, copy_first, copies })
 }
 
 thread_local! {
