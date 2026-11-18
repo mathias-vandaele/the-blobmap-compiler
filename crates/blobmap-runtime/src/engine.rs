@@ -228,6 +228,12 @@ struct Loaded {
 /// ID tables unused for this many batches give way to another one.
 const STALE: u64 = 64;
 
+/// A device out of memory, as cuda (at the allocation) or wgpu (at the read of a buffer
+/// whose allocation failed) reports it through CubeCL.
+fn oom(msg: &str) -> bool {
+    msg.contains("out of device memory") || msg.contains("The bytes were never written")
+}
+
 #[allow(clippy::map_entry)]
 fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Stats>) {
     let p_max = cfg.b_max.div_ceil(2).max(1);
@@ -450,7 +456,7 @@ fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Sta
         }))
         .unwrap_or_else(|e| Err(anyhow!("GPU panic: {}", e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default())));
         match &r {
-            Err(e) if tries == 0 && format!("{e:#}").contains("out of device memory") => {
+            Err(e) if tries == 0 && oom(&format!("{e:#}")) => {
                 tries += 1;
                 loaded.clear();
                 ids.clear();
