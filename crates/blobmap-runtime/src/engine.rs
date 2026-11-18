@@ -234,6 +234,13 @@ fn oom(msg: &str) -> bool {
     msg.contains("out of device memory") || msg.contains("The bytes were never written")
 }
 
+/// What CubeCL's pools hold on the device: the buffers in use, their padding, and the
+/// pages freed buffers left in the pools. The budget's own accounting counts only the
+/// first; a sweep's transient buffers and the pools' slack count here too.
+fn reserved(gpu: &Gpu) -> u64 {
+    gpu.client.memory_report(cubecl_runtime::memory_management::MemoryScope::Device).usage().bytes_reserved
+}
+
 #[allow(clippy::map_entry)]
 fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Stats>) {
     let p_max = cfg.b_max.div_ceil(2).max(1);
@@ -266,7 +273,7 @@ fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Sta
                     let g = &mj.comp.g;
                     if !mats.contains_key(&ck) {
                         let need = DevMatrix::estimate(g) + g.links() as u64 * 4;
-                        while used + need > cfg.budget {
+                        while used.max(reserved(&gpu)) + need > cfg.budget {
                             if let Some(k) = ids.iter().min_by_key(|(_, t)| t.1).map(|(&k, _)| k) {
                                 used -= ids.remove(&k).unwrap().0.bytes;
                                 sync_cleanup(&gpu)?;
@@ -341,6 +348,11 @@ fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Sta
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Vec<ColOut>> {
             let ck = (key.fam, key.component);
             let mk = (key.fam, key.metric);
+            // The pools grown past the budget by earlier sweeps' transient buffers give their
+            // free pages back before this one allocates.
+            if reserved(&gpu) > cfg.budget {
+                sync_cleanup(&gpu)?;
+            }
             if !loaded.contains_key(&ck) {
                 let g = &batch[0].comp.g;
                 let need = Gpu::estimate(g, p_max, cfg.prune);
@@ -348,7 +360,7 @@ fn run(gpu: Gpu, cfg: &GpuConfig, q: &(Mutex<Queue>, Condvar), stats: &Mutex<Sta
                 // optional accelerator, reloaded in a second, where a component takes many:
                 // under LRU alone, Europe active evicted its 13 GB main component 608 times
                 // for small ones); then components, the least recently used first.
-                while used + need > cfg.budget {
+                while used.max(reserved(&gpu)) + need > cfg.budget {
                     if let Some(k) = ids.iter().min_by_key(|(_, t)| t.1).map(|(&k, _)| k) {
                         used -= ids.remove(&k).unwrap().0.bytes;
                     } else if let Some(k) = loaded.iter().min_by_key(|(_, l)| l.used_at).map(|(&k, _)| k) {
